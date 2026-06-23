@@ -64,6 +64,11 @@ const loadPositions = () => { try { return JSON.parse(localStorage.getItem(POS_K
 const savePositions = (l) => { try { localStorage.setItem(POS_KEY, JSON.stringify(l)); } catch {} };
 const newId = () => (typeof crypto!=="undefined" && crypto.randomUUID) ? crypto.randomUUID() : `p_${Math.random().toString(36).slice(2)}`;
 
+// ── AI INSIGHTS TOGGLE PERSISTENCE ───────────────────────────────────
+const AI_KEY  = "alphadesk:ai";
+const loadAI  = () => { try { return localStorage.getItem(AI_KEY) === "true"; } catch { return false; } };
+const saveAI  = (v) => { try { localStorage.setItem(AI_KEY, v ? "true" : "false"); } catch {} };
+
 // ── ALERT HISTORY (persistent, 30-day rolling window) ─────────────────
 const ALERT_KEY    = "alphadesk:alerts";
 const ALERT_MAX_MS = 30 * 24 * 60 * 60 * 1000;
@@ -310,7 +315,10 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled }) {
         <div style={{ display:"flex", alignItems:"center", gap:11 }}>
           <div style={{ textAlign:"right" }}>
             <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.06em" }}>SENTIMENT</div>
-            <div style={{ fontSize:11, color:scoreColor(d.score), fontWeight:600 }}>{scoreLabel(d.score)}</div>
+            <div style={{ fontSize:11, fontWeight:600,
+              color: aiEnabled && d.ai_error && d.ai_error !== "ai_disabled" ? C.amber : scoreColor(d.score) }}>
+              {aiEnabled && d.ai_error && d.ai_error !== "ai_disabled" ? "API error" : scoreLabel(d.score)}
+            </div>
           </div>
           <ScoreDial score={d.score}/>
         </div>
@@ -320,6 +328,18 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled }) {
         <span style={{ fontFamily:C.mono, fontSize:10, color:C.sub, background:C.panel2, padding:"2px 7px", borderRadius:4 }}>RSI {d.rsi}</span>
         {d.iv && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber, background:`${C.amber}14`, padding:"2px 7px", borderRadius:4 }}>IV {d.iv}%</span>}
         {d.play && <span style={{ fontFamily:C.mono, fontSize:10, color:C.up, background:`${C.up}14`, padding:"2px 7px", borderRadius:4 }}>PLAY ✓</span>}
+      </div>
+    </div>
+  );
+}
+
+function YahooNewsItem({ n }) {
+  return (
+    <div style={{ padding:"12px 0", borderBottom:`1px solid ${C.panel2}`, display:"flex", gap:10, alignItems:"flex-start" }}>
+      <div style={{ width:3, flexShrink:0, alignSelf:"stretch", background:C.line, borderRadius:2 }}/>
+      <div style={{ flex:1 }}>
+        <div style={{ fontSize:13, color:C.ink, lineHeight:1.5, marginBottom:4 }}>{n.headline}</div>
+        <div style={{ fontSize:10.5, color:C.faint, fontFamily:C.mono }}>{n.source} · {n.time}</div>
       </div>
     </div>
   );
@@ -359,20 +379,25 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
   );
   if (!d) return (
     <div style={{ maxWidth:860, margin:"0 auto", padding:"60px 26px", textAlign:"center", color:C.sub }}>
-      <Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/> <div style={{ marginTop:10 }}>Researching {ticker}…</div>
+      <Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/> <div style={{ marginTop:10 }}>{aiEnabled ? `Researching ${ticker} with AI…` : `Loading ${ticker}…`}</div>
     </div>
   );
+
+  const aiOk    = aiEnabled && d.score != null;
+  const aiFail  = aiEnabled && d.ai_error && d.ai_error !== "ai_disabled";
   const newsAvg = d.news?.length ? (d.news.reduce((s,n)=>s+n.score,0)/d.news.length).toFixed(1) : "—";
 
   return (
     <div style={{ maxWidth:860, margin:"0 auto", padding:"20px 26px 60px" }}>
       <button onClick={onBack} style={{ background:"none", border:"none", color:C.cold, cursor:"pointer", display:"flex", gap:5, alignItems:"center", marginBottom:18, fontSize:13 }}><ChevronLeft size={16}/> Watchlist</button>
+
+      {/* ── Header ─────────────────────────────────────────── */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:22 }}>
         <div>
           <div style={{ display:"flex", alignItems:"center", gap:11 }}>
             <span style={{ fontSize:28, fontWeight:800, color:C.ink, letterSpacing:"-0.02em" }}>{ticker}</span>
-            {d.signal==="hot" && <Flame size={20} color={C.hot}/>}
-            {d.signal==="cold" && <Snowflake size={20} color={C.cold}/>}
+            {aiOk && d.signal==="hot"  && <Flame     size={20} color={C.hot}/>}
+            {aiOk && d.signal==="cold" && <Snowflake size={20} color={C.cold}/>}
           </div>
           <div style={{ fontSize:13, color:C.sub, marginTop:3 }}>{d.name} · {d.sector} · {d.mktCap}</div>
         </div>
@@ -380,20 +405,35 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
           <Star size={14} fill={inWatchlist?C.amber:"none"}/> {inWatchlist?"Watching":"Add to Watchlist"}
         </button>
       </div>
+
+      {/* ── Price + Score row ──────────────────────────────── */}
       <div style={{ display:"flex", gap:14, marginBottom:22 }}>
         <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1 }}>
           <div style={{ fontFamily:C.mono, fontSize:30, color:C.ink, fontWeight:600 }}>${d.spot}</div>
           <div style={{ fontFamily:C.mono, fontSize:14, color:d.chg>=0?C.up:C.down, display:"flex", alignItems:"center", gap:4, marginTop:2 }}><Trend v={d.chg}/>{d.chg>=0?"+":""}{d.chg}% today</div>
         </div>
-        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:16 }}>
-          <ScoreDial score={d.score} size={56}/>
-          <div>
-            <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em" }}>ALPHADESK SCORE</div>
-            <div style={{ fontSize:17, color:scoreColor(d.score), fontWeight:700 }}>{scoreLabel(d.score)}</div>
-            <div style={{ fontSize:10.5, color:C.faint, marginTop:2 }}>0 bearish · 10 bullish</div>
+        {aiOk ? (
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:16 }}>
+            <ScoreDial score={d.score} size={56}/>
+            <div>
+              <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em" }}>ALPHADESK SCORE</div>
+              <div style={{ fontSize:17, color:scoreColor(d.score), fontWeight:700 }}>{scoreLabel(d.score)}</div>
+              <div style={{ fontSize:10.5, color:C.faint, marginTop:2 }}>0 bearish · 10 bullish</div>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:12, opacity:0.55 }}>
+            <ScoreDial score={null} size={56}/>
+            <div>
+              <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em" }}>ALPHADESK SCORE</div>
+              <div style={{ fontSize:13, color:C.faint, fontWeight:500, marginTop:2 }}>{aiFail ? "API error" : "AI Insights off"}</div>
+              <div style={{ fontSize:10.5, color:C.faint, marginTop:2 }}>enable in Settings →</div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* ── 60-Day Chart ───────────────────────────────────── */}
       {d.history && (
         <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px 12px", marginBottom:14 }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:10 }}>
@@ -403,34 +443,67 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
           <InteractiveChart data={d.history} dates={d.history_dates} color={d.chg>=0?C.up:C.down}/>
         </div>
       )}
-      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:14 }}>
-        <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:9 }}>Analysis</div>
-        <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.65 }}>{d.summary}</div>
-      </div>
+
+      {/* ── Technicals grid (always) ───────────────────────── */}
       {d.fundamentals && (
         <div style={{ display:"flex", gap:10, marginBottom:14, flexWrap:"wrap" }}>
-          {Object.entries({ "P/E":d.fundamentals.pe, "Rev Growth":d.fundamentals.revGrowth, "Gross Margin":d.fundamentals.grossMargin, "RSI":d.rsi, "IV":d.iv?`${d.iv}%`:"—" }).map(([k,v])=>(
-            <div key={k} style={{ flex:"1 1 120px", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:9, padding:"10px 12px" }}>
+          {Object.entries({
+            "P/E":          d.fundamentals.pe,
+            "Rev Growth":   d.fundamentals.revGrowth,
+            "Gross Margin": d.fundamentals.grossMargin,
+            "RSI":          d.rsi,
+            "IV":           d.iv ? `${d.iv}%` : "—",
+            "Earnings":     d.fundamentals.nextEarnings,
+          }).map(([k,v])=>(
+            <div key={k} style={{ flex:"1 1 110px", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:9, padding:"10px 12px" }}>
               <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em" }}>{k.toUpperCase()}</div>
               <div style={{ fontFamily:C.mono, fontSize:13.5, color:C.ink, marginTop:3 }}>{v}</div>
             </div>
           ))}
         </div>
       )}
+
+      {/* ── AI error banner ────────────────────────────────── */}
+      {aiFail && (
+        <div style={{ background:`${C.amber}12`, border:`1px solid ${C.amber}40`, borderRadius:10, padding:"11px 14px", marginBottom:14, fontSize:12.5, color:C.amber }}>
+          AI analysis unavailable{/credit|balance/i.test(d.ai_error) ? " — Anthropic API credits exhausted" : `: ${d.ai_error}`}. Technical data above is still live.
+        </div>
+      )}
+
+      {/* ── AI: Analysis + scored news + play (only when AI on) */}
+      {aiOk && d.summary && (
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:14 }}>
+          <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:9 }}>Analysis</div>
+          <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.65 }}>{d.summary}</div>
+        </div>
+      )}
+
+      {/* ── News ───────────────────────────────────────────── */}
       <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:14 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
           <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <Newspaper size={15} color={C.sub}/><span style={{ fontSize:13, fontWeight:600, color:C.ink }}>Top News</span>
-            <span style={{ fontSize:11, color:C.faint }}>— 3 most important, scored</span>
+            <Newspaper size={15} color={C.sub}/>
+            <span style={{ fontSize:13, fontWeight:600, color:C.ink }}>Top News</span>
+            {aiOk && <span style={{ fontSize:11, color:C.faint }}>— AI-scored</span>}
           </div>
-          <div style={{ display:"flex", alignItems:"center", gap:7 }}>
-            <span style={{ fontSize:10, color:C.faint }}>NEWS AVG</span>
-            <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:700, color:scoreColor(parseFloat(newsAvg)||0) }}>{newsAvg}</span>
-          </div>
+          {aiOk && d.news?.length > 0 && (
+            <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+              <span style={{ fontSize:10, color:C.faint }}>NEWS AVG</span>
+              <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:700, color:scoreColor(parseFloat(newsAvg)||0) }}>{newsAvg}</span>
+            </div>
+          )}
         </div>
-        {d.news?.map((n,i)=><NewsItem key={i} n={n}/>)}
+        {aiOk && d.news?.length > 0
+          ? d.news.map((n,i)=><NewsItem key={i} n={n}/>)
+          : (d.yahoo_news?.length > 0
+              ? d.yahoo_news.map((n,i)=><YahooNewsItem key={i} n={n}/>)
+              : <div style={{ fontSize:12.5, color:C.faint, padding:"6px 0" }}>No recent headlines found.</div>
+            )
+        }
       </div>
-      {d.play && (
+
+      {/* ── Suggested Play (AI only) ───────────────────────── */}
+      {aiOk && d.play && (
         <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}33`, borderRadius:12, padding:"16px 18px" }}>
           <div style={{ fontSize:10.5, color:C.up, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:9 }}>Suggested Play</div>
           <div style={{ fontFamily:C.mono, fontSize:15, color:C.ink, marginBottom:8 }}>${d.play.strike} {d.play.direction} · exp {d.play.expiry} · {d.play.dte}d · ~${d.play.premium}</div>
@@ -1389,7 +1462,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [margin, setMargin]       = useState(0);
   const [marginRate, setMarginRate] = useState(0);
   const [theme, setTheme]         = useState(loadTheme);
-  const [aiEnabled, setAiEnabled]       = useState(false);
+  const [aiEnabled, setAiEnabled]       = useState(loadAI);
   const [alertHistory, setAlertHistory] = useState(loadAlerts);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
@@ -1398,6 +1471,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveWL(watchlist); },[watchlist]);
   useEffect(()=>{ savePositions(positions); },[positions]);
   useEffect(()=>{ saveAlerts(alertHistory); },[alertHistory]);
+  useEffect(()=>{ saveAI(aiEnabled); },[aiEnabled]);
 
   // Primary sync: Supabase (logged-in) or server positions.json (anonymous)
   useEffect(()=>{

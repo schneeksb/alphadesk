@@ -66,6 +66,40 @@ def technicals(ticker):
               f"${mc/1e9:.0f}B"  if mc and mc>=1e9  else
               f"${mc/1e6:.0f}M"  if mc else "—")
 
+    # Next earnings date from info (list of Unix timestamps)
+    earnings_date = "—"
+    try:
+        ed_list = info.get("earningsDate") or []
+        if ed_list:
+            import datetime as _dt
+            earnings_date = _dt.datetime.utcfromtimestamp(ed_list[0]).strftime("%b %d")
+    except Exception:
+        pass
+
+    # Top-3 Yahoo Finance headlines — free, no AI cost
+    yahoo_news = []
+    try:
+        import time as _tm
+        _now = _tm.time()
+        for item in (tk.news or []):
+            headline = (item.get("title") or "").strip()
+            if not headline:
+                continue
+            ts     = item.get("providerPublishTime", 0)
+            age_m  = int((_now - ts) / 60) if ts else 9999
+            age_str = (f"{age_m}m ago"      if age_m < 60   else
+                       f"{age_m//60}h ago"  if age_m < 1440 else
+                       f"{age_m//1440}d ago")
+            yahoo_news.append({
+                "headline": headline,
+                "source":   item.get("publisher", "Yahoo Finance"),
+                "time":     age_str,
+            })
+            if len(yahoo_news) == 3:
+                break
+    except Exception:
+        pass
+
     return {
         "name":    info.get("longName") or info.get("shortName") or ticker,
         "sector":  info.get("sector", "—"),
@@ -76,11 +110,12 @@ def technicals(ticker):
         "iv":      round(iv, 1) if iv else None,
         "history": [round(float(x), 2) for x in c.tail(60).tolist()],
         "history_dates": [d.strftime("%Y-%m-%d") for d in c.tail(60).index],
+        "yahoo_news": yahoo_news,
         "fundamentals": {
             "pe":          safe(info.get("trailingPE"), lambda x: f"{x:.0f}x"),
             "revGrowth":   safe(info.get("revenueGrowth"), lambda x: f"{x*100:+.0f}% YoY"),
             "grossMargin": safe(info.get("grossMargins"), lambda x: f"{x*100:.0f}%"),
-            "nextEarnings":"—",
+            "nextEarnings": earnings_date,
         },
     }
 

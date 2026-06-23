@@ -140,12 +140,17 @@ def _json_safe(o):
 
 
 def research(ticker):
-    """Full research bundle for one ticker."""
+    """Full research bundle for one ticker. The AI layer is optional — if it fails
+    (e.g. no API credit), we still return live price/technicals so the card loads."""
     ticker = ticker.upper().strip()
     tech = technicals(ticker)
     if tech is None:
         return {"ticker": ticker, "error": "No market data found"}
-    ai = ai_analysis_and_news(ticker, tech)
+    try:
+        ai = ai_analysis_and_news(ticker, tech)
+    except Exception as e:
+        ai = {"score": None, "signal": "neutral", "summary": None,
+              "news": [], "play": None, "ai_error": str(e)}
     return _json_safe({"ticker": ticker, **tech, **ai})
 
 

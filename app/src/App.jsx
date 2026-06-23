@@ -132,7 +132,7 @@ async function savePositionsServer(positions) {
 
 // ── HELPERS ───────────────────────────────────────────────────────────
 const Trend = ({ v }) => v>0 ? <ArrowUpRight size={13}/> : v<0 ? <ArrowDownRight size={13}/> : <Minus size={13}/>;
-const scoreColor = (s) => s>=7 ? C.up : s>=4 ? C.amber : C.down;
+const scoreColor = (s) => s==null ? C.faint : s>=7 ? C.up : s>=4 ? C.amber : C.down;
 
 // Lightweight inline price sparkline from an array of closes
 function Sparkline({ data, w=120, h=32, color }) {
@@ -150,7 +150,7 @@ function Sparkline({ data, w=120, h=32, color }) {
     </svg>
   );
 }
-const scoreLabel = (s) => s>=7.5?"Bullish":s>=6?"Lean Bull":s>=4?"Neutral":s>=2.5?"Lean Bear":"Bearish";
+const scoreLabel = (s) => s==null?"AI off":s>=7.5?"Bullish":s>=6?"Lean Bull":s>=4?"Neutral":s>=2.5?"Lean Bear":"Bearish";
 
 // Hover-to-inspect price chart: crosshair + dot + floating price/date label
 function InteractiveChart({ data, dates, color, h=130 }) {
@@ -188,7 +188,8 @@ function InteractiveChart({ data, dates, color, h=130 }) {
 }
 
 function ScoreDial({ score, size=44 }) {
-  const col = scoreColor(score), pct = score/10, r = size/2-3;
+  const has = score!=null && !isNaN(score);
+  const col = scoreColor(score), pct = has ? score/10 : 0, r = size/2-3;
   return (
     <div style={{ position:"relative", width:size, height:size, flexShrink:0 }}>
       <svg width={size} height={size} style={{ transform:"rotate(-90deg)" }}>
@@ -196,7 +197,7 @@ function ScoreDial({ score, size=44 }) {
         <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={3}
           strokeDasharray={`${pct*2*Math.PI*r} ${2*Math.PI*r}`} strokeLinecap="round"/>
       </svg>
-      <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:C.mono, fontSize:size>40?13:11, fontWeight:700, color:col }}>{score?.toFixed(1)}</div>
+      <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:C.mono, fontSize:size>40?13:11, fontWeight:700, color:col }}>{has ? score.toFixed(1) : "—"}</div>
     </div>
   );
 }

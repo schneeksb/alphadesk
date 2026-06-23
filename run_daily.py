@@ -167,6 +167,8 @@ def layer1_data_valuation(portfolio=None):
 
 def layer2_portfolio_analytics(positions):
     print("\n[L2] Portfolio analytics...")
+    # Fast-path cache: well-known tickers skip an API call.
+    # Any ticker not in this map gets a live yfinance sector lookup (if portfolio is small).
     sector_map = {"NVDA":"Technology","MSFT":"Technology","META":"Communication",
                   "PLTR":"Technology","SOFI":"Financials","AMD":"Technology"}
     total_val   = sum(p["current_val"] for p in positions)
@@ -175,11 +177,21 @@ def layer2_portfolio_analytics(positions):
     total_theta = sum((p.get("theta") or 0)*p["qty"]*(1 if p["type"]=="SHARES" else 100) for p in positions)
     total_delta = sum((p.get("delta") or 0)*p["qty"]*(1 if p["type"]=="SHARES" else 100) for p in positions)
     sector_alloc = {}
+    # Only do live lookups for small portfolios to avoid excessive API calls.
+    do_live_lookup = len(positions) < 20
     for p in positions:
-        s = sector_map.get(p["ticker"],"Other")
-        sector_alloc[s] = sector_alloc.get(s,0) + p["current_val"]
+        ticker = p["ticker"]
+        if ticker not in sector_map and do_live_lookup:
+            try:
+                fetched = yf.Ticker(ticker).info.get("sector", "Other") or "Other"
+                sector_map[ticker] = fetched  # cache so duplicate tickers don't re-fetch
+            except Exception:
+                sector_map[ticker] = "Other"
+        s = sector_map.get(ticker, "Other")
+        sector_alloc[s] = sector_alloc.get(s, 0) + p["current_val"]
     return {"total_value": round(total_val,2), "total_cost": round(total_cost,2),
-            "total_pnl": round(total_pnl,2), "total_pnl_pct": round(total_pnl/total_cost,4),
+            "total_pnl": round(total_pnl,2),
+            "total_pnl_pct": round(total_pnl/total_cost,4) if total_cost else 0,
             "daily_theta": round(total_theta,2), "net_delta": round(total_delta,2),
             "sector_alloc": {k: round(v,2) for k,v in sector_alloc.items()}}
 

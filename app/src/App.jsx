@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, TrendingUp, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap } from "lucide-react";
+import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap } from "lucide-react";
 import { authEnabled, supabase } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
 
@@ -1213,6 +1213,8 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
   const [loading, setLoading]   = useState(false);
   const [err, setErr]           = useState(null);
 
+  const hasRun = useRef(false);
+
   const run = useCallback(async () => {
     if (!aiEnabled || !data?.positions?.length) return;
     setLoading(true); setErr(null);
@@ -1227,7 +1229,16 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
     finally { setLoading(false); }
   }, [aiEnabled, data, cash, profile]);
 
-  useEffect(()=>{ if (aiEnabled && data?.positions?.length) run(); }, [aiEnabled, data?.positions?.length]);
+  // Only auto-run once when positions first become non-empty — don't re-run on every
+  // valuation refresh (which fires whenever individual position values update).
+  useEffect(()=>{
+    if (aiEnabled && data?.positions?.length && !hasRun.current) {
+      hasRun.current = true;
+      run();
+    }
+  }, [aiEnabled, data?.positions?.length]);
+  // Reset hasRun when AI is toggled off so turning it back on re-triggers the analysis.
+  useEffect(()=>{ if (!aiEnabled) hasRun.current = false; }, [aiEnabled]);
 
   const healthColor = (h) => h==="Strong"?C.up:h==="Balanced"?C.cold:h==="At Risk"?C.amber:C.down;
 

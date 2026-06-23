@@ -793,6 +793,9 @@ JSON ONLY:
 
     @app.get("/portfolio")
     def portfolio_endpoint():
+        # NOTE: This endpoint is for the standalone monitor (run_daily.py) and uses the
+        # hardcoded PORTFOLIO constant. The frontend uses POST /value instead, which accepts
+        # user-entered positions. This endpoint is NOT called by App.jsx.
         # Live portfolio: positions + Greeks + analytics + alerts (reuses run_daily.py).
         def produce():
             try:

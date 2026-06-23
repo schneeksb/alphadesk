@@ -148,27 +148,7 @@ async function fetchValue(positions, margin = 0, margin_rate = 0) {
     body: JSON.stringify({ positions, margin, margin_rate }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
-  // Debug: log each position's valuation so we can see what the backend computed
-  if (data.positions) {
-    data.positions.forEach(p => {
-      if (p.type !== "SHARES") {
-        console.log(
-          `[AlphaDesk P&L] ${p.ticker} $${p.strike} ${p.type} exp ${p.expiry}`,
-          `| stored cost_basis: $${p.cost_basis}`,
-          `| current_val: $${p.current_val}`,
-          `| pnl: $${p.pnl}`,
-          `| pnl_pct: ${((p.pnl_pct||0)*100).toFixed(1)}%`,
-          `| iv: ${p.iv}`,
-          `| dte: ${p.dte}`,
-          `| spot: $${p.spot}`
-        );
-      }
-    });
-    if (data.errored?.length) console.warn("[AlphaDesk] errored positions:", data.errored);
-    if (data.expired?.length) console.log("[AlphaDesk] expired positions:", data.expired);
-  }
-  return data;
+  return r.json();
 }
 async function fetchSettings() {
   const r = await fetch(`${API}/settings`);

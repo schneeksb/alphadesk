@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, TrendingUp, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut } from "lucide-react";
-import { authEnabled } from "./lib/supabase";
+import { authEnabled, supabase } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
+
+// Module-level flag updated reactively — avoids prop-drilling into child components
+let _aiEnabled = false;
 
 /* ════════════════════════════════════════════════════════════════════
    AlphaDesk — LIVE app  (run locally against research.py backend)
@@ -65,7 +68,7 @@ const newId = () => (typeof crypto!=="undefined" && crypto.randomUUID) ? crypto.
 
 // ── BACKEND CALLS ─────────────────────────────────────────────────────
 async function fetchResearch(ticker) {
-  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}`);
+  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${_aiEnabled ? 1 : 0}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -130,6 +133,18 @@ async function savePositionsServer(positions) {
       body: JSON.stringify({ positions }),
     });
   } catch { /* offline / backend down — localStorage still holds the copy */ }
+}
+
+// ── SUPABASE CROSS-DEVICE SYNC ────────────────────────────────────────
+async function sbLoad(uid) {
+  if (!supabase || !uid) return null;
+  const { data, error } = await supabase.from("portfolios").select("data").eq("user_id", uid).single();
+  if (error || !data) return null;
+  return data.data;
+}
+async function sbSave(uid, payload) {
+  if (!supabase || !uid) return;
+  await supabase.from("portfolios").upsert({ user_id: uid, data: payload, updated_at: new Date().toISOString() });
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────
@@ -1180,7 +1195,7 @@ function PayoffModal({ position: p, onClose }) {
 }
 
 // ── SETTINGS (theme + account) ────────────────────────────────────────
-function SettingsMenu({ theme, setTheme }) {
+function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled }) {
   const [open, setOpen] = useState(false);
   const session = useSession();
   const email = session?.user?.email;
@@ -1190,12 +1205,25 @@ function SettingsMenu({ theme, setTheme }) {
       {open && (
         <>
           <div onClick={()=>setOpen(false)} style={{ position:"fixed", inset:0, zIndex:40 }}/>
-          <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:224, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.4)", zIndex:50, padding:"12px 14px" }}>
+          <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:240, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.4)", zIndex:50, padding:"12px 14px" }}>
             <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:9 }}>APPEARANCE</div>
             <div style={{ display:"flex", gap:6, background:C.panel2, borderRadius:9, padding:4, border:`1px solid ${C.line}` }}>
               {[["light","Light",Sun],["dark","Dark",Moon]].map(([id,label,Icon])=>(
                 <button key={id} onClick={()=>setTheme(id)} style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6, padding:"7px 0", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:theme===id?C.line:"transparent", color:theme===id?C.ink:C.sub }}><Icon size={13}/> {label}</button>
               ))}
+            </div>
+            <div style={{ marginTop:14, paddingTop:12, borderTop:`1px solid ${C.line}` }}>
+              <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:9 }}>AI FEATURES</div>
+              <label style={{ display:"flex", alignItems:"center", gap:9, cursor:"pointer" }}>
+                <div onClick={()=>setAiEnabled(v=>!v)}
+                  style={{ width:32, height:18, borderRadius:9, background:aiEnabled?C.cold:C.line, position:"relative", transition:"background .2s", flexShrink:0, cursor:"pointer" }}>
+                  <div style={{ position:"absolute", top:2, left:aiEnabled?14:2, width:14, height:14, borderRadius:"50%", background:"#fff", transition:"left .2s", boxShadow:"0 1px 3px rgba(0,0,0,0.2)" }}/>
+                </div>
+                <div>
+                  <div style={{ fontSize:12, fontWeight:600, color:C.ink }}>AI Sentiment</div>
+                  <div style={{ fontSize:11, color:C.faint, marginTop:1 }}>{aiEnabled ? "On — using Anthropic credits" : "Off — scores hidden"}</div>
+                </div>
+              </label>
             </div>
             {authEnabled && session && (
               <div style={{ marginTop:14, paddingTop:12, borderTop:`1px solid ${C.line}` }}>
@@ -1224,30 +1252,56 @@ export default function AlphaDesk() {
   const [margin, setMargin]       = useState(0);
   const [marginRate, setMarginRate] = useState(0);
   const [theme, setTheme]         = useState(loadTheme);
+  const [aiEnabled, setAiEnabled] = useState(false);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
+  // Keep module-level flag in sync so fetchResearch (called from child components) sees it
+  useEffect(()=>{ _aiEnabled = aiEnabled; }, [aiEnabled]);
+
+  const session = useSession();
+  const userId  = session?.user?.id ?? null;
+
+  // localStorage fallback (instant load on first paint)
   useEffect(()=>{ saveWL(watchlist); },[watchlist]);
   useEffect(()=>{ savePositions(positions); },[positions]);
 
-  // One-time sync: server is the source of truth across browsers.
-  // If the server has positions, adopt them; if it's empty but this browser has some
-  // (e.g. from before sync existed), push them up to migrate.
+  // Primary sync: Supabase (logged-in) or server positions.json (anonymous)
   useEffect(()=>{
-    fetchPositions()
-      .then(srv=>{
-        const sp = srv.positions || [];
-        if (sp.length) setPositions(sp);
-        else if (positions.length) savePositionsServer(positions);
-      })
-      .catch(()=>{});
+    if (userId) {
+      // Logged-in path: load full state from user's private Supabase row
+      sbLoad(userId).then(data=>{
+        if (!data) {
+          // New user row — push up whatever we have locally
+          sbSave(userId, { positions, watchlist, margin, marginRate, theme, aiEnabled });
+          return;
+        }
+        if (data.positions?.length)  setPositions(data.positions);
+        if (data.watchlist?.length)  setWatchlist(data.watchlist);
+        if (data.margin    != null)  setMargin(data.margin);
+        if (data.marginRate != null) setMarginRate(data.marginRate);
+        if (data.theme)              { setTheme(data.theme); applyTheme(data.theme); }
+        if (data.aiEnabled != null)  { setAiEnabled(data.aiEnabled); _aiEnabled = data.aiEnabled; }
+      }).catch(()=>{});
+    } else {
+      // Anonymous path: fall back to server positions.json + settings.json
+      fetchPositions().then(srv=>{ const sp=srv.positions||[]; if(sp.length) setPositions(sp); else if(positions.length) savePositionsServer(positions); }).catch(()=>{});
+      fetchSettings().then(s=>{ const st=s.settings||{}; if(st.margin!=null) setMargin(st.margin); if(st.margin_rate!=null) setMarginRate(st.margin_rate); }).catch(()=>{});
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[]);
+  },[userId]);
 
-  // Load margin settings (server is source of truth, syncs across browsers).
+  // Save full state to Supabase whenever anything changes (debounced 1s)
+  const sbTimer = useRef(null);
+  const sbState = useRef({});
+  sbState.current = { positions, watchlist, margin, marginRate, theme, aiEnabled };
   useEffect(()=>{
-    fetchSettings().then(s=>{ const st=s.settings||{}; if(st.margin!=null)setMargin(st.margin); if(st.margin_rate!=null)setMarginRate(st.margin_rate); }).catch(()=>{});
-  },[]);
-  const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); saveSettingsServer({ margin:m, margin_rate:r }); };
+    if (!userId) return;
+    clearTimeout(sbTimer.current);
+    sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
+    return ()=>clearTimeout(sbTimer.current);
+  },[positions, watchlist, margin, marginRate, theme, aiEnabled, userId]);
+
+  const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); if(!userId) saveSettingsServer({ margin:m, margin_rate:r }); };
 
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
@@ -1311,7 +1365,7 @@ export default function AlphaDesk() {
             ))}
           </div>
           <AlertsBell alerts={portfolio?.alerts} loading={pfLoading}/>
-          <SettingsMenu theme={theme} setTheme={setTheme}/>
+          <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled}/>
         </div>
       </div>
       <MacroRibbon/>

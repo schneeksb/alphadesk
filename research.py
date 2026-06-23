@@ -139,19 +139,23 @@ def _json_safe(o):
     return o
 
 
-def research(ticker):
-    """Full research bundle for one ticker. The AI layer is optional — if it fails
-    (e.g. no API credit), we still return live price/technicals so the card loads."""
+def research(ticker, ai=False):
+    """Full research bundle for one ticker. AI layer only runs when ai=True.
+    Always returns price/technicals so the card loads even when AI is off."""
     ticker = ticker.upper().strip()
     tech = technicals(ticker)
     if tech is None:
         return {"ticker": ticker, "error": "No market data found"}
+    if not ai:
+        stub = {"score": None, "signal": "neutral", "summary": None,
+                "news": [], "play": None, "ai_error": "ai_disabled"}
+        return _json_safe({"ticker": ticker, **tech, **stub})
     try:
-        ai = ai_analysis_and_news(ticker, tech)
+        ai_data = ai_analysis_and_news(ticker, tech)
     except Exception as e:
-        ai = {"score": None, "signal": "neutral", "summary": None,
-              "news": [], "play": None, "ai_error": str(e)}
-    return _json_safe({"ticker": ticker, **tech, **ai})
+        ai_data = {"score": None, "signal": "neutral", "summary": None,
+                   "news": [], "play": None, "ai_error": str(e)}
+    return _json_safe({"ticker": ticker, **tech, **ai_data})
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -287,9 +291,9 @@ try:
         return {"ok": True, "time": datetime.datetime.now().isoformat()}
 
     @app.get("/research")
-    def research_endpoint(ticker: str):
+    def research_endpoint(ticker: str, ai: int = 0):
         t = ticker.upper().strip()
-        return _cached(f"research:{t}", lambda: research(t))
+        return _cached(f"research:{t}:ai{ai}", lambda: research(t, ai=bool(ai)))
 
     @app.get("/sectors")
     def sectors_endpoint():

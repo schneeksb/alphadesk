@@ -64,6 +64,47 @@ const loadPositions = () => { try { return JSON.parse(localStorage.getItem(POS_K
 const savePositions = (l) => { try { localStorage.setItem(POS_KEY, JSON.stringify(l)); } catch {} };
 const newId = () => (typeof crypto!=="undefined" && crypto.randomUUID) ? crypto.randomUUID() : `p_${Math.random().toString(36).slice(2)}`;
 
+// ── ALERT HISTORY (persistent, 30-day rolling window) ─────────────────
+const ALERT_KEY    = "alphadesk:alerts";
+const ALERT_MAX_MS = 30 * 24 * 60 * 60 * 1000;
+const loadAlerts   = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ALERT_KEY)) || [];
+    const cut = Date.now() - ALERT_MAX_MS;
+    return raw.filter(a => new Date(a.ts).getTime() > cut);
+  } catch { return []; }
+};
+const saveAlerts = (l) => { try { localStorage.setItem(ALERT_KEY, JSON.stringify(l)); } catch {} };
+const alertTimeAgo = (ts) => {
+  const m = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+};
+function mergeAlerts(existing, fresh) {
+  if (!fresh?.length) return existing;
+  const today = new Date().toISOString().slice(0, 10);
+  const seen  = new Set(existing.map(a => `${a.ticker}:${a.type}:${(a.ts||"").slice(0,10)}`));
+  const now   = new Date().toISOString();
+  const added = fresh
+    .filter(a => !seen.has(`${a.ticker}:${a.type}:${today}`))
+    .map(a => ({
+      id:       newId(),
+      ts:       now,
+      severity: a.severity === "yellow" ? "amber" : (a.severity || "amber"),
+      ticker:   a.ticker,
+      type:     a.type,
+      message:  a.message,
+      read:     false,
+      link:     a.ticker === "MACRO" ? "macro" : a.ticker === "PORTFOLIO" ? "portfolio" : `ticker:${a.ticker}`,
+    }));
+  if (!added.length) return existing;
+  const cut = Date.now() - ALERT_MAX_MS;
+  return [...added, ...existing].filter(a => new Date(a.ts).getTime() > cut);
+}
+
 // ── BACKEND CALLS ─────────────────────────────────────────────────────
 async function fetchResearch(ticker, ai = false) {
   const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${ai ? 1 : 0}`);
@@ -605,42 +646,135 @@ function MacroRibbon() {
   );
 }
 
-// ── ALERTS BELL (header badge + dropdown panel) ───────────────────────
-function AlertsBell({ alerts, loading }) {
+// ── ALERTS BELL — slide-out drawer, persistent history, read/unread ────
+function AlertsBell({ alertHistory = [], setAlertHistory, onNavigate }) {
   const [open, setOpen] = useState(false);
-  const list = alerts || [];
-  const reds = list.filter(a=>a.severity==="red").length;
-  const dot  = reds>0 ? C.down : (list.length ? C.amber : C.faint);
+  const unread = alertHistory.filter(a => !a.read).length;
+
+  const markRead = (id) => setAlertHistory(prev => {
+    const next = prev.map(a => a.id === id ? { ...a, read: true } : a);
+    saveAlerts(next); return next;
+  });
+  const markAllRead = () => setAlertHistory(prev => {
+    const next = prev.map(a => ({ ...a, read: true }));
+    saveAlerts(next); return next;
+  });
+  const handleClick = (a) => {
+    markRead(a.id);
+    setOpen(false);
+    onNavigate(a.link);
+  };
+  const sevCol = (s) => s === "red" ? C.down : s === "green" ? C.up : C.amber;
+
   return (
-    <div style={{ position:"relative", flexShrink:0 }}>
-      <button onClick={()=>setOpen(o=>!o)} title="Alerts"
-        style={{ position:"relative", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 9px", color:open?C.ink:C.sub, cursor:"pointer", display:"flex" }}>
-        <Bell size={15}/>
-        {list.length>0 && <span style={{ position:"absolute", top:-6, right:-6, background:dot, color:"#06080d", fontSize:9, fontWeight:700, borderRadius:8, padding:"1px 5px", minWidth:15, textAlign:"center", lineHeight:1.4 }}>{list.length}</span>}
-      </button>
+    <>
+      <div style={{ position:"relative", flexShrink:0 }}>
+        <button onClick={()=>setOpen(o=>!o)} title="Alerts"
+          style={{ position:"relative", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 9px", color:open?C.ink:C.sub, cursor:"pointer", display:"flex" }}>
+          <Bell size={15}/>
+          {unread > 0 && (
+            <span style={{ position:"absolute", top:-6, right:-6, background:C.down, color:"#fff", fontSize:9, fontWeight:700, borderRadius:8, padding:"1px 5px", minWidth:15, textAlign:"center", lineHeight:1.4 }}>
+              {unread > 99 ? "99+" : unread}
+            </span>
+          )}
+        </button>
+      </div>
+
       {open && (
         <>
-          <div onClick={()=>setOpen(false)} style={{ position:"fixed", inset:0, zIndex:40 }}/>
-          <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:300, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.55)", zIndex:50, overflow:"hidden", maxHeight:380, overflowY:"auto" }}>
-            <div style={{ padding:"11px 14px", fontSize:12, fontWeight:700, color:C.ink, borderBottom:`1px solid ${C.line}` }}>Alerts {list.length>0 && <span style={{ color:C.faint, fontWeight:400 }}>· {list.length}</span>}</div>
-            {loading && !list.length ? <div style={{ padding:"18px 14px", fontSize:12, color:C.faint, textAlign:"center" }}><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> scanning…</div> :
-             list.length===0 ? <div style={{ padding:"20px 14px", fontSize:12, color:C.faint, textAlign:"center" }}>No active alerts</div> :
-             list.map((a,i)=>{
-               const col = a.severity==="red"?C.down:a.severity==="green"?C.up:C.amber;
-               return (
-                 <div key={i} style={{ display:"flex", gap:10, padding:"10px 14px", borderBottom:`1px solid ${C.panel2}` }}>
-                   <div style={{ width:3, borderRadius:2, background:col, flexShrink:0 }}/>
-                   <div>
-                     <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.45 }}>{a.message}</div>
-                     <div style={{ fontSize:9.5, color:C.faint, fontFamily:C.mono, marginTop:3 }}>{a.ticker} · {a.type}</div>
-                   </div>
-                 </div>
-               );
-             })}
+          {/* backdrop */}
+          <div onClick={()=>setOpen(false)}
+            style={{ position:"fixed", inset:0, zIndex:55, background:"rgba(0,0,0,0.18)" }}/>
+
+          {/* drawer */}
+          <div style={{ position:"fixed", top:0, right:0, bottom:0, width:370,
+            background:C.panel, borderLeft:`1px solid ${C.line}`,
+            boxShadow:"-16px 0 48px rgba(0,0,0,0.22)", zIndex:60,
+            display:"flex", flexDirection:"column" }}>
+
+            {/* header */}
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+              padding:"16px 18px", borderBottom:`1px solid ${C.line}`, flexShrink:0 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <Bell size={15} color={C.ink}/>
+                <span style={{ fontWeight:700, fontSize:14, color:C.ink }}>Alerts</span>
+                {unread > 0 && (
+                  <span style={{ background:C.down, color:"#fff", fontSize:10, fontWeight:700, borderRadius:6, padding:"1px 7px" }}>
+                    {unread} new
+                  </span>
+                )}
+              </div>
+              <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+                {unread > 0 && (
+                  <button onClick={markAllRead}
+                    style={{ fontSize:11, color:C.cold, background:"none", border:"none", cursor:"pointer", fontWeight:600 }}>
+                    Mark all read
+                  </button>
+                )}
+                <button onClick={()=>setOpen(false)}
+                  style={{ background:"none", border:"none", color:C.sub, cursor:"pointer", display:"flex" }}>
+                  <X size={16}/>
+                </button>
+              </div>
+            </div>
+
+            {/* list */}
+            <div style={{ flex:1, overflowY:"auto" }}>
+              {alertHistory.length === 0 ? (
+                <div style={{ padding:"48px 20px", textAlign:"center", color:C.faint }}>
+                  <Bell size={30} style={{ opacity:0.25, display:"block", margin:"0 auto 12px" }}/>
+                  <div style={{ fontSize:13 }}>No alerts yet</div>
+                  <div style={{ fontSize:11, marginTop:6 }}>Stop hits, portfolio signals, and macro warnings appear here.</div>
+                </div>
+              ) : alertHistory.map(a => {
+                const col = sevCol(a.severity);
+                return (
+                  <div key={a.id} onClick={()=>handleClick(a)}
+                    style={{ display:"flex", gap:12, padding:"12px 18px",
+                      borderBottom:`1px solid ${C.line}`,
+                      background: a.read ? "transparent" : `${C.cold}08`,
+                      cursor:"pointer" }}
+                    onMouseEnter={e=>e.currentTarget.style.background=C.panel2}
+                    onMouseLeave={e=>e.currentTarget.style.background= a.read?"transparent":`${C.cold}08`}>
+                    <div style={{ width:3, borderRadius:2, background:col, flexShrink:0, alignSelf:"stretch", minHeight:36 }}/>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
+                        <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.45,
+                          fontWeight: a.read ? 400 : 600 }}>
+                          {a.message}
+                        </div>
+                        {!a.read && <div style={{ width:7, height:7, borderRadius:"50%", background:C.cold, flexShrink:0, marginTop:5 }}/>}
+                      </div>
+                      <div style={{ display:"flex", gap:6, marginTop:5, alignItems:"center", flexWrap:"wrap" }}>
+                        <span style={{ fontSize:10, color:col, fontWeight:700, letterSpacing:"0.04em" }}>{a.ticker}</span>
+                        <span style={{ fontSize:10, color:C.faint }}>·</span>
+                        <span style={{ fontSize:10, color:C.faint }}>{a.type.replace(/_/g," ")}</span>
+                        <span style={{ fontSize:10, color:C.faint, marginLeft:"auto", whiteSpace:"nowrap" }}>{alertTimeAgo(a.ts)}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* footer */}
+            <div style={{ padding:"10px 18px", borderTop:`1px solid ${C.line}`, flexShrink:0,
+              display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontSize:11, color:C.faint }}>
+                {alertHistory.length} alert{alertHistory.length!==1?"s":""} · last 30 days
+              </span>
+              {alertHistory.some(a=>a.read) && (
+                <button onClick={()=>setAlertHistory(prev=>{
+                  const next=prev.filter(a=>!a.read); saveAlerts(next); return next;
+                })} style={{ fontSize:11, color:C.faint, background:"none", border:"none", cursor:"pointer" }}>
+                  Clear read
+                </button>
+              )}
+            </div>
           </div>
         </>
       )}
-    </div>
+    </>
   );
 }
 
@@ -1255,13 +1389,15 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [margin, setMargin]       = useState(0);
   const [marginRate, setMarginRate] = useState(0);
   const [theme, setTheme]         = useState(loadTheme);
-  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiEnabled, setAiEnabled]       = useState(false);
+  const [alertHistory, setAlertHistory] = useState(loadAlerts);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
 
   // localStorage fallback (instant load on first paint)
   useEffect(()=>{ saveWL(watchlist); },[watchlist]);
   useEffect(()=>{ savePositions(positions); },[positions]);
+  useEffect(()=>{ saveAlerts(alertHistory); },[alertHistory]);
 
   // Primary sync: Supabase (logged-in) or server positions.json (anonymous)
   useEffect(()=>{
@@ -1278,7 +1414,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.margin    != null)  setMargin(data.margin);
         if (data.marginRate != null) setMarginRate(data.marginRate);
         if (data.theme)              { setTheme(data.theme); applyTheme(data.theme); }
-        if (data.aiEnabled != null)  { setAiEnabled(data.aiEnabled); _aiEnabled = data.aiEnabled; }
+        if (data.aiEnabled != null)    setAiEnabled(data.aiEnabled);
+        if (data.alertHistory?.length) setAlertHistory(data.alertHistory);
       }).catch(()=>{});
     } else {
       // Anonymous path: fall back to server positions.json + settings.json
@@ -1291,13 +1428,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, margin, marginRate, theme, aiEnabled };
+  sbState.current = { positions, watchlist, margin, marginRate, theme, aiEnabled, alertHistory };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, margin, marginRate, theme, aiEnabled, userId]);
+  },[positions, watchlist, margin, marginRate, theme, aiEnabled, alertHistory, userId]);
 
   const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); if(!userId) saveSettingsServer({ margin:m, margin_rate:r }); };
 
@@ -1310,6 +1447,18 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Re-value when positions' CONTENTS or the margin inputs change — not when merely reordered.
   const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis,p.stop].join("|")).sort().join(",");
   useEffect(()=>{ valuePortfolio(positionsRef.current, margin, marginRate); },[valSig, margin, marginRate, valuePortfolio]);
+
+  // Merge portfolio + stop-hit alerts into persistent history whenever valuation updates
+  useEffect(()=>{
+    if (!portfolio) return;
+    const stopAlerts = (portfolio.positions||[])
+      .filter(p=>p.stop_hit)
+      .map(p=>({ ticker:p.ticker, type:"STOP_HIT", severity:"red",
+        message:`${p.ticker} hit stop — spot $${(p.spot||0).toFixed(2)} ≤ stop $${(p.stop||0).toFixed(2)}` }));
+    const fresh = [...(portfolio.alerts||[]), ...stopAlerts];
+    if (!fresh.length) return;
+    setAlertHistory(prev => mergeAlerts(prev, fresh));
+  },[portfolio]);
 
   // Every change updates state AND persists to the server so other browsers stay in sync.
   const commit         = (next)=>{ setPositions(next); savePositionsServer(next); };
@@ -1334,12 +1483,21 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const removeTicker = (t)=> setWatchlist(w=>w.filter(x=>x!==t));
   const toggleWatch  = (t)=> setWatchlist(w=>w.includes(t)?w.filter(x=>x!==t):[...w,t]);
   const runSearch    = ()=>{ const T=query.toUpperCase().trim(); if(T) setDetail(T); };
+  const onAlertNavigate = (link) => {
+    if (!link) return;
+    if (link.startsWith("ticker:")) { setDetail(link.slice(7)); }
+    else if (link === "portfolio")  { setDetail(null); setTab("portfolio"); }
+    else if (link === "macro")      { setDetail(null); setTab("brief"); }
+  };
   const [wlDrag, setWlDrag] = useState(null);
   const reorderWatch = (from, to)=> setWatchlist(w=>{ const a=[...w]; const [m]=a.splice(from,1); a.splice(to,0,m); return a; });
 
   if (detail) return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif" }}>
       <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled}/>
+      <div style={{ position:"fixed", top:14, right:20, zIndex:30 }}>
+        <AlertsBell alertHistory={alertHistory} setAlertHistory={setAlertHistory} onNavigate={onAlertNavigate}/>
+      </div>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
@@ -1362,7 +1520,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               <button key={id} onClick={()=>setTab(id)} style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500, background:tab===id?C.line:"transparent", color:tab===id?C.ink:C.sub }}>{label}</button>
             ))}
           </div>
-          <AlertsBell alerts={portfolio?.alerts} loading={pfLoading}/>
+          <AlertsBell alertHistory={alertHistory} setAlertHistory={setAlertHistory} onNavigate={onAlertNavigate}/>
           <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled} userEmail={userEmail}/>
         </div>
       </div>

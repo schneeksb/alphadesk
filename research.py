@@ -98,6 +98,15 @@ def technicals(ticker):
     except Exception:
         pass
 
+    # Analyst consensus (free from yfinance info)
+    analyst = {
+        "targetMean": info.get("targetMeanPrice"),
+        "targetHigh": info.get("targetHighPrice"),
+        "targetLow":  info.get("targetLowPrice"),
+        "count":      info.get("numberOfAnalystOpinions"),
+        "recKey":     info.get("recommendationKey"),
+    }
+
     # Top-3 Yahoo Finance RSS headlines — stdlib only, no AI cost
     yahoo_news = []
     try:
@@ -150,6 +159,7 @@ def technicals(ticker):
         "daysToEarn": days_to_earn,
         "history":      [round(float(x), 2) for x in c.tail(60).tolist()],
         "history_dates":[d.strftime("%Y-%m-%d") for d in c.tail(60).index],
+        "analyst":    analyst,
         "yahoo_news": yahoo_news,
         "fundamentals": {
             "pe":          safe(info.get("trailingPE"),    lambda x: f"{x:.0f}x"),
@@ -270,6 +280,25 @@ def _cached(key, producer):
     _CACHE[key] = (now, val)
     return val
 
+def _cached_swr(key, producer, ttl=600, stale_ttl=7200):
+    """Return cached value immediately; refresh in background thread if stale."""
+    import threading
+    now = _time.time()
+    hit = _CACHE.get(key)
+    if hit:
+        age = now - hit[0]
+        if age < ttl:
+            return hit[1]
+        if age < stale_ttl:
+            def _bg():
+                try: _CACHE[key] = (_time.time(), producer())
+                except Exception: pass
+            threading.Thread(target=_bg, daemon=True).start()
+            return hit[1]
+    val = producer()
+    _CACHE[key] = (now, val)
+    return val
+
 
 # ── PERSISTENT POSITIONS (server-side store so the portfolio syncs across browsers) ──
 _POSITIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "positions.json")
@@ -337,6 +366,39 @@ def _stop_recommendation(pos_type, spot):
     return round(spot * (1 - band), 2)
 
 
+# ── ECONOMIC CALENDAR (hardcoded 2026 — update annually) ────────────────
+_ECO_CALENDAR = [
+    {"date":"2026-06-26","event":"PCE Inflation","type":"pce","impact":"high","detail":"Core PCE — Fed's preferred inflation gauge"},
+    {"date":"2026-07-10","event":"Jobs Report","type":"nfp","impact":"high","detail":"Non-Farm Payrolls + unemployment rate"},
+    {"date":"2026-07-15","event":"CPI Inflation","type":"cpi","impact":"high","detail":"Consumer Price Index — core + headline"},
+    {"date":"2026-07-17","event":"Monthly OPEX","type":"opex","impact":"medium","detail":"Monthly options expiration"},
+    {"date":"2026-07-30","event":"FOMC Decision","type":"fomc","impact":"high","detail":"Federal Reserve rate decision + press conference"},
+    {"date":"2026-07-31","event":"PCE Inflation","type":"pce","impact":"high","detail":"Core PCE — Fed's preferred inflation gauge"},
+    {"date":"2026-08-07","event":"Jobs Report","type":"nfp","impact":"high","detail":"Non-Farm Payrolls + unemployment rate"},
+    {"date":"2026-08-13","event":"CPI Inflation","type":"cpi","impact":"high","detail":"Consumer Price Index — core + headline"},
+    {"date":"2026-08-21","event":"Monthly OPEX","type":"opex","impact":"medium","detail":"Monthly options expiration"},
+    {"date":"2026-08-28","event":"PCE Inflation","type":"pce","impact":"high","detail":"Core PCE — Fed's preferred inflation gauge"},
+    {"date":"2026-09-04","event":"Jobs Report","type":"nfp","impact":"high","detail":"Non-Farm Payrolls + unemployment rate"},
+    {"date":"2026-09-11","event":"CPI Inflation","type":"cpi","impact":"high","detail":"Consumer Price Index — core + headline"},
+    {"date":"2026-09-17","event":"FOMC Decision","type":"fomc","impact":"high","detail":"Federal Reserve rate decision + press conference"},
+    {"date":"2026-09-18","event":"Quarterly OPEX","type":"opex","impact":"high","detail":"Quarterly options + futures expiration (triple witching)"},
+    {"date":"2026-09-25","event":"PCE Inflation","type":"pce","impact":"high","detail":"Core PCE — Fed's preferred inflation gauge"},
+    {"date":"2026-10-02","event":"Jobs Report","type":"nfp","impact":"high","detail":"Non-Farm Payrolls + unemployment rate"},
+    {"date":"2026-10-14","event":"CPI Inflation","type":"cpi","impact":"high","detail":"Consumer Price Index — core + headline"},
+    {"date":"2026-10-16","event":"Monthly OPEX","type":"opex","impact":"medium","detail":"Monthly options expiration"},
+    {"date":"2026-10-29","event":"FOMC Decision","type":"fomc","impact":"high","detail":"Federal Reserve rate decision + press conference"},
+    {"date":"2026-10-30","event":"PCE Inflation","type":"pce","impact":"high","detail":"Core PCE — Fed's preferred inflation gauge"},
+    {"date":"2026-11-06","event":"Jobs Report","type":"nfp","impact":"high","detail":"Non-Farm Payrolls + unemployment rate"},
+    {"date":"2026-11-13","event":"CPI Inflation","type":"cpi","impact":"high","detail":"Consumer Price Index — core + headline"},
+    {"date":"2026-11-20","event":"Monthly OPEX","type":"opex","impact":"medium","detail":"Monthly options expiration"},
+    {"date":"2026-11-25","event":"PCE Inflation","type":"pce","impact":"high","detail":"Core PCE — Fed's preferred inflation gauge"},
+    {"date":"2026-12-04","event":"Jobs Report","type":"nfp","impact":"high","detail":"Non-Farm Payrolls + unemployment rate"},
+    {"date":"2026-12-10","event":"FOMC Decision","type":"fomc","impact":"high","detail":"Federal Reserve rate decision + press conference"},
+    {"date":"2026-12-11","event":"CPI Inflation","type":"cpi","impact":"high","detail":"Consumer Price Index — core + headline"},
+    {"date":"2026-12-18","event":"Quarterly OPEX","type":"opex","impact":"high","detail":"Quarterly options + futures expiration (triple witching)"},
+]
+
+
 try:
     from fastapi import FastAPI, Body
     from fastapi.middleware.cors import CORSMiddleware
@@ -371,6 +433,96 @@ try:
             except Exception as e:
                 return {"error": str(e)}
         return _cached("sectors", produce)
+
+    @app.get("/calendar")
+    def calendar_endpoint():
+        today = datetime.date.today()
+        upcoming = []
+        for e in _ECO_CALENDAR:
+            dt = datetime.date.fromisoformat(e["date"])
+            days_away = (dt - today).days
+            if 0 <= days_away <= 90:
+                upcoming.append({**e, "days_away": days_away})
+        upcoming.sort(key=lambda x: x["date"])
+        return {"events": upcoming}
+
+    _ROTATION_ETFS = {
+        "Technology":"XLK","Communication":"XLC","Financials":"XLF",
+        "Health Care":"XLV","Industrials":"XLI","Materials":"XLB",
+        "Real Estate":"XLRE","Energy":"XLE","Utilities":"XLU",
+        "Staples":"XLP","Discretionary":"XLY",
+    }
+
+    @app.get("/sectors/rotation")
+    def sector_rotation_endpoint():
+        def produce():
+            try:
+                import pandas as pd
+                tickers = ["SPY"] + list(_ROTATION_ETFS.values())
+                raw = yf.download(tickers, period="60d", auto_adjust=True,
+                                  progress=False, show_errors=False)
+                # Handle both flat and MultiIndex columns
+                closes = raw["Close"] if "Close" in raw.columns else raw
+                if hasattr(closes.columns, 'levels'):
+                    closes = closes.droplevel(0, axis=1) if closes.columns.nlevels > 1 else closes
+                spy = closes["SPY"].dropna() if "SPY" in closes.columns else None
+                if spy is None or len(spy) < 21:
+                    return {"error": "SPY data insufficient"}
+                result = []
+                for sector, etf in _ROTATION_ETFS.items():
+                    if etf not in closes.columns: continue
+                    s = closes[etf].dropna()
+                    if len(s) < 21: continue
+                    common = spy.index.intersection(s.index)
+                    if len(common) < 20: continue
+                    sp, sc = spy.loc[common], s.loc[common]
+                    rs_20 = float((sc.iloc[-1]/sc.iloc[-20]-1) - (sp.iloc[-1]/sp.iloc[-20]-1)) * 100
+                    rs_r  = float((sc.iloc[-1]/sc.iloc[-10]-1) - (sp.iloc[-1]/sp.iloc[-10]-1)) * 100
+                    rs_p  = float((sc.iloc[-10]/sc.iloc[-20]-1) - (sp.iloc[-10]/sp.iloc[-20]-1)) * 100
+                    rs_mom = rs_r - rs_p
+                    q = ("Leading"   if rs_20>=0 and rs_mom>=0 else
+                         "Weakening" if rs_20>=0 else
+                         "Improving" if rs_mom>=0 else "Lagging")
+                    result.append({"sector":sector,"etf":etf,
+                        "rs":round(rs_20,2),"rs_mom":round(rs_mom,2),
+                        "quadrant":q,"perf_1m":round(float((sc.iloc[-1]/sc.iloc[-20]-1)*100),2),
+                        "spot":round(float(sc.iloc[-1]),2)})
+                return _json_safe({"sectors":result,"generated_at":datetime.datetime.now().isoformat()})
+            except Exception as e:
+                return {"error": str(e)}
+        return _cached("sectors_rotation", produce)
+
+    @app.get("/outlook")
+    def outlook_endpoint():
+        def produce():
+            try:
+                from scanner import _lenient_json, fetch_climate, fetch_sectors
+                climate = fetch_climate()
+                sectors = fetch_sectors()
+                top = sorted(sectors, key=lambda s: s.get("month",0), reverse=True)[:3]
+                bot = sorted(sectors, key=lambda s: s.get("month",0))[:2]
+                sc  = climate.get("macro_score", 50)
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""Market strategist. Date: {datetime.date.today()}. Macro: {sc}/100 ({climate.get('posture','neutral')}).
+Top sectors (1mo): {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in top)}
+Lagging: {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in bot)}
+
+1-3 month forward market outlook. JSON ONLY:
+{{"headline":"<bold 10-word directional call>","regime":"bull"|"bear"|"neutral"|"volatile",
+"summary":"<3-4 sentences: macro regime, biggest risk, biggest opportunity>",
+"overweight":["<sector/theme>","<sector/theme>","<sector/theme>"],
+"underweight":["<sector/theme>","<sector/theme>"],
+"key_risks":["<specific risk>","<specific risk>","<specific risk>"],
+"positioning":"<2 sentences: specific options structure advice given current IV regime>",
+"horizon":"1-3 months"}}
+Be directional and specific. No hedging."""
+                r = client.messages.create(model="claude-sonnet-4-6", max_tokens=700,
+                    messages=[{"role":"user","content":prompt}])
+                data = _lenient_json(r.content[0].text)
+                return _json_safe({"generated_at":datetime.datetime.now().isoformat(), **data})
+            except Exception as e:
+                return {"error": str(e)}
+        return _cached_swr("outlook", produce, ttl=3600, stale_ttl=14400)
 
     @app.get("/sector")
     def sector_endpoint(name: str):
@@ -565,7 +717,7 @@ Exactly 3 news items. Be specific."""
                         "climate": climate, "sectors": sectors, **brief})
             except Exception as e:
                 return {"error": str(e)}
-        return _cached("briefing", produce)
+        return _cached_swr("briefing", produce, ttl=600, stale_ttl=7200)
 
 except ImportError:
     app = None

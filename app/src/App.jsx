@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, TrendingUp, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut } from "lucide-react";
+import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, TrendingUp, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap } from "lucide-react";
 import { authEnabled, supabase } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
 
@@ -178,6 +178,21 @@ async function savePositionsServer(positions) {
     });
   } catch { /* offline / backend down — localStorage still holds the copy */ }
 }
+async function fetchCalendar() {
+  const r = await fetch(`${API}/calendar`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchSectorRotation() {
+  const r = await fetch(`${API}/sectors/rotation`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchOutlook() {
+  const r = await fetch(`${API}/outlook`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 
 // ── SUPABASE CROSS-DEVICE SYNC ────────────────────────────────────────
 async function sbLoad(uid) {
@@ -311,6 +326,10 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
         <div>
           <div style={{ fontFamily:C.mono, fontSize:19, color:C.ink, fontWeight:600 }}>${d.spot}</div>
           <div style={{ fontFamily:C.mono, fontSize:12, color:d.chg>=0?C.up:C.down, display:"flex", alignItems:"center", gap:3 }}><Trend v={d.chg}/>{d.chg>=0?"+":""}{d.chg}%</div>
+          {d.analyst?.targetMean && d.spot && (() => {
+            const upside = ((d.analyst.targetMean - d.spot) / d.spot * 100);
+            return <div style={{ fontFamily:C.mono, fontSize:10, color:upside>=0?C.up:C.down, marginTop:2 }}>{upside>=0?"+":""}{upside.toFixed(0)}% to target · {(d.analyst.recKey||"").replace(/_/g," ")}</div>;
+          })()}
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:11 }}>
           <div style={{ textAlign:"right" }}>
@@ -478,6 +497,40 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
         </div>
       )}
 
+      {/* ── Analyst Consensus ─────────────────────────────── */}
+      {d.analyst?.targetMean && d.spot && (() => {
+        const upside = ((d.analyst.targetMean - d.spot) / d.spot * 100);
+        const low = d.analyst.targetLow || d.spot * 0.85;
+        const high = d.analyst.targetHigh || d.spot * 1.25;
+        const range = high - low || 1;
+        const spotPct = Math.min(100, Math.max(0, ((d.spot - low) / range) * 100));
+        const meanPct = Math.min(100, Math.max(0, ((d.analyst.targetMean - low) / range) * 100));
+        return (
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:14 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+                <Target size={14} color={C.sub}/>
+                <span style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase" }}>Analyst Consensus</span>
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                {d.analyst.recKey && <span style={{ fontFamily:C.mono, fontSize:11, fontWeight:700, color:upside>=10?C.up:upside<=-5?C.down:C.amber, textTransform:"capitalize" }}>{d.analyst.recKey.replace(/_/g," ")}</span>}
+                {d.analyst.count && <span style={{ fontSize:10.5, color:C.faint }}>{d.analyst.count} analysts</span>}
+              </div>
+            </div>
+            <div style={{ position:"relative", height:6, background:C.line, borderRadius:3, marginBottom:6 }}>
+              <div style={{ position:"absolute", left:`${meanPct}%`, top:-3, height:12, width:2, background:C.sub, borderRadius:1, transform:"translateX(-50%)"}}/>
+              <div style={{ position:"absolute", left:`${spotPct}%`, top:-4, width:14, height:14, background:upside>=0?C.up:C.down, border:`2px solid ${C.bg}`, borderRadius:"50%", transform:"translateX(-50%)", zIndex:1 }}/>
+            </div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:9.5, color:C.faint, fontFamily:C.mono, marginBottom:8 }}>
+              <span>L ${d.analyst.targetLow?.toFixed(0)}</span>
+              <span style={{ color:upside>=0?C.up:C.down, fontSize:11 }}>{upside>=0?"+":""}{upside.toFixed(1)}% upside</span>
+              <span>H ${d.analyst.targetHigh?.toFixed(0)}</span>
+            </div>
+            <div style={{ textAlign:"center", fontSize:12, color:C.ink }}>Mean target <span style={{ fontFamily:C.mono, fontWeight:700 }}>${d.analyst.targetMean?.toFixed(2)}</span></div>
+          </div>
+        );
+      })()}
+
       {/* ── Technicals grid (always) ───────────────────────── */}
       {d.fundamentals && (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:10, marginBottom:14 }}>
@@ -556,45 +609,131 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
   );
 }
 
+function EconomicCalendar({ events }) {
+  if (!events?.length) return null;
+  const cfg = {
+    fomc: { label:"FOMC", color:C.violet },
+    cpi:  { label:"CPI",  color:C.amber  },
+    nfp:  { label:"JOBS", color:C.cold   },
+    pce:  { label:"PCE",  color:C.sub    },
+    opex: { label:"OPEX", color:C.hot    },
+  };
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"14px 16px", marginBottom:14 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:10 }}>
+        <Calendar size={14} color={C.sub}/>
+        <span style={{ fontSize:12, fontWeight:700, color:C.ink }}>Market Calendar — next 90 days</span>
+      </div>
+      <div style={{ display:"flex", gap:7, flexWrap:"wrap" }}>
+        {events.map((e,i)=>{
+          const c = cfg[e.type] || cfg.pce;
+          const isNear = e.days_away <= 14;
+          const dateStr = new Date(e.date+"T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"});
+          return (
+            <div key={i} title={e.detail} style={{
+              display:"flex", alignItems:"center", gap:5,
+              background: isNear ? `${c.color}16` : C.panel2,
+              border:`1px solid ${isNear ? c.color+"50" : C.line}`,
+              borderRadius:7, padding:"5px 10px", cursor:"default"
+            }}>
+              <span style={{ fontFamily:C.mono, fontSize:9.5, fontWeight:700, color:c.color }}>{c.label}</span>
+              <span style={{ fontSize:11, color:C.ink }}>{dateStr}</span>
+              <span style={{ fontSize:10, color:C.faint }}>{e.days_away===0?"today":`${e.days_away}d`}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── BRIEFING ROOM (refreshes every open/focus) ────────────────────────
 function BriefingRoom() {
-  const [b, setB]   = useState(null);
-  const [err, setErr] = useState(null);
+  const [b, setB]           = useState(null);
+  const [outlook, setOutlook] = useState(null);
+  const [calendar, setCalendar] = useState(null);
+  const [err, setErr]       = useState(null);
   const [updated, setUpdated] = useState(null);
   const [selSector, setSelSector] = useState(null);
 
   const load = useCallback(()=>{
     setErr(null);
     fetchBriefing().then(x=>{ setB(x); setUpdated(new Date()); }).catch(e=>setErr(e.message));
+    fetchCalendar().then(x=>setCalendar(x.events || [])).catch(()=>{});
+    fetchOutlook().then(x=>{ if(!x.error) setOutlook(x); }).catch(()=>{});
   },[]);
 
-  // Refresh on mount + every time the tab/window regains focus
   useEffect(()=>{
     load();
     const onFocus = ()=>load();
     const onVis   = ()=>{ if(!document.hidden) load(); };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVis);
-    return ()=>{
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVis);
-    };
+    return ()=>{ window.removeEventListener("focus",onFocus); document.removeEventListener("visibilitychange",onVis); };
   },[load]);
 
   if (err) return <div style={{ padding:40, textAlign:"center", color:C.down }}>News unavailable: {err}<br/><span style={{ color:C.faint, fontSize:12 }}>Is the backend running on {API}?</span></div>;
-  if (!b)  return <div style={{ padding:60, textAlign:"center", color:C.sub }}><Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:10 }}>Loading News…</div></div>;
+  if (!b)  return <div style={{ padding:60, textAlign:"center", color:C.sub }}><Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:10 }}>Loading…</div></div>;
 
   const sc = b.climate?.macro_score ?? 50;
   const scoreCol = sc>60?C.up:sc>35?C.amber:C.down;
+  const regimeCol = r => ({bull:C.up,volatile:C.amber,neutral:C.amber,bear:C.down}[r]||C.amber);
+
   return (
     <div>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:16 }}>
-        <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>News</div>
-        <div style={{ fontSize:11, color:C.faint, fontFamily:C.mono }}>updated {updated?.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}</div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:14 }}>
+        <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Market Intelligence</div>
+        <div style={{ fontSize:11, color:C.faint, fontFamily:C.mono }}>updated {updated?.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
       </div>
-      {/* Climate */}
+
+      {/* Economic Calendar */}
+      {calendar && <EconomicCalendar events={calendar}/>}
+
+      {/* 1-3 Month Outlook */}
+      {outlook && (
+        <div style={{ background:C.panel, border:`1px solid ${regimeCol(outlook.regime)}40`, borderRadius:14, padding:"18px 20px", marginBottom:14 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:10 }}>
+            <Zap size={14} color={regimeCol(outlook.regime)}/>
+            <span style={{ fontSize:12, fontWeight:700, color:C.ink }}>1-3 Month Outlook</span>
+            <span style={{ fontFamily:C.mono, fontSize:11, color:regimeCol(outlook.regime), textTransform:"uppercase", marginLeft:"auto" }}>{outlook.regime}</span>
+          </div>
+          {outlook.headline && <div style={{ fontSize:15, fontWeight:700, color:C.ink, marginBottom:8 }}>{outlook.headline}</div>}
+          {outlook.summary  && <div style={{ fontSize:13, color:C.sub, lineHeight:1.65, marginBottom:12 }}>{outlook.summary}</div>}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:10 }}>
+            {outlook.overweight?.length>0 && (
+              <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}30`, borderRadius:9, padding:"10px 12px" }}>
+                <div style={{ fontSize:9.5, color:C.up, letterSpacing:"0.07em", marginBottom:6 }}>OVERWEIGHT</div>
+                {outlook.overweight.map((x,i)=><div key={i} style={{ fontSize:12, color:C.ink, marginBottom:3 }}>↑ {x}</div>)}
+              </div>
+            )}
+            {outlook.underweight?.length>0 && (
+              <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}30`, borderRadius:9, padding:"10px 12px" }}>
+                <div style={{ fontSize:9.5, color:C.down, letterSpacing:"0.07em", marginBottom:6 }}>UNDERWEIGHT</div>
+                {outlook.underweight.map((x,i)=><div key={i} style={{ fontSize:12, color:C.ink, marginBottom:3 }}>↓ {x}</div>)}
+              </div>
+            )}
+          </div>
+          {outlook.key_risks?.length>0 && (
+            <div style={{ marginBottom:10 }}>
+              <div style={{ fontSize:9.5, color:C.amber, letterSpacing:"0.07em", marginBottom:5 }}>KEY RISKS</div>
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                {outlook.key_risks.map((r,i)=>(
+                  <span key={i} style={{ fontSize:11, color:C.amber, background:`${C.amber}14`, border:`1px solid ${C.amber}30`, borderRadius:6, padding:"3px 9px" }}>⚠ {r}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {outlook.positioning && (
+            <div style={{ background:C.panel2, borderRadius:8, padding:"9px 11px", fontSize:12, color:C.sub, lineHeight:1.55 }}>
+              <span style={{ color:C.violet, fontWeight:600 }}>Options positioning:</span> {outlook.positioning}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Macro Climate */}
       <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"18px 20px", marginBottom:14, display:"flex", gap:22, alignItems:"center" }}>
-        <div style={{ textAlign:"center", paddingRight:22, borderRight:`1px solid ${C.line}` }}>
+        <div style={{ textAlign:"center", paddingRight:22, borderRight:`1px solid ${C.line}`, flexShrink:0 }}>
           <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.1em", marginBottom:4 }}>MACRO</div>
           <div style={{ fontFamily:C.mono, fontSize:34, fontWeight:700, color:scoreCol, lineHeight:1 }}>{sc}</div>
           <div style={{ fontSize:9.5, color:C.faint, marginTop:3 }}>0 stress · 100 calm</div>
@@ -604,6 +743,7 @@ function BriefingRoom() {
           <div style={{ fontSize:13, color:C.sub, lineHeight:1.6 }}>{b.climate_note}</div>
         </div>
       </div>
+
       {/* Hot / Not */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:18, marginBottom:14 }}>
         {[["hot",b.hot,C.hot,"What's Hot"],["not",b.not,C.cold,"What's Not"]].map(([k,arr,col,label])=>(
@@ -624,39 +764,45 @@ function BriefingRoom() {
           </div>
         ))}
       </div>
-      {/* Sector rotation */}
+
+      {/* Sector rotation strip (kept compact — full chart is in Map tab) */}
       {(b.sectors||[]).length>0 && (
-        <div style={{ marginBottom:16 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:11 }}>
-            <Activity size={15} color={C.violet}/><span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>Sector Rotation</span>
-            <span style={{ fontSize:11, color:C.faint }}>— click for 30-90 day forecast</span>
+        <div style={{ marginBottom:14 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+            <Activity size={15} color={C.violet}/><span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>Sector Snapshot</span>
+            <span style={{ fontSize:11, color:C.faint }}>— full rotation matrix in Map tab</span>
           </div>
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(150px, 1fr))", gap:10 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(150px, 1fr))", gap:9 }}>
             {b.sectors.map((s,i)=>{ const m=s.month??0, h=sectorHeat(m); return (
-              <div key={i} onClick={()=>setSelSector(s)} style={{ background:h.bg, border:`1px solid ${h.border}`, borderRadius:10, padding:"11px 13px", cursor:"pointer", transition:"transform .12s" }}
-                onMouseEnter={e=>e.currentTarget.style.transform="translateY(-2px)"} onMouseLeave={e=>e.currentTarget.style.transform="none"}>
+              <div key={i} onClick={()=>setSelSector(s)} style={{ background:h.bg, border:`1px solid ${h.border}`, borderRadius:9, padding:"10px 12px", cursor:"pointer" }}
+                onMouseEnter={e=>e.currentTarget.style.opacity="0.85"} onMouseLeave={e=>e.currentTarget.style.opacity="1"}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                  <span style={{ fontSize:12, fontWeight:700, color:C.ink }}>{s.name}</span>
-                  <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:h.txt }}>{m>=0?"+":""}{m}%</span>
+                  <span style={{ fontSize:11.5, fontWeight:700, color:C.ink }}>{s.name}</span>
+                  <span style={{ fontFamily:C.mono, fontSize:12, fontWeight:700, color:h.txt }}>{m>=0?"+":""}{m}%</span>
                 </div>
               </div>
             ); })}
           </div>
         </div>
       )}
-      {/* Plays */}
-      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12 }}>
-        <TrendingUp size={15} color={C.violet}/><span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>Today's Plays</span>
-      </div>
-      {(b.plays||[]).map((p,i)=>(
-        <div key={i} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"14px 16px", marginBottom:10 }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <span style={{ fontWeight:700, color:C.ink }}>{p.ticker} <span style={{ fontFamily:C.mono, fontSize:12, color:C.amber, fontWeight:400 }}>${p.strike}{p.direction?.[0]} · {p.expiry} · {p.dte}d</span></span>
-            <span style={{ fontFamily:C.mono, fontSize:11, color:C.sub }}>bull {p.prob?.bull}% / bear {p.prob?.bear}%</span>
+
+      {/* Trade Ideas */}
+      {(b.plays||[]).length>0 && (
+        <>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12 }}>
+            <Target size={15} color={C.violet}/><span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>Trade Ideas</span>
           </div>
-          <div style={{ fontSize:12, color:C.sub, lineHeight:1.55, marginTop:7 }}>{p.thesis}</div>
-        </div>
-      ))}
+          {b.plays.map((p,i)=>(
+            <div key={i} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"14px 16px", marginBottom:10 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <span style={{ fontWeight:700, color:C.ink }}>{p.ticker} <span style={{ fontFamily:C.mono, fontSize:12, color:C.amber, fontWeight:400 }}>${p.strike}{p.direction?.[0]} · {p.expiry} · {p.dte}d</span></span>
+                <span style={{ fontFamily:C.mono, fontSize:11, color:C.sub }}>bull {p.prob?.bull}% / bear {p.prob?.bear}%</span>
+              </div>
+              <div style={{ fontSize:12, color:C.sub, lineHeight:1.55, marginTop:7 }}>{p.thesis}</div>
+            </div>
+          ))}
+        </>
+      )}
       {selSector && <SectorDetail sector={selSector} onClose={()=>setSelSector(null)}/>}
     </div>
   );
@@ -1201,6 +1347,71 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
   );
 }
 
+function SectorRotationChart({ sectors }) {
+  const [hov, setHov] = useState(null);
+  if (!sectors?.length) return null;
+  const W=420, H=320, PAD=44;
+  const rsVals  = sectors.map(s=>s.rs),  momVals = sectors.map(s=>s.rs_mom);
+  const rsR  = Math.max(Math.abs(Math.min(...rsVals)),  Math.abs(Math.max(...rsVals)),  2) * 1.3;
+  const momR = Math.max(Math.abs(Math.min(...momVals)), Math.abs(Math.max(...momVals)), 1) * 1.3;
+  const toX = rs  => PAD + (rs  / rsR  + 1) / 2 * (W - 2*PAD);
+  const toY = mom => PAD + (1 - (mom / momR + 1) / 2) * (H - 2*PAD);
+  const cx = toX(0), cy = toY(0);
+  const qCol = q => q==="Leading"?C.up:q==="Weakening"?C.amber:q==="Improving"?C.cold:C.down;
+  const abbr = n => ({
+    "Technology":"Tech","Communication":"Comm","Financials":"Fins","Health Care":"Hlth",
+    "Industrials":"Inds","Materials":"Matl","Real Estate":"RE","Energy":"Engy",
+    "Utilities":"Util","Staples":"Stpl","Discretionary":"Disc"
+  }[n] || n.slice(0,4));
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:10 }}>
+        <span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>Sector Rotation Matrix</span>
+        <div style={{ display:"flex", gap:12 }}>
+          {[["Leading",C.up],["Weakening",C.amber],["Improving",C.cold],["Lagging",C.down]].map(([q,col])=>(
+            <div key={q} style={{ display:"flex", alignItems:"center", gap:4, fontSize:10 }}>
+              <div style={{ width:7, height:7, borderRadius:"50%", background:col }}/>
+              <span style={{ color:C.faint }}>{q}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height:"auto", display:"block" }}>
+        {/* Quadrant shading */}
+        <rect x={PAD} y={PAD} width={cx-PAD} height={cy-PAD} fill={C.cold} opacity={0.05}/>
+        <rect x={cx}  y={PAD} width={W-PAD-cx} height={cy-PAD} fill={C.up} opacity={0.05}/>
+        <rect x={PAD} y={cy}  width={cx-PAD} height={H-PAD-cy} fill={C.down} opacity={0.05}/>
+        <rect x={cx}  y={cy}  width={W-PAD-cx} height={H-PAD-cy} fill={C.amber} opacity={0.05}/>
+        {/* Axes */}
+        <line x1={PAD} y1={cy} x2={W-PAD} y2={cy} stroke={C.line} strokeWidth={1}/>
+        <line x1={cx} y1={PAD} x2={cx} y2={H-PAD} stroke={C.line} strokeWidth={1}/>
+        {/* Axis labels */}
+        <text x={W-PAD-2} y={cy-5} fontSize={8} fill={C.faint} textAnchor="end">Outperforming →</text>
+        <text x={PAD+2}   y={cy-5} fontSize={8} fill={C.faint}>← Underperforming</text>
+        <text x={cx} y={PAD+10} fontSize={8} fill={C.faint} textAnchor="middle">Accelerating ↑</text>
+        <text x={cx} y={H-PAD-4} fontSize={8} fill={C.faint} textAnchor="middle">↓ Decelerating</text>
+        {/* Sector dots */}
+        {sectors.map((s,i)=>{
+          const x=toX(s.rs), y=toY(s.rs_mom), col=qCol(s.quadrant), isH=hov===i;
+          return (
+            <g key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} style={{cursor:"default"}}>
+              <circle cx={x} cy={y} r={isH?9:7} fill={col} opacity={isH?1:0.8} stroke={C.bg} strokeWidth={1.5}/>
+              <text x={x} y={y+17} fontSize={8} fill={isH?C.ink:C.sub} textAnchor="middle" fontWeight={isH?"700":"400"}>{abbr(s.sector)}</text>
+              {isH && (
+                <g>
+                  <rect x={x-46} y={y-42} width={92} height={34} rx={5} fill={C.panel2} stroke={C.line}/>
+                  <text x={x} y={y-28} fontSize={9} fill={C.ink} textAnchor="middle" fontWeight="700">{s.sector}</text>
+                  <text x={x} y={y-16} fontSize={8} fill={col} textAnchor="middle">{s.quadrant} · RS {s.rs>=0?"+":""}{s.rs}% · {s.perf_1m>=0?"+":""}{s.perf_1m}% 1mo</text>
+                </g>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 // ── SECTOR MAP (hot/cold heatmap of market sectors) ───────────────────
 function sectorHeat(month) {
   const m = Math.max(-10, Math.min(10, month ?? 0));   // clamp for color scaling
@@ -1211,14 +1422,16 @@ function sectorHeat(month) {
 }
 
 function SectorMap() {
-  const [d, setD]         = useState(null);
-  const [err, setErr]     = useState(null);
+  const [d, setD]             = useState(null);
+  const [rotation, setRotation] = useState(null);
+  const [err, setErr]         = useState(null);
   const [updated, setUpdated] = useState(null);
-  const [sel, setSel]     = useState(null);
+  const [sel, setSel]         = useState(null);
 
   const load = useCallback(()=>{
     setErr(null); setD(null);
     fetchSectors().then(x=>{ x.error?setErr(x.error):setD(x); setUpdated(new Date()); }).catch(e=>setErr(e.message));
+    fetchSectorRotation().then(x=>{ if(!x.error) setRotation(x); }).catch(()=>{});
   },[]);
   useEffect(()=>{ load(); },[load]);
 
@@ -1245,6 +1458,7 @@ function SectorMap() {
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(180px, 1fr))", gap:12, marginBottom:18 }}>
         {sectors.map((s,i)=>{
           const m = s.month ?? 0, h = sectorHeat(m);
+          const rot = rotation?.sectors?.find(r=>r.sector===s.name);
           return (
             <div key={i} onClick={()=>setSel(s)} style={{ background:h.bg, border:`1px solid ${h.border}`, borderRadius:12, padding:"16px 16px 14px", cursor:"pointer", transition:"transform .12s, box-shadow .12s" }}
               onMouseEnter={e=>{ e.currentTarget.style.transform="translateY(-2px)"; e.currentTarget.style.boxShadow="0 8px 22px rgba(0,0,0,0.18)"; }}
@@ -1259,10 +1473,19 @@ function SectorMap() {
                 <span style={{ fontSize:10, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>1-Month</span>
                 <span style={{ fontFamily:C.mono, fontSize:11.5, color:(s.day??0)>=0?C.up:C.down, display:"flex", alignItems:"center", gap:3 }}><Trend v={s.day??0}/>{(s.day??0)>=0?"+":""}{s.day}% today</span>
               </div>
+              {rot && (
+                <div style={{ marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                  <span style={{ fontFamily:C.mono, fontSize:10, color:rot.rs>=0?C.up:C.down }}>vs SPY {rot.rs>=0?"+":""}{rot.rs}%</span>
+                  <span style={{ fontSize:9.5, color:C.faint }}>{rot.quadrant}</span>
+                </div>
+              )}
             </div>
           );
         })}
       </div>
+
+      {/* Sector Rotation Matrix */}
+      <SectorRotationChart sectors={rotation?.sectors}/>
 
       {/* Leaders + legend */}
       {leader && laggard && (

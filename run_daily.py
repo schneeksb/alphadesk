@@ -37,8 +37,9 @@ SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL", "")
 
 
 def black_scholes_greeks(S, K, T, r, sigma, option_type="call"):
-    if T <= 0 or sigma <= 0:
-        return {"price": 0, "delta": 0, "theta": 0, "vega": 0, "gamma": 0}
+    """Returns raw (unrounded) price so callers can compute cv precisely before rounding."""
+    if T <= 0 or not (np.isfinite(sigma) and sigma > 0):
+        return {"price": 0.0, "delta": 0.0, "theta": 0.0, "vega": 0.0, "gamma": 0.0}
     d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
     d2 = d1 - sigma*np.sqrt(T)
     if option_type == "call":
@@ -50,25 +51,53 @@ def black_scholes_greeks(S, K, T, r, sigma, option_type="call"):
     gamma = norm.pdf(d1) / (S*sigma*np.sqrt(T))
     theta = (-(S*norm.pdf(d1)*sigma)/(2*np.sqrt(T)) - r*K*np.exp(-r*T)*norm.cdf(d2 if option_type=="call" else -d2)) / 365
     vega  = S*norm.pdf(d1)*np.sqrt(T) / 100
-    return {"price": round(price,2), "delta": round(delta,3), "theta": round(theta,2), "vega": round(vega,2), "gamma": round(gamma,4)}
+    # price is NOT rounded here — caller multiplies by qty*100 before rounding
+    return {"price": float(price), "delta": round(delta,3), "theta": round(theta,2), "vega": round(vega,2), "gamma": round(gamma,4)}
 
 
-def get_iv_from_chain(ticker_obj, strike, expiry_str, option_type="call"):
+def get_option_mark_price(ticker_obj, strike, expiry_str, option_type="call"):
+    """
+    Fetch the live mark price and IV directly from the options chain.
+    Mark price = (bid+ask)/2 when both > 0, else lastPrice.
+    IV is sanitised — 0, NaN, and inf all fall back to 0.35.
+    Returns (mark_price_per_share_or_None, iv).
+    """
     try:
         chain = ticker_obj.option_chain(expiry_str)
         opts  = chain.calls if option_type == "call" else chain.puts
         row   = opts[opts["strike"] == strike]
-        if not row.empty:
-            return float(row["impliedVolatility"].values[0])
+        if row.empty:
+            return None, 0.35
+        r = row.iloc[0]
+
+        bid  = float(r.get("bid",  0) or 0)
+        ask  = float(r.get("ask",  0) or 0)
+        last = float(r.get("lastPrice", 0) or 0)
+        mark = (bid + ask) / 2 if (bid > 0 and ask > 0) else (last if last > 0 else None)
+
+        try:
+            iv = float(r.get("impliedVolatility") or 0)
+        except (ValueError, TypeError):
+            iv = 0.0
+        if not (np.isfinite(iv) and iv > 0):
+            iv = 0.35  # fallback: 35% vol when chain IV is missing/zero/NaN
+
+        return mark, iv
     except Exception:
-        pass
-    return 0.35
+        return None, 0.35
 
 
 def layer1_data_valuation(portfolio=None):
     """Value a list of positions (defaults to module PORTFOLIO). Each result carries
     an `expired` flag (option past expiry) and an `error` string if it couldn't be valued.
-    Robust to arbitrary user-entered positions — one bad entry never sinks the batch."""
+    Robust to arbitrary user-entered positions — one bad entry never sinks the batch.
+
+    Options P&L logic:
+      - cost_basis is stored as TOTAL dollars paid (premium × contracts × 100)
+      - current_val = live mark price (from chain) × contracts × 100
+        fallback: Black-Scholes price (raw, unrounded) × contracts × 100
+      - pnl = current_val - cost_basis
+    """
     if portfolio is None:
         portfolio = PORTFOLIO
     print("\n[L1] Fetching spot prices & computing Greeks...")
@@ -82,14 +111,17 @@ def layer1_data_valuation(portfolio=None):
     for pos in portfolio:
         try:
             tk = yf.Ticker(pos["ticker"])
-            c  = tk.history(period="5d")["Close"].dropna()   # latest bar may be unsettled (NaN)
+            c  = tk.history(period="5d")["Close"].dropna()
             if c.empty:
                 results.append(_err(pos, "No market data")); continue
             spot = float(c.iloc[-1])
-            cb   = pos.get("cost_basis") or 0
+            cb   = float(pos.get("cost_basis") or 0)
+
             if pos["type"] == "SHARES":
                 cv  = spot * pos["qty"]
                 pnl = cv - cb
+                print(f"  [SHR] {pos['ticker']} | spot=${spot:.2f} | qty={pos['qty']} | "
+                      f"cv=${cv:.2f} | cost=${cb:.2f} | pnl=${pnl:+.2f}")
                 results.append({**pos, "spot": round(spot,2), "current_val": round(cv,2),
                                 "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
                                 "delta": 1.0, "theta": 0, "vega": 0, "iv": None, "dte": None,
@@ -99,14 +131,31 @@ def layer1_data_valuation(portfolio=None):
                 raw_dte = (expiry - today).days
                 dte     = max(raw_dte, 0)
                 T       = dte / 365.0
-                iv      = get_iv_from_chain(tk, pos["strike"], pos["expiry"], pos["type"].lower())
-                greeks  = black_scholes_greeks(spot, pos["strike"], T, r, iv, pos["type"].lower())
-                cv      = greeks["price"] * pos["qty"] * 100
-                pnl     = cv - cb
+                qty     = pos["qty"]
+
+                # Prefer real market price from chain; fall back to Black-Scholes
+                mark_price, iv = get_option_mark_price(tk, pos["strike"], pos["expiry"], pos["type"].lower())
+                greeks = black_scholes_greeks(spot, pos["strike"], T, r, iv, pos["type"].lower())
+
+                if mark_price is not None and mark_price > 0:
+                    cv = mark_price * qty * 100   # live market value
+                    price_source = f"chain mark ${mark_price:.3f}"
+                else:
+                    # B-S price is raw/unrounded — multiply first, THEN round
+                    cv = greeks["price"] * qty * 100
+                    price_source = f"B-S ${greeks['price']:.4f}"
+
+                pnl = cv - cb
+
+                pnl_pct_str = f"{pnl/cb*100:+.1f}%" if cb else "N/A"
+                print(f"  [OPT] {pos['ticker']} ${pos.get('strike')} {pos['type']} "
+                      f"exp {pos['expiry']} | DTE={dte} | spot=${spot:.2f} | "
+                      f"IV={iv:.0%} | price={price_source} | "
+                      f"cv=${cv:.2f} | cost=${cb:.2f} | pnl=${pnl:+.2f} | pnl%={pnl_pct_str}")
+
                 results.append({**pos, "spot": round(spot,2), "current_val": round(cv,2),
                                 "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
                                 "dte": dte, "iv": round(iv,3), "expired": raw_dte < 0, **greeks})
-            print(f"  + {pos['ticker']}: ${spot:.2f}")
         except Exception as e:
             results.append(_err(pos, str(e)))
     return results

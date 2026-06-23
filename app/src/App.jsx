@@ -1183,7 +1183,17 @@ function PositionForm({ initial, onSubmit, onClose }) {
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))", gap:10, marginBottom:12 }}>
         <div><label style={lbl}>TICKER</label><input value={ticker} onChange={e=>setTicker(e.target.value)} placeholder="NVDA" style={{ ...inp, textTransform:"uppercase" }}/></div>
         <div><label style={lbl}>QUANTITY</label><input value={qty} onChange={e=>setQty(e.target.value)} type="number" placeholder={isOpt?"contracts":"shares"} style={inp}/></div>
-        <div><label style={lbl}>COST BASIS ($)</label><input value={cost} onChange={e=>setCost(e.target.value)} type="number" placeholder="total paid" style={inp}/></div>
+        <div>
+          <label style={lbl}>COST BASIS ($){isOpt && <span style={{ color:C.amber, marginLeft:4 }}>= contracts × premium × 100</span>}</label>
+          <input value={cost} onChange={e=>setCost(e.target.value)} type="number"
+            placeholder={isOpt ? `e.g. 2 contracts × $14.20 = $2,840` : "total $ paid"}
+            style={inp}/>
+          {isOpt && cost && (
+            <div style={{ fontSize:10, color:C.cold, marginTop:3 }}>
+              = ${parseFloat(cost).toLocaleString()} total · ~${qty && parseFloat(qty)>0 ? (parseFloat(cost)/(parseFloat(qty)*100)).toFixed(2) : "?"} per share
+            </div>
+          )}
+        </div>
         {isOpt && <div><label style={lbl}>STRIKE</label><input value={strike} onChange={e=>setStrike(e.target.value)} type="number" placeholder="210" style={inp}/></div>}
         {isOpt && <div><label style={lbl}>EXPIRY</label><input value={expiry} onChange={e=>setExpiry(e.target.value)} type="date" style={inp}/></div>}
         <div><label style={lbl}>STOP LOSS ($)</label><input value={stop} onChange={e=>setStop(e.target.value)} type="number" placeholder="optional · underlying" style={inp}/></div>

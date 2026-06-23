@@ -231,7 +231,7 @@ function Sparkline({ data, w=120, h=32, color }) {
     </svg>
   );
 }
-const scoreLabel = (s) => s==null?"AI off":s>=7.5?"Bullish":s>=6?"Lean Bull":s>=4?"Neutral":s>=2.5?"Lean Bear":"Bearish";
+const scoreLabel = (s) => s==null?"AI off":s>=7?"Bullish":s>=6?"Lean Bull":s>=4?"Neutral":s>=3?"Lean Bear":"Bearish";
 
 // Hover-to-inspect price chart: crosshair + dot + floating price/date label
 function InteractiveChart({ data, dates, color, h=130 }) {
@@ -471,7 +471,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
             <div>
               <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em" }}>ALPHADESK SCORE</div>
               <div style={{ fontSize:17, color:scoreColor(d.score), fontWeight:700 }}>{scoreLabel(d.score)}</div>
-              <div style={{ fontSize:10.5, color:C.faint, marginTop:2 }}>0 bearish · 10 bullish</div>
+              <div style={{ fontSize:10.5, color:C.faint, marginTop:2 }}>30-day forward setup · 0 – 10</div>
             </div>
           </div>
         ) : (
@@ -562,11 +562,45 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
         </div>
       )}
 
-      {/* ── AI: Analysis + scored news + play (only when AI on) */}
-      {aiOk && d.summary && (
+      {/* ── AI: 30-day forward analysis */}
+      {aiOk && (d.outlook_30d || d.summary) && (
         <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:14 }}>
-          <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:9 }}>Analysis</div>
-          <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.65 }}>{d.summary}</div>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12 }}>
+            <span style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase" }}>30-Day Outlook</span>
+            {d.setup && (
+              <span style={{
+                fontFamily:C.mono, fontSize:10, fontWeight:700, marginLeft:"auto",
+                color:    d.setup==="strong"?C.up    : d.setup==="risky"?C.down    : C.amber,
+                background:d.setup==="strong"?`${C.up}14`: d.setup==="risky"?`${C.down}14`: `${C.amber}14`,
+                border:`1px solid ${d.setup==="strong"?C.up+"50":d.setup==="risky"?C.down+"50":C.amber+"50"}`,
+                borderRadius:6, padding:"2px 9px",
+              }}>{d.setup==="strong"?"STRONG SETUP":d.setup==="risky"?"RISKY SETUP":"WAIT & SEE"}</span>
+            )}
+          </div>
+          <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.65, marginBottom:(d.catalysts?.length||d.risks?.length)?14:0 }}>
+            {d.outlook_30d || d.summary}
+          </div>
+          {(d.catalysts?.length > 0 || d.risks?.length > 0) && (
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:d.options_read?12:0 }}>
+              {d.catalysts?.length > 0 && (
+                <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}30`, borderRadius:9, padding:"10px 12px" }}>
+                  <div style={{ fontSize:9.5, color:C.up, letterSpacing:"0.07em", marginBottom:7 }}>UPSIDE CATALYSTS</div>
+                  {d.catalysts.map((c,i)=><div key={i} style={{ fontSize:12, color:C.ink, lineHeight:1.5, marginBottom:4 }}>↑ {c}</div>)}
+                </div>
+              )}
+              {d.risks?.length > 0 && (
+                <div style={{ background:`${C.amber}0c`, border:`1px solid ${C.amber}30`, borderRadius:9, padding:"10px 12px" }}>
+                  <div style={{ fontSize:9.5, color:C.amber, letterSpacing:"0.07em", marginBottom:7 }}>KEY RISKS</div>
+                  {d.risks.map((r,i)=><div key={i} style={{ fontSize:12, color:C.ink, lineHeight:1.5, marginBottom:4 }}>⚠ {r}</div>)}
+                </div>
+              )}
+            </div>
+          )}
+          {d.options_read && (
+            <div style={{ background:C.panel2, borderRadius:8, padding:"9px 12px", fontSize:12, color:C.sub, lineHeight:1.55 }}>
+              <span style={{ color:C.violet, fontWeight:600 }}>Smart money signal: </span>{d.options_read}
+            </div>
+          )}
         </div>
       )}
 

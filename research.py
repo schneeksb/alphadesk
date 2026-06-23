@@ -171,31 +171,65 @@ def technicals(ticker):
 
 
 def ai_analysis_and_news(ticker, tech):
-    """Claude generates the analysis summary + 3 scored news items + a 0-10 score."""
+    """Panel-of-investors 30-day forward outlook. Score = forward setup quality, not past perf."""
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    prompt = f"""Equity + options analyst. Research {ticker} ({tech['name']}) as of {datetime.date.today()}.
 
-Data: ${tech['spot']} ({tech['chg']:+.1f}% today), RSI {tech['rsi']}, IV {tech['iv']}%, P/E {tech['fundamentals']['pe']}, rev {tech['fundamentals']['revGrowth']}, sector {tech['sector']}.
+    # Build enriched context strings
+    earn_ctx = f"in {tech['daysToEarn']}d ({tech['fundamentals']['nextEarnings']})" if tech.get('daysToEarn') is not None else f"date unknown ({tech['fundamentals']['nextEarnings']})"
+    w52h, w52l, spot = tech.get('week52High'), tech.get('week52Low'), tech.get('spot')
+    w52_ctx = ""
+    if w52h and w52l and spot and w52h != w52l:
+        pct = (spot - w52l) / (w52h - w52l) * 100
+        w52_ctx = f"52W ${w52l}–${w52h} (at {pct:.0f}th %ile)"
+    pc = tech.get('pcRatio')
+    pc_ctx = f"P/C {pc} ({'heavy hedging' if pc and pc > 1.2 else 'call-heavy/bullish' if pc and pc < 0.8 else 'neutral'})" if pc else "P/C n/a"
+    analyst_ctx = ""
+    a = tech.get('analyst', {})
+    if a.get('targetMean') and spot:
+        upside = (a['targetMean'] - spot) / spot * 100
+        analyst_ctx = f"\nAnalyst consensus: {a.get('recKey','?')} · {a.get('count','?')} analysts · mean target ${a['targetMean']:.2f} ({upside:+.1f}% upside)"
 
-Score 0-10 DECISIVELY (use the full range, avoid 4-6 clustering):
-  0-2 strongly bearish · 3-4 lean bearish · 5 truly balanced only
-  6-7 lean bullish · 8-10 strongly bullish
+    prompt = f"""You are a panel of elite investors giving a FORWARD-LOOKING 30-DAY SETUP SCORE for {ticker} ({tech['name']}). Today: {datetime.date.today()}.
 
-JSON ONLY:
+Combined analytical lens:
+• Warren Buffett — is the business durable, is valuation attractive at this price?
+• Stan Druckenmiller — macro tailwinds/headwinds, is momentum with or against this name?
+• Quant options trader — what does the options market's current structure tell us about smart money?
+
+MARKET DATA:
+Price: ${spot} ({tech['chg']:+.1f}% today) | RSI {tech['rsi']} | {w52_ctx}
+Options: IV {tech['iv']}% | {pc_ctx} | Rel Vol {tech.get('relVol','?')}×
+Fundamentals: P/E {tech['fundamentals']['pe']} | Rev Growth {tech['fundamentals']['revGrowth']} | Gross Margin {tech['fundamentals']['grossMargin']} | Sector: {tech['sector']}
+Earnings: {earn_ctx}{analyst_ctx}
+
+SCORE 0-10 for 30-DAY FORWARD SETUP QUALITY (not backward performance):
+  0-2 = Strong short / high-conviction avoid
+  3-4 = Lean bearish, risks outweigh near-term reward
+  5   = Neutral, coin flip, no clear edge
+  6-7 = Lean bullish, setup tilts positive
+  8-10 = Strong bull setup with real near-term catalysts
+
+Use the FULL range. Avoid clustering at 4-6. Be decisive.
+
+JSON ONLY — no markdown, no code fences:
 {{
   "score": <float 0-10, one decimal>,
   "signal": "hot"|"cold"|"neutral",
-  "summary": "<3 sentences: (1) current setup/catalyst, (2) key technical level, (3) what IV {tech['iv']}% means for premium buying vs selling>",
+  "setup": "strong"|"risky"|"wait",
+  "outlook_30d": "<2-3 sentences: what is the MOST LIKELY outcome in the next 30 days and WHY — specific, directional, not hedged>",
+  "catalysts": ["<specific named event/catalyst that could push price UP in 30d>", "<second catalyst>"],
+  "risks": ["<specific named risk that could hurt it in next 30d>", "<second risk>"],
+  "options_read": "<2 sentences: what IV {tech['iv']}% + P/C {pc} tells us about where smart money is positioned right now>",
   "news": [
-    {{"score":<0-10>,"sentiment":"bullish"|"bearish"|"neutral","headline":"<specific>","source":"<e.g. Reuters>","time":"<e.g. 3h ago>"}}
+    {{"score":<0-10>,"sentiment":"bullish"|"bearish"|"neutral","headline":"<specific plausible recent headline>","source":"<e.g. Bloomberg>","time":"<e.g. 2h ago>"}}
   ],
-  "play": null | {{"direction":"CALL"|"PUT","strike":<near spot>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est>,"conviction":"HIGH"|"MEDIUM"|"LOW"}}
+  "play": null | {{"direction":"CALL"|"PUT","strike":<near ATM>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est float>,"conviction":"HIGH"|"MEDIUM"|"LOW","thesis":"<1 sentence: why this structure, not just direction>"}}
 }}
 
-Exactly 3 news items with spread-out scores. Play only if genuine edge, else null."""
+Exactly 3 news items with varied scores. PLAY only if there is genuine asymmetric edge in the next 30 days — otherwise null."""
 
-    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1200,
-        messages=[{"role":"user","content":prompt}])
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1400,
+        messages=[{"role": "user", "content": prompt}])
     from scanner import _lenient_json
     return _lenient_json(r.content[0].text)
 

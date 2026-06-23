@@ -1,0 +1,16 @@
+# Render Blueprint for the AlphaDesk backend (research.py FastAPI app).
+# In Render: New + → Blueprint → connect this repo. It reads this file.
+services:
+  - type: web
+    name: alphadesk-api
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn research:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false          # set this in the Render dashboard (do NOT commit your key)
+      - key: PYTHON_VERSION
+        value: "3.13.4"

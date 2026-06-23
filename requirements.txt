@@ -1,0 +1,8 @@
+yfinance==1.4.1
+pandas==3.0.3
+numpy==2.4.6
+scipy==1.17.1
+anthropic==0.111.0
+python-dotenv==1.2.2
+fastapi==0.137.2
+uvicorn[standard]==0.49.0

@@ -1,0 +1,33 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+
+# Local tooling
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node / Vite
+app/node_modules/
+app/dist/
+node_modules/
+npm-debug.log*
+
+# Generated reports
+report_*.json
+research_*.json
+scanner_*.json
+
+# Persisted portfolio positions (personal)
+positions.json
+
+# OS / editor
+.DS_Store
+Thumbs.db

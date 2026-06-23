@@ -1184,7 +1184,7 @@ function PositionForm({ initial, onSubmit, onClose }) {
 }
 
 // ── PORTFOLIO (manual positions, Greeks, P&L; expired in an envelope) ───
-function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen }) {
+function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
@@ -1227,6 +1227,34 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
       {sub && <div style={{ fontSize:11, color:C.sub, marginTop:2 }}>{sub}</div>}
     </div>
   );
+
+  const CashCard = () => {
+    const [edit, setEdit] = useState(false);
+    const [c, setC] = useState(String(cash||0));
+    const ip = { width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 7px", color:C.ink, fontSize:13, outline:"none", fontFamily:C.mono };
+    const totalWithCash = (a.total_value||0) + (cash||0);
+    if (edit) return (
+      <div style={{ flex:"1 1 200px", background:C.panel, border:`1px solid ${C.cold}66`, borderRadius:12, padding:"13px 16px" }}>
+        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:8 }}>CASH</div>
+        <div style={{ marginBottom:8 }}>
+          <div style={{ fontSize:8.5, color:C.faint, marginBottom:2 }}>BALANCE $</div>
+          <input value={c} onChange={e=>setC(e.target.value)} type="number" min="0" style={ip}/>
+        </div>
+        <div style={{ display:"flex", gap:6 }}>
+          <button onClick={()=>{ onCash(parseFloat(c)||0); setEdit(false); }} style={{ background:C.up, border:"none", borderRadius:7, padding:"6px 12px", color:"#06080d", fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Save</button>
+          <button onClick={()=>setEdit(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:7, padding:"6px 10px", color:C.sub, fontSize:11.5, cursor:"pointer" }}>Cancel</button>
+        </div>
+      </div>
+    );
+    return (
+      <div onClick={()=>{ setC(String(cash||0)); setEdit(true); }} title="Click to set cash balance"
+        style={{ flex:"1 1 180px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 18px", cursor:"pointer" }}>
+        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", display:"flex", justifyContent:"space-between", alignItems:"center" }}>CASH <Pencil size={11} color={C.faint}/></div>
+        <div style={{ fontFamily:C.mono, fontSize:24, fontWeight:700, color:(cash||0)>0?C.cold:C.ink, marginTop:4 }}>${(cash||0).toLocaleString()}</div>
+        <div style={{ fontSize:11, color:C.sub, marginTop:2 }}>{(cash||0)>0 ? `$${totalWithCash.toLocaleString()} total with portfolio` : "click to add cash"}</div>
+      </div>
+    );
+  };
 
   const MarginCard = () => {
     const [edit, setEdit] = useState(false);
@@ -1295,6 +1323,7 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
             <Stat label="NET VALUE"    value={`$${(a.net_value ?? a.total_value ?? 0).toLocaleString()}`} sub={margin>0?"equity after margin":"= total value"}/>
             <Stat label="NET DELTA"    value={num(a.net_delta,0)} sub="share-equivalent exposure"/>
             <Stat label="DAILY THETA"  value={`$${num(a.daily_theta,0)}`} sub="time decay per day" col={(a.daily_theta||0)<0?C.down:C.sub}/>
+            <CashCard/>
             <MarginCard/>
           </div>
 
@@ -1816,6 +1845,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [pfLoading, setPfLoading] = useState(false);
   const [margin, setMargin]       = useState(0);
   const [marginRate, setMarginRate] = useState(0);
+  const [cash, setCash]           = useState(0);
   const [theme, setTheme]         = useState(loadTheme);
   const [aiEnabled, setAiEnabled]       = useState(loadAI);
   const [alertHistory, setAlertHistory] = useState(loadAlerts);
@@ -1842,6 +1872,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.watchlist?.length)  setWatchlist(data.watchlist);
         if (data.margin    != null)  setMargin(data.margin);
         if (data.marginRate != null) setMarginRate(data.marginRate);
+        if (data.cash      != null)  setCash(data.cash);
         if (data.theme)              { setTheme(data.theme); applyTheme(data.theme); }
         if (data.aiEnabled != null)    setAiEnabled(data.aiEnabled);
         if (data.alertHistory?.length) setAlertHistory(data.alertHistory);
@@ -1857,15 +1888,16 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, margin, marginRate, theme, aiEnabled, alertHistory };
+  sbState.current = { positions, watchlist, margin, marginRate, cash, theme, aiEnabled, alertHistory };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, margin, marginRate, theme, aiEnabled, alertHistory, userId]);
+  },[positions, watchlist, margin, marginRate, cash, theme, aiEnabled, alertHistory, userId]);
 
   const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); if(!userId) saveSettingsServer({ margin:m, margin_rate:r }); };
+  const onCash   = (c)=>{ setCash(c); };
 
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
@@ -2010,7 +2042,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
           {tab==="brief" && <BriefingRoom/>}
           {tab==="map" && <SectorMap/>}
         </div>

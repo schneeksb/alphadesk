@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, TrendingUp, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown } from "lucide-react";
+import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, TrendingUp, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut } from "lucide-react";
+import { authEnabled } from "./lib/supabase";
+import { useSession, signOut } from "./Auth.jsx";
 
 /* ════════════════════════════════════════════════════════════════════
    AlphaDesk — LIVE app  (run locally against research.py backend)
@@ -1177,22 +1179,31 @@ function PayoffModal({ position: p, onClose }) {
   );
 }
 
-// ── SETTINGS (light / dark theme) ─────────────────────────────────────
+// ── SETTINGS (theme + account) ────────────────────────────────────────
 function SettingsMenu({ theme, setTheme }) {
   const [open, setOpen] = useState(false);
+  const session = useSession();
+  const email = session?.user?.email;
   return (
     <div style={{ position:"relative", flexShrink:0 }}>
       <button onClick={()=>setOpen(o=>!o)} title="Settings" style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 9px", color:open?C.ink:C.sub, cursor:"pointer", display:"flex" }}><Settings size={15}/></button>
       {open && (
         <>
           <div onClick={()=>setOpen(false)} style={{ position:"fixed", inset:0, zIndex:40 }}/>
-          <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:214, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.4)", zIndex:50, padding:"12px 14px" }}>
+          <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:224, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.4)", zIndex:50, padding:"12px 14px" }}>
             <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:9 }}>APPEARANCE</div>
             <div style={{ display:"flex", gap:6, background:C.panel2, borderRadius:9, padding:4, border:`1px solid ${C.line}` }}>
               {[["light","Light",Sun],["dark","Dark",Moon]].map(([id,label,Icon])=>(
                 <button key={id} onClick={()=>setTheme(id)} style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6, padding:"7px 0", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:theme===id?C.line:"transparent", color:theme===id?C.ink:C.sub }}><Icon size={13}/> {label}</button>
               ))}
             </div>
+            {authEnabled && session && (
+              <div style={{ marginTop:14, paddingTop:12, borderTop:`1px solid ${C.line}` }}>
+                <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:7 }}>ACCOUNT</div>
+                {email && <div style={{ fontSize:11.5, color:C.sub, marginBottom:9, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{email}</div>}
+                <button onClick={signOut} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"center", gap:7, background:"none", border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 0", color:C.sub, fontSize:12, fontWeight:600, cursor:"pointer" }}><LogOut size={13}/> Sign out</button>
+              </div>
+            )}
           </div>
         </>
       )}

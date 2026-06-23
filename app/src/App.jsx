@@ -373,7 +373,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
 
   if (err) return (
     <div style={{ maxWidth:860, margin:"0 auto", padding:"20px 26px" }}>
-      <button onClick={onBack} style={{ background:"none", border:"none", color:C.cold, cursor:"pointer", display:"flex", gap:5, alignItems:"center", marginBottom:18, fontSize:13 }}><ChevronLeft size={16}/> Watchlist</button>
+      <button onClick={onBack} style={{ background:"none", border:"none", color:C.cold, cursor:"pointer", display:"flex", gap:5, alignItems:"center", marginBottom:18, fontSize:13 }}><ChevronLeft size={16}/> Back</button>
       <div style={{ color:C.down, fontSize:13 }}>Couldn't load {ticker}: {err}</div>
     </div>
   );
@@ -389,7 +389,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
 
   return (
     <div style={{ maxWidth:860, margin:"0 auto", padding:"20px 26px 60px" }}>
-      <button onClick={onBack} style={{ background:"none", border:"none", color:C.cold, cursor:"pointer", display:"flex", gap:5, alignItems:"center", marginBottom:18, fontSize:13 }}><ChevronLeft size={16}/> Watchlist</button>
+      <button onClick={onBack} style={{ background:"none", border:"none", color:C.cold, cursor:"pointer", display:"flex", gap:5, alignItems:"center", marginBottom:18, fontSize:13 }}><ChevronLeft size={16}/> Back</button>
 
       {/* ── Header ─────────────────────────────────────────── */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:22 }}>
@@ -1566,18 +1566,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [wlDrag, setWlDrag] = useState(null);
   const reorderWatch = (from, to)=> setWatchlist(w=>{ const a=[...w]; const [m]=a.splice(from,1); a.splice(to,0,m); return a; });
 
-  if (detail) return (
-    <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif" }}>
-      <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled}/>
-      <div style={{ position:"fixed", top:14, right:20, zIndex:30 }}>
-        <AlertsBell alertHistory={alertHistory} setAlertHistory={setAlertHistory} onNavigate={onAlertNavigate}/>
-      </div>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-    </div>
-  );
-
   return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif" }}>
+      {/* ── Sticky top nav — always visible ─────────────────── */}
       <div style={{ borderBottom:`1px solid ${C.line}`, padding:"14px 26px", position:"sticky", top:0, background:C.bg, zIndex:20 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:20, maxWidth:1180, margin:"0 auto" }}>
           <div onClick={()=>{ setDetail(null); setTab("watchlist"); }} title="Go to Watchlist" style={{ fontWeight:800, fontSize:17, letterSpacing:"-0.02em", flexShrink:0, cursor:"pointer" }}>AlphaDesk <span style={{ color:C.hot }}>·</span></div>
@@ -1591,7 +1582,10 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           </div>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0 }}>
             {[["watchlist","Watchlist"],["portfolio","Portfolio"],["brief","News"],["map","Map"]].map(([id,label])=>(
-              <button key={id} onClick={()=>setTab(id)} style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500, background:tab===id?C.line:"transparent", color:tab===id?C.ink:C.sub }}>{label}</button>
+              <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
+                style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500,
+                  background: !detail && tab===id ? C.line : "transparent",
+                  color:      !detail && tab===id ? C.ink  : C.sub }}>{label}</button>
             ))}
           </div>
           <AlertsBell alertHistory={alertHistory} setAlertHistory={setAlertHistory} onNavigate={onAlertNavigate}/>
@@ -1600,38 +1594,43 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       </div>
       <MacroRibbon/>
 
-      <div style={{ maxWidth:1180, margin:"0 auto", padding:"22px 26px 60px" }}>
-        {tab==="watchlist" && (
-          <div>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-              <div>
-                <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>My Watchlist</div>
-                <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>{watchlist.length} stocks · live data · tap to open · drag to reorder</div>
+      {/* ── Content area ─────────────────────────────────────── */}
+      {detail ? (
+        <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled}/>
+      ) : (
+        <div style={{ maxWidth:1180, margin:"0 auto", padding:"22px 26px 60px" }}>
+          {tab==="watchlist" && (
+            <div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+                <div>
+                  <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>My Watchlist</div>
+                  <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>{watchlist.length} stocks · live data · tap to open · drag to reorder</div>
+                </div>
+                <AddInline onAdd={addTicker}/>
               </div>
-              <AddInline onAdd={addTicker}/>
+              {watchlist.length===0 ? (
+                <div style={{ textAlign:"center", padding:"50px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Empty — search or add a ticker to start.</div>
+              ) : (
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:14 }}>
+                  {watchlist.map((t,i)=>(
+                    <div key={t} draggable
+                      onDragStart={()=>setWlDrag(i)}
+                      onDragOver={e=>e.preventDefault()}
+                      onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
+                      onDragEnd={()=>setWlDrag(null)}
+                      style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
+                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled}/>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-            {watchlist.length===0 ? (
-              <div style={{ textAlign:"center", padding:"50px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Empty — search or add a ticker to start.</div>
-            ) : (
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:14 }}>
-                {watchlist.map((t,i)=>(
-                  <div key={t} draggable
-                    onDragStart={()=>setWlDrag(i)}
-                    onDragOver={e=>e.preventDefault()}
-                    onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
-                    onDragEnd={()=>setWlDrag(null)}
-                    style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
-                    <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled}/>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-        {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
-        {tab==="brief" && <BriefingRoom/>}
-        {tab==="map" && <SectorMap/>}
-      </div>
+          )}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
+          {tab==="brief" && <BriefingRoom/>}
+          {tab==="map" && <SectorMap/>}
+        </div>
+      )}
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );

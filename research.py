@@ -76,24 +76,37 @@ def technicals(ticker):
     except Exception:
         pass
 
-    # Top-3 Yahoo Finance headlines — free, no AI cost
+    # Top-3 Yahoo Finance RSS headlines — stdlib only, no AI cost
     yahoo_news = []
     try:
-        import time as _tm
-        _now = _tm.time()
-        for item in (tk.news or []):
-            headline = (item.get("title") or "").strip()
-            if not headline:
+        import urllib.request, xml.etree.ElementTree as _ET
+        from email.utils import parsedate_to_datetime as _parse_date
+        _rss_url = (f"https://feeds.finance.yahoo.com/rss/2.0/headline"
+                    f"?s={ticker}&region=US&lang=en-US")
+        _req = urllib.request.Request(_rss_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(_req, timeout=6) as _resp:
+            _root = _ET.fromstring(_resp.read())
+        _now_utc = datetime.datetime.now(datetime.timezone.utc)
+        for _item in _root.iter("item"):
+            _title = _item.find("title")
+            if not (_title is not None and _title.text):
                 continue
-            ts     = item.get("providerPublishTime", 0)
-            age_m  = int((_now - ts) / 60) if ts else 9999
-            age_str = (f"{age_m}m ago"      if age_m < 60   else
-                       f"{age_m//60}h ago"  if age_m < 1440 else
-                       f"{age_m//1440}d ago")
+            _age = "recent"
+            _pub  = _item.find("pubDate")
+            if _pub is not None and _pub.text:
+                try:
+                    _dt  = _parse_date(_pub.text)
+                    _m   = int((_now_utc - _dt).total_seconds() / 60)
+                    _age = (f"{_m}m ago"       if _m < 60   else
+                            f"{_m//60}h ago"   if _m < 1440 else
+                            f"{_m//1440}d ago")
+                except Exception:
+                    pass
+            _src = _item.find("source")
             yahoo_news.append({
-                "headline": headline,
-                "source":   item.get("publisher", "Yahoo Finance"),
-                "time":     age_str,
+                "headline": _title.text.strip(),
+                "source":   (_src.text if (_src is not None and _src.text) else "Yahoo Finance"),
+                "time":     _age,
             })
             if len(yahoo_news) == 3:
                 break

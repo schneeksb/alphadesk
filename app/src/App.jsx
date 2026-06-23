@@ -269,13 +269,13 @@ function ScoreDial({ score, size=44 }) {
 }
 
 // ── WATCHLIST CARD (fetches its own data) ─────────────────────────────
-function WatchCard({ ticker, onOpen, onRemove, aiEnabled }) {
+function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
   const [d, setD]       = useState(null);
   const [err, setErr]   = useState(false);
   useEffect(()=>{
     let alive = true;
     setD(null); setErr(false);
-    fetchResearch(ticker, aiEnabled).then(x=>{ if(alive){ x.error?setErr(true):setD(x); }}).catch(()=>alive&&setErr(true));
+    fetchResearch(ticker, aiEnabled).then(x=>{ if(alive){ x.error?setErr(true):(setD(x), onData?.(ticker, x)); }}).catch(()=>alive&&setErr(true));
     return ()=>{ alive=false; };
   },[ticker, aiEnabled]);
 
@@ -324,9 +324,29 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled }) {
         </div>
       </div>
       {d.history && <div style={{ marginTop:10 }}><Sparkline data={d.history} h={30} color={d.chg>=0?C.up:C.down}/></div>}
-      <div style={{ display:"flex", gap:7, marginTop:10 }}>
+
+      {/* 52-week range bar */}
+      {d.week52High && d.week52Low && (
+        <div style={{ marginTop:8 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", fontSize:8.5, color:C.faint, fontFamily:C.mono, marginBottom:2 }}>
+            <span>${d.week52Low}</span><span>52W</span><span>${d.week52High}</span>
+          </div>
+          <div style={{ height:3, background:C.line, borderRadius:2, overflow:"hidden" }}>
+            <div style={{ height:"100%", borderRadius:2,
+              width:`${Math.min(100,Math.max(0,((d.spot-d.week52Low)/(d.week52High-d.week52Low))*100))}%`,
+              background: d.spot >= d.week52High*0.95 ? C.up : d.spot <= d.week52Low*1.05 ? C.down : C.cold,
+            }}/>
+          </div>
+        </div>
+      )}
+
+      {/* Chips */}
+      <div style={{ display:"flex", gap:6, marginTop:9, flexWrap:"wrap" }}>
         <span style={{ fontFamily:C.mono, fontSize:10, color:C.sub, background:C.panel2, padding:"2px 7px", borderRadius:4 }}>RSI {d.rsi}</span>
-        {d.iv && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber, background:`${C.amber}14`, padding:"2px 7px", borderRadius:4 }}>IV {d.iv}%</span>}
+        {d.iv   && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber,  background:`${C.amber}14`,  padding:"2px 7px", borderRadius:4 }}>IV {d.iv}%</span>}
+        {d.relVol >= 1.5 && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber, background:`${C.amber}14`, padding:"2px 7px", borderRadius:4 }}>{d.relVol}× vol</span>}
+        {d.daysToEarn != null && d.daysToEarn <= 30 && <span style={{ fontFamily:C.mono, fontSize:10, color:C.violet, background:`${C.violet}14`, padding:"2px 7px", borderRadius:4 }}>EARN {d.daysToEarn}d</span>}
+        {d.pcRatio != null && <span style={{ fontFamily:C.mono, fontSize:10, color:d.pcRatio>1.2?C.down:d.pcRatio<0.8?C.up:C.sub, background:C.panel2, padding:"2px 7px", borderRadius:4 }}>P/C {d.pcRatio}</span>}
         {d.play && <span style={{ fontFamily:C.mono, fontSize:10, color:C.up, background:`${C.up}14`, padding:"2px 7px", borderRadius:4 }}>PLAY ✓</span>}
       </div>
     </div>
@@ -411,6 +431,20 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
         <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1 }}>
           <div style={{ fontFamily:C.mono, fontSize:30, color:C.ink, fontWeight:600 }}>${d.spot}</div>
           <div style={{ fontFamily:C.mono, fontSize:14, color:d.chg>=0?C.up:C.down, display:"flex", alignItems:"center", gap:4, marginTop:2 }}><Trend v={d.chg}/>{d.chg>=0?"+":""}{d.chg}% today</div>
+          {d.week52High && d.week52Low && (() => {
+            const pct = Math.min(100,Math.max(0,((d.spot-d.week52Low)/(d.week52High-d.week52Low))*100));
+            return (
+              <div style={{ marginTop:12 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:C.faint, fontFamily:C.mono, marginBottom:3 }}>
+                  <span>52W L ${d.week52Low}</span><span style={{ color:C.sub }}>{pct.toFixed(0)}th pct</span><span>52W H ${d.week52High}</span>
+                </div>
+                <div style={{ height:4, background:C.line, borderRadius:3, overflow:"hidden" }}>
+                  <div style={{ height:"100%", borderRadius:3, width:`${pct}%`,
+                    background: pct>=90?C.up:pct<=10?C.down:C.cold }}/>
+                </div>
+              </div>
+            );
+          })()}
         </div>
         {aiOk ? (
           <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:16 }}>
@@ -446,18 +480,23 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
 
       {/* ── Technicals grid (always) ───────────────────────── */}
       {d.fundamentals && (
-        <div style={{ display:"flex", gap:10, marginBottom:14, flexWrap:"wrap" }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:10, marginBottom:14 }}>
           {Object.entries({
             "P/E":          d.fundamentals.pe,
             "Rev Growth":   d.fundamentals.revGrowth,
             "Gross Margin": d.fundamentals.grossMargin,
             "RSI":          d.rsi,
             "IV":           d.iv ? `${d.iv}%` : "—",
-            "Earnings":     d.fundamentals.nextEarnings,
+            "P/C Ratio":    d.pcRatio ?? "—",
+            "Rel Vol":      d.relVol  ? `${d.relVol}×` : "—",
+            "Earnings":     d.fundamentals.nextEarnings + (d.daysToEarn != null ? ` (${d.daysToEarn}d)` : ""),
           }).map(([k,v])=>(
-            <div key={k} style={{ flex:"1 1 110px", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:9, padding:"10px 12px" }}>
+            <div key={k} style={{ background:C.panel2, border:`1px solid ${C.line}`, borderRadius:9, padding:"10px 12px" }}>
               <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em" }}>{k.toUpperCase()}</div>
-              <div style={{ fontFamily:C.mono, fontSize:13.5, color:C.ink, marginTop:3 }}>{v}</div>
+              <div style={{ fontFamily:C.mono, fontSize:13, color:
+                k==="P/C Ratio" && d.pcRatio ? (d.pcRatio>1.2?C.down:d.pcRatio<0.8?C.up:C.ink) :
+                k==="Rel Vol"   && d.relVol   ? (d.relVol>=1.5?C.amber:C.ink) : C.ink,
+                marginTop:3 }}>{v}</div>
             </div>
           ))}
         </div>
@@ -1566,6 +1605,12 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [wlDrag, setWlDrag] = useState(null);
   const reorderWatch = (from, to)=> setWatchlist(w=>{ const a=[...w]; const [m]=a.splice(from,1); a.splice(to,0,m); return a; });
 
+  // Collect card data as WatchCards finish loading (for the earnings strip)
+  const [cardCache, setCardCache] = useState({});
+  const handleCardData = useCallback((ticker, data) => {
+    setCardCache(prev => prev[ticker] === data ? prev : { ...prev, [ticker]: data });
+  }, []);
+
   return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif" }}>
       {/* ── Sticky top nav — always visible ─────────────────── */}
@@ -1608,6 +1653,28 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                 </div>
                 <AddInline onAdd={addTicker}/>
               </div>
+
+              {/* Upcoming earnings strip */}
+              {(()=>{
+                const soon = watchlist
+                  .filter(t => cardCache[t]?.daysToEarn != null && cardCache[t].daysToEarn <= 14)
+                  .sort((a,b) => cardCache[a].daysToEarn - cardCache[b].daysToEarn);
+                if (!soon.length) return null;
+                return (
+                  <div style={{ marginBottom:18, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"12px 18px", display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:11, fontWeight:600, color:C.sub, letterSpacing:"0.06em", flexShrink:0 }}>EARNINGS SOON</span>
+                    {soon.map(t=>(
+                      <div key={t} onClick={()=>setDetail(t)} style={{ cursor:"pointer", display:"flex", alignItems:"center", gap:7, background:C.panel2, borderRadius:7, padding:"5px 12px" }}
+                        onMouseEnter={e=>e.currentTarget.style.background=C.line}
+                        onMouseLeave={e=>e.currentTarget.style.background=C.panel2}>
+                        <span style={{ fontWeight:700, fontSize:12.5, color:C.ink }}>{t}</span>
+                        <span style={{ fontFamily:C.mono, fontSize:11, color:C.violet }}>in {cardCache[t].daysToEarn}d</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
               {watchlist.length===0 ? (
                 <div style={{ textAlign:"center", padding:"50px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Empty — search or add a ticker to start.</div>
               ) : (
@@ -1619,7 +1686,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                       onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
                       onDragEnd={()=>setWlDrag(null)}
                       style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
-                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled}/>
+                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData}/>
                     </div>
                   ))}
                 </div>

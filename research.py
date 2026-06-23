@@ -44,16 +44,6 @@ def technicals(ticker):
     dn    = (-delta.clip(upper=0)).rolling(14).mean()
     rsi   = float(100 - 100/(1 + up.iloc[-1]/dn.iloc[-1])) if dn.iloc[-1] else 50.0
 
-    # ATM IV from nearest expiry
-    iv = None
-    try:
-        exps = tk.options
-        if exps:
-            ch = tk.option_chain(exps[0]).calls
-            iv = float(ch.iloc[(ch["strike"]-spot).abs().argsort()[:1]]["impliedVolatility"].values[0]) * 100
-    except Exception:
-        pass
-
     info = {}
     try: info = tk.info
     except Exception: pass
@@ -66,13 +56,45 @@ def technicals(ticker):
               f"${mc/1e9:.0f}B"  if mc and mc>=1e9  else
               f"${mc/1e6:.0f}M"  if mc else "—")
 
-    # Next earnings date from info (list of Unix timestamps)
-    earnings_date = "—"
+    # ATM IV + P/C ratio — single options chain fetch for both
+    iv, pc_ratio = None, None
+    try:
+        exps = tk.options
+        if exps:
+            chain = tk.option_chain(exps[0])
+            calls, puts = chain.calls, chain.puts
+            iv = float(calls.iloc[(calls["strike"]-spot).abs().argsort()[:1]]["impliedVolatility"].values[0]) * 100
+            c_vol = float(calls["volume"].sum() or 0)
+            p_vol = float(puts["volume"].sum()  or 0)
+            if c_vol > 0:
+                pc_ratio = round(p_vol / c_vol, 2)
+    except Exception:
+        pass
+
+    # Relative volume (current vs 20-day average)
+    rel_vol = None
+    try:
+        avg_vol = info.get("averageVolume") or info.get("averageDailyVolume10Day") or 0
+        cur_vol = info.get("volume") or info.get("regularMarketVolume") or 0
+        if avg_vol > 0 and cur_vol > 0:
+            rel_vol = round(cur_vol / avg_vol, 1)
+    except Exception:
+        pass
+
+    # 52-week range
+    week52_high = info.get("fiftyTwoWeekHigh")
+    week52_low  = info.get("fiftyTwoWeekLow")
+
+    # Next earnings date — human label + days-until integer
+    earnings_date, days_to_earn = "—", None
     try:
         ed_list = info.get("earningsDate") or []
         if ed_list:
-            import datetime as _dt
-            earnings_date = _dt.datetime.utcfromtimestamp(ed_list[0]).strftime("%b %d")
+            earn_dt = datetime.datetime.utcfromtimestamp(ed_list[0]).date()
+            earnings_date = earn_dt.strftime("%b %d")
+            delta = (earn_dt - datetime.date.today()).days
+            if delta >= 0:
+                days_to_earn = delta
     except Exception:
         pass
 
@@ -114,20 +136,25 @@ def technicals(ticker):
         pass
 
     return {
-        "name":    info.get("longName") or info.get("shortName") or ticker,
-        "sector":  info.get("sector", "—"),
-        "mktCap":  mc_str,
-        "spot":    round(spot, 2),
-        "chg":     round(chg, 2),
-        "rsi":     round(rsi, 1),
-        "iv":      round(iv, 1) if iv else None,
-        "history": [round(float(x), 2) for x in c.tail(60).tolist()],
-        "history_dates": [d.strftime("%Y-%m-%d") for d in c.tail(60).index],
+        "name":       info.get("longName") or info.get("shortName") or ticker,
+        "sector":     info.get("sector", "—"),
+        "mktCap":     mc_str,
+        "spot":       round(spot, 2),
+        "chg":        round(chg, 2),
+        "rsi":        round(rsi, 1),
+        "iv":         round(iv, 1)         if iv         else None,
+        "pcRatio":    pc_ratio,
+        "relVol":     rel_vol,
+        "week52High": round(week52_high, 2) if week52_high else None,
+        "week52Low":  round(week52_low, 2)  if week52_low  else None,
+        "daysToEarn": days_to_earn,
+        "history":      [round(float(x), 2) for x in c.tail(60).tolist()],
+        "history_dates":[d.strftime("%Y-%m-%d") for d in c.tail(60).index],
         "yahoo_news": yahoo_news,
         "fundamentals": {
-            "pe":          safe(info.get("trailingPE"), lambda x: f"{x:.0f}x"),
+            "pe":          safe(info.get("trailingPE"),    lambda x: f"{x:.0f}x"),
             "revGrowth":   safe(info.get("revenueGrowth"), lambda x: f"{x*100:+.0f}% YoY"),
-            "grossMargin": safe(info.get("grossMargins"), lambda x: f"{x*100:.0f}%"),
+            "grossMargin": safe(info.get("grossMargins"),  lambda x: f"{x*100:.0f}%"),
             "nextEarnings": earnings_date,
         },
     }
@@ -136,39 +163,26 @@ def technicals(ticker):
 def ai_analysis_and_news(ticker, tech):
     """Claude generates the analysis summary + 3 scored news items + a 0-10 score."""
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    prompt = f"""You are a sharp equity + options analyst. Research {ticker} ({tech['name']}) as of {datetime.date.today()}.
+    prompt = f"""Equity + options analyst. Research {ticker} ({tech['name']}) as of {datetime.date.today()}.
 
-LIVE DATA: spot ${tech['spot']}, {tech['chg']:+.1f}% today, RSI {tech['rsi']}, ATM IV {tech['iv']}%, sector {tech['sector']}, P/E {tech['fundamentals']['pe']}, rev growth {tech['fundamentals']['revGrowth']}.
+Data: ${tech['spot']} ({tech['chg']:+.1f}% today), RSI {tech['rsi']}, IV {tech['iv']}%, P/E {tech['fundamentals']['pe']}, rev {tech['fundamentals']['revGrowth']}, sector {tech['sector']}.
 
-Score this name DECISIVELY on a 0-10 conviction scale. Use the WHOLE range and let the data drive it — do NOT cluster in the 4-6 neutral zone. Calibrate to this rubric:
-  0-2  strongly bearish (broken trend, deteriorating fundamentals, distribution)
-  3-4  lean bearish (headwinds dominate, weak RSI, fading momentum)
-  5    genuinely balanced — use ONLY when bull and bear cases are truly even
-  6-7  lean bullish (constructive setup, momentum/catalysts building)
-  8-10 strongly bullish (trend + fundamentals + catalysts aligned)
-Anchor the score to specifics: RSI {tech['rsi']} (>70 overbought, <30 oversold), today's {tech['chg']:+.1f}% move, the IV regime, and recent developments you know of. Two different tickers should rarely land on the same score.
+Score 0-10 DECISIVELY (use the full range, avoid 4-6 clustering):
+  0-2 strongly bearish · 3-4 lean bearish · 5 truly balanced only
+  6-7 lean bullish · 8-10 strongly bullish
 
-Produce JSON ONLY (no markdown):
+JSON ONLY:
 {{
-  "score": <float 0-10, one decimal, calibrated as above>,
-  "signal": "hot" | "cold" | "neutral",
-  "summary": "<3 sentences, SPECIFIC to {ticker}: (1) the concrete setup/catalyst right now, (2) the technical read including a key price level, (3) what ATM IV {tech['iv']}% implies for buying vs selling premium>",
+  "score": <float 0-10, one decimal>,
+  "signal": "hot"|"cold"|"neutral",
+  "summary": "<3 sentences: (1) current setup/catalyst, (2) key technical level, (3) what IV {tech['iv']}% means for premium buying vs selling>",
   "news": [
-    {{
-      "score": <int 0-10, 0=most bearish 10=most bullish — spread these out>,
-      "sentiment": "bullish" | "bearish" | "neutral",
-      "headline": "<specific, concrete headline in your own words>",
-      "source": "<plausible source, e.g. Reuters, Bloomberg>",
-      "time": "<e.g. '3h ago', '1d ago'>"
-    }}
+    {{"score":<0-10>,"sentiment":"bullish"|"bearish"|"neutral","headline":"<specific>","source":"<e.g. Reuters>","time":"<e.g. 3h ago>"}}
   ],
-  "play": null OR {{
-    "direction":"CALL"|"PUT", "strike":<number near spot>, "expiry":"YYYY-MM-DD",
-    "dte":<int>, "premium":<est number>, "conviction":"HIGH"|"MEDIUM"|"LOW"
-  }}
+  "play": null | {{"direction":"CALL"|"PUT","strike":<near spot>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est>,"conviction":"HIGH"|"MEDIUM"|"LOW"}}
 }}
 
-EXACTLY 3 news items, mixing bullish and bearish with genuinely different scores. Only suggest a play if there's a real edge; otherwise null. Be concrete and honest about downside."""
+Exactly 3 news items with spread-out scores. Play only if genuine edge, else null."""
 
     r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1200,
         messages=[{"role":"user","content":prompt}])
@@ -330,7 +344,10 @@ try:
     _ZERO_ANALYTICS = {"total_value":0, "total_cost":0, "total_pnl":0, "total_pnl_pct":0,
                        "daily_theta":0, "net_delta":0, "sector_alloc":{}}
 
+    from fastapi.middleware.gzip import GZipMiddleware
+
     app = FastAPI(title="AlphaDesk")
+    app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(CORSMiddleware, allow_origins=["*"],
                        allow_methods=["*"], allow_headers=["*"])
 
@@ -366,25 +383,16 @@ try:
                 etf = next((k for k, v in SECTOR_ETFS.items() if v.lower() == name.lower()), "—")
                 perf = f"today {s['day']:+.2f}%, 1-month {s['month']:+.1f}%" if s else "recent performance unavailable"
                 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-                prompt = f"""You are a sector strategist. Analyze the {name} sector (proxy ETF {etf}) as of {datetime.date.today()}.
-Recent performance: {perf}.
+                prompt = f"""Sector strategist. {name} sector (ETF {etf}) as of {datetime.date.today()}. Performance: {perf}.
 
-Produce JSON ONLY (no markdown):
+JSON ONLY:
 {{
-  "summary": "3-4 sentences on what is driving {name} performance right now",
-  "drivers": [
-    {{"factor":"<short name>", "impact":"positive"|"negative"|"mixed", "detail":"1-2 sentences"}}
-  ],
-  "forecast": {{
-    "horizon":"30-90 days",
-    "bias":"bullish"|"neutral"|"bearish",
-    "confidence":"high"|"medium"|"low",
-    "expected_range":"<e.g. +3% to +8%>",
-    "rationale":"2-3 sentences tying the drivers to the outlook"
-  }},
-  "catalysts": ["<upcoming catalyst to watch>"]
+  "summary":"3-4 sentences on current {name} drivers",
+  "drivers":[{{"factor":"<name>","impact":"positive"|"negative"|"mixed","detail":"1-2 sentences"}}],
+  "forecast":{{"horizon":"30-90 days","bias":"bullish"|"neutral"|"bearish","confidence":"high"|"medium"|"low","expected_range":"<e.g. +3% to +8%>","rationale":"2-3 sentences"}},
+  "catalysts":["<upcoming catalyst>"]
 }}
-Provide 3-4 drivers and 2-3 catalysts. Be specific and honest about risks."""
+3-4 drivers, 2-3 catalysts. Be specific."""
                 r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
                     messages=[{"role":"user","content":prompt}])
                 ai = _lenient_json(r.content[0].text)
@@ -522,19 +530,17 @@ Provide 3-4 drivers and 2-3 catalysts. Be specific and honest about risks."""
                 # AI is a bonus — the chart still renders if it's unavailable (e.g. no API credit).
                 try:
                     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-                    prompt = f"""You are a macro strategist. The indicator "{nm}" (symbol {symbol}) is at {cur} ({chg:+.2f}% today) as of {datetime.date.today()}.
+                    prompt = f"""Macro strategist. "{nm}" ({symbol}) at {cur} ({chg:+.2f}% today) as of {datetime.date.today()}.
 
-Produce JSON ONLY (no markdown):
+JSON ONLY:
 {{
-  "summary": "2-3 sentences: what {nm} is signaling right now and why it's moving",
-  "outlook": "2-3 sentences: 30-90 day outlook and what would change it",
-  "regime": "calm" | "neutral" | "stress" | "rising" | "falling",
-  "implication": "1-2 sentences: what this means for stocks/options positioning",
-  "news": [
-    {{"headline":"<concrete recent driver in your own words>", "source":"<plausible>", "time":"<e.g. 3h ago>"}}
-  ]
+  "summary":"2-3 sentences: what {nm} signals now and why it's moving",
+  "outlook":"2-3 sentences: 30-90 day view and what changes it",
+  "regime":"calm"|"neutral"|"stress"|"rising"|"falling",
+  "implication":"1-2 sentences: what this means for stocks/options",
+  "news":[{{"headline":"<specific driver>","source":"<e.g. Reuters>","time":"<e.g. 3h ago>"}}]
 }}
-Provide EXACTLY 3 news items. Be specific about what's moving {nm}."""
+Exactly 3 news items. Be specific."""
                     r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
                         messages=[{"role":"user","content":prompt}])
                     out.update(_lenient_json(r.content[0].text))

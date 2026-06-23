@@ -87,12 +87,31 @@ async function fetchClimate() {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
-async function fetchValue(positions) {
+async function fetchValue(positions, margin = 0, margin_rate = 0) {
   const r = await fetch(`${API}/value`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ positions }),
+    body: JSON.stringify({ positions, margin, margin_rate }),
   });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchSettings() {
+  const r = await fetch(`${API}/settings`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function saveSettingsServer(settings) {
+  try {
+    await fetch(`${API}/settings`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings }),
+    });
+  } catch { /* offline */ }
+}
+async function fetchIndicator(symbol, label) {
+  const r = await fetch(`${API}/indicator?symbol=${encodeURIComponent(symbol)}&label=${encodeURIComponent(label||"")}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -387,15 +406,15 @@ function BriefingRoom() {
     };
   },[load]);
 
-  if (err) return <div style={{ padding:40, textAlign:"center", color:C.down }}>Briefing unavailable: {err}<br/><span style={{ color:C.faint, fontSize:12 }}>Is the backend running on {API}?</span></div>;
-  if (!b)  return <div style={{ padding:60, textAlign:"center", color:C.sub }}><Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:10 }}>Loading Briefing…</div></div>;
+  if (err) return <div style={{ padding:40, textAlign:"center", color:C.down }}>News unavailable: {err}<br/><span style={{ color:C.faint, fontSize:12 }}>Is the backend running on {API}?</span></div>;
+  if (!b)  return <div style={{ padding:60, textAlign:"center", color:C.sub }}><Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:10 }}>Loading News…</div></div>;
 
   const sc = b.climate?.macro_score ?? 50;
   const scoreCol = sc>60?C.up:sc>35?C.amber:C.down;
   return (
     <div>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:16 }}>
-        <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Briefing</div>
+        <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>News</div>
         <div style={{ fontSize:11, color:C.faint, fontFamily:C.mono }}>updated {updated?.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}</div>
       </div>
       {/* Climate */}
@@ -468,29 +487,98 @@ function BriefingRoom() {
   );
 }
 
-// ── MACRO RIBBON (top strip of climate gauges) ────────────────────────
+// ── INDICATOR DRILL-DOWN (macro item → chart + AI outlook/news) ────────
+function IndicatorModal({ item, onClose }) {
+  const [d, setD] = useState(null), [err, setErr] = useState(null);
+  useEffect(()=>{ setD(null); setErr(null); fetchIndicator(item.symbol, item.label).then(x=> x.error?setErr(x.error):setD(x)).catch(e=>setErr(e.message)); },[item.symbol]);
+  useEffect(()=>{ const h=(e)=>{ if(e.key==="Escape") onClose(); }; window.addEventListener("keydown",h); return ()=>window.removeEventListener("keydown",h); },[onClose]);
+  const regimeCol = (r)=> ({calm:C.up, falling:C.up, neutral:C.amber, rising:C.down, stress:C.down}[r] || C.amber);
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:60, display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"6vh 16px", overflowY:"auto" }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:C.bg, border:`1px solid ${C.line}`, borderRadius:16, width:"100%", maxWidth:580, boxShadow:"0 24px 70px rgba(0,0,0,0.5)" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", padding:"18px 20px", borderBottom:`1px solid ${C.line}` }}>
+          <div>
+            <div style={{ fontSize:18, fontWeight:800, color:C.ink }}>{item.label}</div>
+            {d && <div style={{ fontSize:12, color:C.faint, marginTop:3, fontFamily:C.mono }}>{d.current} <span style={{ color:(d.change||0)>=0?C.up:C.down }}>{(d.change||0)>=0?"+":""}{d.change}% today</span>{d.regime && <span style={{ color:regimeCol(d.regime), marginLeft:8, textTransform:"capitalize" }}>· {d.regime}</span>}</div>}
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={18}/></button>
+        </div>
+        <div style={{ padding:"16px 20px 20px" }}>
+          {err && <div style={{ color:C.down, fontSize:13 }}>Couldn't load: {err}</div>}
+          {!d && !err && <div style={{ textAlign:"center", padding:"30px 0", color:C.sub }}><Loader2 size={18} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:8, fontSize:12.5 }}>Loading {item.label}…</div></div>}
+          {d && (
+            <>
+              {d.history?.length>1 && (
+                <div style={{ marginBottom:16 }}>
+                  <InteractiveChart data={d.history} dates={d.history_dates} color={(d.change||0)>=0?C.up:C.down}/>
+                  <div style={{ fontSize:9.5, color:C.faint, marginTop:4, letterSpacing:"0.04em" }}>60-DAY · hover to inspect</div>
+                </div>
+              )}
+              {d.ai_error ? (
+                <div style={{ fontSize:12.5, color:C.amber, background:`${C.amber}14`, border:`1px solid ${C.amber}33`, borderRadius:10, padding:"11px 13px" }}>
+                  AI summary &amp; news are unavailable right now{/credit|balance/i.test(d.ai_error) ? " (Anthropic API credit exhausted)" : ""}. The live chart above still works.
+                </div>
+              ) : (
+                <>
+                  {d.summary && <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.65, marginBottom:14 }}>{d.summary}</div>}
+                  {d.outlook && (
+                    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"13px 15px", marginBottom:14 }}>
+                      <div style={{ fontSize:10, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:6 }}>30-90 Day Outlook</div>
+                      <div style={{ fontSize:12.5, color:C.sub, lineHeight:1.6 }}>{d.outlook}</div>
+                      {d.implication && <div style={{ fontSize:12, color:C.ink, lineHeight:1.55, marginTop:8 }}><span style={{ color:C.violet }}>→</span> {d.implication}</div>}
+                    </div>
+                  )}
+                  {d.news?.length>0 && (
+                    <div>
+                      <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:9 }}>Latest</div>
+                      {d.news.map((n,i)=>(
+                        <div key={i} style={{ padding:"9px 0", borderBottom:`1px solid ${C.panel2}` }}>
+                          <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.45 }}>{n.headline}</div>
+                          <div style={{ fontSize:10, color:C.faint, fontFamily:C.mono, marginTop:3 }}>{n.source} · {n.time}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MACRO RIBBON (top strip of climate gauges — click to drill in) ─────
 function MacroRibbon() {
   const [c, setC] = useState(null);
+  const [sel, setSel] = useState(null);
   useEffect(()=>{ let alive=true; fetchClimate().then(x=>{ if(alive && !x.error) setC(x); }).catch(()=>{}); return ()=>{alive=false;}; },[]);
   if (!c) return null;
   const sc = c.macro_score ?? 50;
   const scoreCol = sc>60?C.up:sc>35?C.amber:C.down;
+  const hov = (e,on)=>{ e.currentTarget.style.background = on ? C.line : "transparent"; };
   return (
     <div style={{ borderBottom:`1px solid ${C.line}`, background:C.panel2 }}>
-      <div style={{ maxWidth:1180, margin:"0 auto", padding:"7px 26px", display:"flex", alignItems:"center", gap:20, overflowX:"auto", whiteSpace:"nowrap" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:7, flexShrink:0 }}>
+      <div style={{ maxWidth:1180, margin:"0 auto", padding:"6px 22px", display:"flex", alignItems:"center", gap:8, overflowX:"auto", whiteSpace:"nowrap" }}>
+        <div onClick={()=>setSel({symbol:"SPY", label:"S&P 500"})} onMouseEnter={e=>hov(e,true)} onMouseLeave={e=>hov(e,false)} title="Market overview — chart & outlook"
+          style={{ display:"flex", alignItems:"center", gap:7, flexShrink:0, cursor:"pointer", padding:"3px 7px", borderRadius:6 }}>
           <Activity size={13} color={scoreCol}/>
           <span style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.1em" }}>MACRO</span>
           <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:700, color:scoreCol }}>{sc}</span>
           <span style={{ fontSize:11, color:scoreCol }}>{c.posture}</span>
         </div>
         {(c.gauges||[]).map((g,i)=>(
-          <div key={i} style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+          <div key={i} onClick={()=> g.symbol && setSel({symbol:g.symbol, label:g.label})}
+            onMouseEnter={e=> g.symbol && hov(e,true)} onMouseLeave={e=>hov(e,false)}
+            title={g.symbol ? `${g.label} — chart, outlook & news` : ""}
+            style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, cursor: g.symbol?"pointer":"default", padding:"3px 7px", borderRadius:6 }}>
             <span style={{ fontSize:10, color:C.faint }}>{g.label}</span>
             <span style={{ fontFamily:C.mono, fontSize:12, color: g.good?C.up:C.down }}>{g.value}</span>
           </div>
         ))}
       </div>
+      {sel && <IndicatorModal item={sel} onClose={()=>setSel(null)}/>}
     </div>
   );
 }
@@ -543,6 +631,7 @@ function PositionForm({ initial, onSubmit, onClose }) {
   const [cost, setCost]     = useState(initial?.cost_basis != null ? String(initial.cost_basis) : "");
   const [strike, setStrike] = useState(initial?.strike != null ? String(initial.strike) : "");
   const [expiry, setExpiry] = useState(initial?.expiry || "");
+  const [stop, setStop]     = useState(initial?.stop != null ? String(initial.stop) : "");
   const [error, setError]   = useState("");
   const isOpt = type !== "SHARES";
 
@@ -559,6 +648,8 @@ function PositionForm({ initial, onSubmit, onClose }) {
       if (!expiry)  return setError("Expiry is required for options");
       pos.strike = k; pos.expiry = expiry;
     }
+    const sv = parseFloat(stop);
+    pos.stop = (stop !== "" && sv > 0) ? sv : null;   // underlying price; null clears it
     onSubmit(pos); onClose();
   };
 
@@ -581,6 +672,7 @@ function PositionForm({ initial, onSubmit, onClose }) {
         <div><label style={lbl}>COST BASIS ($)</label><input value={cost} onChange={e=>setCost(e.target.value)} type="number" placeholder="total paid" style={inp}/></div>
         {isOpt && <div><label style={lbl}>STRIKE</label><input value={strike} onChange={e=>setStrike(e.target.value)} type="number" placeholder="210" style={inp}/></div>}
         {isOpt && <div><label style={lbl}>EXPIRY</label><input value={expiry} onChange={e=>setExpiry(e.target.value)} type="date" style={inp}/></div>}
+        <div><label style={lbl}>STOP LOSS ($)</label><input value={stop} onChange={e=>setStop(e.target.value)} type="number" placeholder="optional · underlying" style={inp}/></div>
       </div>
       {error && <div style={{ color:C.down, fontSize:11.5, marginBottom:10, display:"flex", alignItems:"center", gap:5 }}><AlertCircle size={12}/> {error}</div>}
       <div style={{ display:"flex", gap:8 }}>
@@ -592,7 +684,7 @@ function PositionForm({ initial, onSubmit, onClose }) {
 }
 
 // ── PORTFOLIO (manual positions, Greeks, P&L; expired in an envelope) ───
-function PortfolioPage({ positions, data, err, loading, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen }) {
+function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
@@ -608,7 +700,7 @@ function PortfolioPage({ positions, data, err, loading, onAdd, onUpdate, onRemov
   const num = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
   const sectors = Object.entries(a.sector_alloc||{}).sort((x,y)=>y[1]-x[1]);
   const totalAlloc = sectors.reduce((s,[,v])=>s+v,0) || 1;
-  const GRID = "1.5fr 1fr 1fr 1fr 1fr 1fr 0.8fr 0.9fr 0.8fr 0.8fr 1.3fr 78px";
+  const GRID = "1.5fr 1fr 1fr 1fr 1fr 1fr 0.8fr 0.9fr 0.8fr 0.8fr 1.1fr 1.3fr 78px";
   const COLS = [
     {key:"ticker",      label:"Position", align:"left"},
     {key:"cost_basis",  label:"Cost",     align:"right"},
@@ -620,6 +712,7 @@ function PortfolioPage({ positions, data, err, loading, onAdd, onUpdate, onRemov
     {key:"theta",       label:"Θ/day",    align:"right"},
     {key:"iv",          label:"IV",       align:"right"},
     {key:"dte",         label:"DTE",      align:"right"},
+    {key:"stop",        label:"Stop",     align:"right"},
     {key:"score",       label:"Signal",   align:"right"},
   ];
   const toggleSort = (key)=> setSort(s=> s.key!==key ? {key,dir:"desc"} : s.dir==="desc" ? {key,dir:"asc"} : {key:null,dir:null});
@@ -639,6 +732,34 @@ function PortfolioPage({ positions, data, err, loading, onAdd, onUpdate, onRemov
       {sub && <div style={{ fontSize:11, color:C.sub, marginTop:2 }}>{sub}</div>}
     </div>
   );
+
+  const MarginCard = () => {
+    const [edit, setEdit] = useState(false);
+    const [m, setM] = useState(String(margin||0));
+    const [r, setR] = useState(String(marginRate||0));
+    const ip = { width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 7px", color:C.ink, fontSize:13, outline:"none", fontFamily:C.mono };
+    if (edit) return (
+      <div style={{ flex:"1 1 200px", background:C.panel, border:`1px solid ${C.amber}66`, borderRadius:12, padding:"13px 16px" }}>
+        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:8 }}>MARGIN</div>
+        <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+          <div style={{ flex:1 }}><div style={{ fontSize:8.5, color:C.faint, marginBottom:2 }}>BALANCE $</div><input value={m} onChange={e=>setM(e.target.value)} type="number" style={ip}/></div>
+          <div style={{ flex:1 }}><div style={{ fontSize:8.5, color:C.faint, marginBottom:2 }}>RATE %</div><input value={r} onChange={e=>setR(e.target.value)} type="number" style={ip}/></div>
+        </div>
+        <div style={{ display:"flex", gap:6 }}>
+          <button onClick={()=>{ onMargin(parseFloat(m)||0, parseFloat(r)||0); setEdit(false); }} style={{ background:C.up, border:"none", borderRadius:7, padding:"6px 12px", color:"#06080d", fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Save</button>
+          <button onClick={()=>setEdit(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:7, padding:"6px 10px", color:C.sub, fontSize:11.5, cursor:"pointer" }}>Cancel</button>
+        </div>
+      </div>
+    );
+    return (
+      <div onClick={()=>{ setM(String(margin||0)); setR(String(marginRate||0)); setEdit(true); }} title="Click to set margin balance & rate"
+        style={{ flex:"1 1 180px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 18px", cursor:"pointer" }}>
+        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", display:"flex", justifyContent:"space-between", alignItems:"center" }}>MARGIN <Pencil size={11} color={C.faint}/></div>
+        <div style={{ fontFamily:C.mono, fontSize:24, fontWeight:700, color:(margin||0)>0?C.amber:C.ink, marginTop:4 }}>${(margin||0).toLocaleString()}</div>
+        <div style={{ fontSize:11, color:C.sub, marginTop:2 }}>{margin>0 ? `${marginRate||0}% · $${num(a.margin_interest_daily,2)}/day` : "click to add margin"}</div>
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -676,14 +797,16 @@ function PortfolioPage({ positions, data, err, loading, onAdd, onUpdate, onRemov
           <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:16 }}>
             <Stat label="TOTAL VALUE"  value={`$${(a.total_value||0).toLocaleString()}`} sub={`cost $${(a.total_cost||0).toLocaleString()}`}/>
             <Stat label="TOTAL P&L"    value={`${(a.total_pnl||0)>=0?"+":""}$${Math.abs(a.total_pnl||0).toLocaleString()}`} sub={`${((a.total_pnl_pct||0)*100).toFixed(1)}%`} col={pnlCol}/>
+            <Stat label="NET VALUE"    value={`$${(a.net_value ?? a.total_value ?? 0).toLocaleString()}`} sub={margin>0?"equity after margin":"= total value"}/>
             <Stat label="NET DELTA"    value={num(a.net_delta,0)} sub="share-equivalent exposure"/>
             <Stat label="DAILY THETA"  value={`$${num(a.daily_theta,0)}`} sub="time decay per day" col={(a.daily_theta||0)<0?C.down:C.sub}/>
+            <MarginCard/>
           </div>
 
           {/* Active positions */}
           <div style={{ fontSize:11, color:C.faint, marginBottom:7 }}>{sort.key ? "Sorted — clear the sort (click the header again) to drag-reorder" : "Click a column to sort · drag the handle to reorder"}</div>
           <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, overflowX:"auto", marginBottom:16 }}>
-           <div style={{ minWidth:1040 }}>
+           <div style={{ minWidth:1180 }}>
             <div style={{ display:"grid", gridTemplateColumns:GRID, padding:"10px 16px", borderBottom:`1px solid ${C.line}`, fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>
               {COLS.map((c)=>(
                 <div key={c.key} onClick={()=>toggleSort(c.key)} title="Sort"
@@ -725,6 +848,16 @@ function PortfolioPage({ positions, data, err, loading, onAdd, onUpdate, onRemov
                   <div style={{ textAlign:"right", color:C.sub }}>{p.theta?num(p.theta,2):"—"}</div>
                   <div style={{ textAlign:"right", color:C.amber }}>{p.iv?`${(p.iv*100).toFixed(0)}%`:"—"}</div>
                   <div style={{ textAlign:"right", color:C.sub }}>{p.dte??"—"}</div>
+                  <div style={{ textAlign:"right" }}>
+                    {p.stop!=null ? (
+                      <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end" }}>
+                        <span style={{ color: p.stop_hit?C.down:C.ink }}>${p.stop}</span>
+                        <span style={{ fontSize:8.5, fontWeight:700, color: p.stop_hit?C.down:C.up }}>{p.stop_hit?"HIT":`+${((p.stop_dist||0)*100).toFixed(0)}%`}</span>
+                      </div>
+                    ) : (
+                      <span style={{ color:C.faint, fontSize:10 }} title="recommended stop">rec ${p.stop_rec ?? "—"}</span>
+                    )}
+                  </div>
                   <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:2 }}>
                     <span style={{ fontWeight:700, color:scoreColr(p.score) }}>{p.score==null?"—":p.score}</span>
                     {p.rec && <span style={{ fontSize:8.5, fontWeight:700, letterSpacing:"0.04em", color:recColor(p.rec), background:`${recColor(p.rec)}1c`, padding:"1px 6px", borderRadius:4 }}>{p.rec}</span>}
@@ -739,7 +872,7 @@ function PortfolioPage({ positions, data, err, loading, onAdd, onUpdate, onRemov
             })}
             {errored.map((p)=>(
               <div key={p.id} style={{ display:"grid", gridTemplateColumns:GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.down, alignItems:"center" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:6, gridColumn:"1 / 12" }}><AlertCircle size={12}/> {p.ticker} — couldn't load ({p.error})</div>
+                <div style={{ display:"flex", alignItems:"center", gap:6, gridColumn:"1 / -2" }}><AlertCircle size={12}/> {p.ticker} — couldn't load ({p.error})</div>
                 <div style={{ display:"flex", justifyContent:"flex-end" }}><button onClick={()=>onRemove(p.id)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }}><Trash2 size={13}/></button></div>
               </div>
             ))}
@@ -1076,6 +1209,8 @@ export default function AlphaDesk() {
   const [portfolio, setPortfolio] = useState(null);
   const [pfErr, setPfErr]         = useState(null);
   const [pfLoading, setPfLoading] = useState(false);
+  const [margin, setMargin]       = useState(0);
+  const [marginRate, setMarginRate] = useState(0);
   const [theme, setTheme]         = useState(loadTheme);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
@@ -1096,15 +1231,21 @@ export default function AlphaDesk() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
+  // Load margin settings (server is source of truth, syncs across browsers).
+  useEffect(()=>{
+    fetchSettings().then(s=>{ const st=s.settings||{}; if(st.margin!=null)setMargin(st.margin); if(st.margin_rate!=null)setMarginRate(st.margin_rate); }).catch(()=>{});
+  },[]);
+  const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); saveSettingsServer({ margin:m, margin_rate:r }); };
+
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
-  const valuePortfolio = useCallback((list)=>{
+  const valuePortfolio = useCallback((list, m=0, r=0)=>{
     setPfErr(null); setPfLoading(true);
-    fetchValue(list).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
+    fetchValue(list, m, r).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
   },[]);
-  // Re-value only when the CONTENTS of positions change — not when merely reordered.
-  const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis].join("|")).sort().join(",");
-  useEffect(()=>{ valuePortfolio(positionsRef.current); },[valSig, valuePortfolio]);
+  // Re-value when positions' CONTENTS or the margin inputs change — not when merely reordered.
+  const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis,p.stop].join("|")).sort().join(",");
+  useEffect(()=>{ valuePortfolio(positionsRef.current, margin, marginRate); },[valSig, margin, marginRate, valuePortfolio]);
 
   // Every change updates state AND persists to the server so other browsers stay in sync.
   const commit         = (next)=>{ setPositions(next); savePositionsServer(next); };
@@ -1153,7 +1294,7 @@ export default function AlphaDesk() {
             {query && <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={14}/></button>}
           </div>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0 }}>
-            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["brief","Briefing"],["map","Map"]].map(([id,label])=>(
+            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["brief","News"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>setTab(id)} style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500, background:tab===id?C.line:"transparent", color:tab===id?C.ink:C.sub }}>{label}</button>
             ))}
           </div>
@@ -1191,7 +1332,7 @@ export default function AlphaDesk() {
             )}
           </div>
         )}
-        {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions)} onOpen={setDetail}/>}
+        {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
         {tab==="brief" && <BriefingRoom/>}
         {tab==="map" && <SectorMap/>}
       </div>

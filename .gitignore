@@ -25,8 +25,9 @@ report_*.json
 research_*.json
 scanner_*.json
 
-# Persisted portfolio positions (personal)
+# Persisted portfolio positions / settings (personal)
 positions.json
+settings.json
 
 # OS / editor
 .DS_Store

@@ -91,8 +91,8 @@ def fetch_climate():
             return 0.0
 
     vix   = last("^VIX") or 18.0
-    tnx   = last("^TNX")                    # 10Y yield ×10
-    y10   = round(tnx/10, 2) if tnx else 4.2
+    tnx   = last("^TNX")                    # ^TNX now quotes the 10Y yield directly (e.g. 4.5)
+    y10   = round(tnx, 2) if tnx else 4.2
     dxy   = last("DX-Y.NYB") or 102.0
     hyg   = chg("HYG")                      # high-yield ETF — credit proxy
     lqd   = chg("LQD")                      # IG credit proxy
@@ -124,12 +124,12 @@ def fetch_climate():
     climate = {
         "macro_score": score, "posture": posture,
         "gauges": [
-            {"label":"VIX",            "value":f"{vix:.1f}",   "trend":"down" if vix<18 else "up",   "good":vix<20},
-            {"label":"10Y Yield",      "value":f"{y10:.2f}%",  "trend":"down",                        "good":y10<4.5},
-            {"label":"Credit (HYG)",   "value":f"{hyg*100:+.2f}%","trend":"up" if hyg>0 else "down",  "good":hyg>=0},
-            {"label":"Mkt Breadth",    "value":f"{int(breadth*100)}%","trend":"up" if breadth>0.55 else "down","good":breadth>0.55},
-            {"label":"Dollar (DXY)",   "value":f"{dxy:.1f}",   "trend":"down","good":dxy<104},
-            {"label":"IG Credit (LQD)","value":f"{lqd*100:+.2f}%","trend":"up" if lqd>0 else "down","good":lqd>=0},
+            {"label":"VIX",            "symbol":"^VIX",     "value":f"{vix:.1f}",   "trend":"down" if vix<18 else "up",   "good":vix<20},
+            {"label":"10Y Yield",      "symbol":"^TNX",     "value":f"{y10:.2f}%",  "trend":"down",                        "good":y10<4.5},
+            {"label":"Credit (HYG)",   "symbol":"HYG",      "value":f"{hyg*100:+.2f}%","trend":"up" if hyg>0 else "down",  "good":hyg>=0},
+            {"label":"Mkt Breadth",    "symbol":"SPY",      "value":f"{int(breadth*100)}%","trend":"up" if breadth>0.55 else "down","good":breadth>0.55},
+            {"label":"Dollar (DXY)",   "symbol":"DX-Y.NYB", "value":f"{dxy:.1f}",   "trend":"down","good":dxy<104},
+            {"label":"IG Credit (LQD)","symbol":"LQD",      "value":f"{lqd*100:+.2f}%","trend":"up" if lqd>0 else "down","good":lqd>=0},
         ],
         "raw": {"vix":vix, "y10":y10, "dxy":dxy, "hyg":hyg, "breadth":breadth},
     }

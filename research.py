@@ -232,6 +232,40 @@ def _recommend(score, pnl_pct, dte):
         return "SELL"                                  # neutral conviction + big gain → take profits
     return "HOLD"
 
+
+# ── PORTFOLIO SETTINGS (margin, etc.) — persisted server-side like positions ──
+_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+def _read_settings():
+    try:
+        with open(_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _write_settings(s):
+    with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(s, f, indent=2)
+
+
+def _apply_margin(analytics, margin, rate):
+    """Fold a margin balance + annual rate into analytics: equity (net value) and daily carry."""
+    a = dict(analytics)
+    a["margin"] = round(margin, 2)
+    a["margin_rate"] = rate
+    a["margin_interest_daily"] = round(margin * (rate / 100.0) / 365.0, 2) if (margin and rate) else 0
+    a["net_value"] = round(a.get("total_value", 0) - margin, 2)
+    return a
+
+
+def _stop_recommendation(pos_type, spot):
+    """A starting-suggestion stop level: ~8% below spot for shares, ~15% for (leveraged) options."""
+    if not spot:
+        return None
+    band = 0.15 if pos_type != "SHARES" else 0.08
+    return round(spot * (1 - band), 2)
+
+
 try:
     from fastapi import FastAPI, Body
     from fastapi.middleware.cors import CORSMiddleware
@@ -340,19 +374,22 @@ Provide 3-4 drivers and 2-3 catalysts. Be specific and honest about risks."""
         # Value a user-supplied list of positions (entered/persisted in the browser).
         # Splits results into active / expired / errored; analytics & alerts use active only.
         positions_in = payload.get("positions") or []
+        margin = float(payload.get("margin") or 0)
+        rate   = float(payload.get("margin_rate") or 0)
         from run_daily import (layer1_data_valuation, layer2_portfolio_analytics,
                                get_macro_score, layer4_alerts)
         macro = get_macro_score()
         if not positions_in:
             return _json_safe({"generated_at": datetime.datetime.now().isoformat(),
                                "positions": [], "expired": [], "errored": [],
-                               "analytics": dict(_ZERO_ANALYTICS), "macro": macro, "alerts": []})
+                               "analytics": _apply_margin(dict(_ZERO_ANALYTICS), margin, rate),
+                               "macro": macro, "alerts": []})
         valued  = layer1_data_valuation(positions_in)
         expired = [p for p in valued if p.get("expired")]
         errored = [p for p in valued if p.get("error")]
         active  = [p for p in valued if not p.get("expired") and not p.get("error")]
-        # Enrich each active position with a 0-100 bullishness score (reusing the cached
-        # AI research sentiment) and a HOLD/BUY/SELL recommendation.
+        # Enrich each active position: 0-100 bullishness score (cached AI sentiment),
+        # a HOLD/BUY/SELL rec, a recommended stop, and analysis of the user's entered stop.
         for p in active:
             sc = None
             try:
@@ -360,13 +397,30 @@ Provide 3-4 drivers and 2-3 catalysts. Be specific and honest about risks."""
                 sc = rb.get("score")
             except Exception:
                 pass
-            p["score"] = round(sc * 10) if isinstance(sc, (int, float)) else None
-            p["rec"]   = _recommend(sc, p.get("pnl_pct"), p.get("dte"))
+            p["score"]    = round(sc * 10) if isinstance(sc, (int, float)) else None
+            rec = _recommend(sc, p.get("pnl_pct"), p.get("dte"))
+            spot = p.get("spot")
+            p["stop_rec"] = _stop_recommendation(p.get("type"), spot)
+            st = p.get("stop")
+            if st and spot:
+                p["stop_dist"] = round((spot - st) / spot, 4)   # cushion above the stop (fraction)
+                p["stop_hit"]  = spot <= st
+                if p["stop_hit"]:
+                    rec = "SELL"
+            else:
+                p["stop_dist"] = None
+                p["stop_hit"]  = False
+            p["rec"] = rec
         if active:
             analytics = layer2_portfolio_analytics(active)
-            alerts    = layer4_alerts(active, analytics, macro, {})
+            alerts    = list(layer4_alerts(active, analytics, macro, {}))
         else:
             analytics, alerts = dict(_ZERO_ANALYTICS), []
+        analytics = _apply_margin(analytics, margin, rate)
+        for p in active:                       # stop-hit alerts
+            if p.get("stop_hit"):
+                alerts.append({"ticker": p["ticker"], "type": "STOP_HIT", "severity": "red",
+                               "message": f"{p['ticker']} hit your stop ${p.get('stop')}"})
         return _json_safe({"generated_at": datetime.datetime.now().isoformat(),
                            "positions": active, "expired": expired, "errored": errored,
                            "analytics": analytics, "macro": macro, "alerts": alerts})
@@ -380,6 +434,59 @@ Provide 3-4 drivers and 2-3 catalysts. Be specific and honest about risks."""
         positions = payload.get("positions") or []
         _write_positions(positions)
         return {"ok": True, "count": len(positions)}
+
+    @app.get("/settings")
+    def get_settings():
+        return {"settings": _read_settings()}
+
+    @app.put("/settings")
+    def put_settings(payload: dict = Body(default={})):
+        s = payload.get("settings") or {}
+        _write_settings(s)
+        return {"ok": True}
+
+    @app.get("/indicator")
+    def indicator_endpoint(symbol: str, label: str = ""):
+        # Macro indicator drill-down: 60-day history + AI summary/outlook/news.
+        def produce():
+            try:
+                from scanner import _lenient_json
+                h = yf.Ticker(symbol).history(period="60d")["Close"].dropna()
+                if h.empty:
+                    return {"error": f"no data for {symbol}"}
+                hist  = [round(float(x), 2) for x in h.tail(60).tolist()]
+                dates = [d.strftime("%Y-%m-%d") for d in h.tail(60).index]
+                cur   = hist[-1] if hist else None
+                chg   = round((hist[-1] / hist[-2] - 1) * 100, 2) if len(hist) > 1 and hist[-2] else 0.0
+                nm    = label or symbol
+                out = {"label": nm, "symbol": symbol, "current": cur, "change": chg,
+                       "history": hist, "history_dates": dates, "news": [],
+                       "generated_at": datetime.datetime.now().isoformat()}
+                # AI is a bonus — the chart still renders if it's unavailable (e.g. no API credit).
+                try:
+                    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                    prompt = f"""You are a macro strategist. The indicator "{nm}" (symbol {symbol}) is at {cur} ({chg:+.2f}% today) as of {datetime.date.today()}.
+
+Produce JSON ONLY (no markdown):
+{{
+  "summary": "2-3 sentences: what {nm} is signaling right now and why it's moving",
+  "outlook": "2-3 sentences: 30-90 day outlook and what would change it",
+  "regime": "calm" | "neutral" | "stress" | "rising" | "falling",
+  "implication": "1-2 sentences: what this means for stocks/options positioning",
+  "news": [
+    {{"headline":"<concrete recent driver in your own words>", "source":"<plausible>", "time":"<e.g. 3h ago>"}}
+  ]
+}}
+Provide EXACTLY 3 news items. Be specific about what's moving {nm}."""
+                    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
+                        messages=[{"role":"user","content":prompt}])
+                    out.update(_lenient_json(r.content[0].text))
+                except Exception as ai_e:
+                    out["ai_error"] = str(ai_e)
+                return _json_safe(out)
+            except Exception as e:
+                return {"error": str(e)}
+        return _cached(f"indicator:{symbol}", produce)
 
     @app.get("/briefing")
     def briefing_endpoint():

@@ -70,17 +70,21 @@ def get_option_mark_price(ticker_obj, strike, expiry_str, option_type="call"):
             return None, 0.35
         r = row.iloc[0]
 
-        bid  = float(r.get("bid",  0) or 0)
-        ask  = float(r.get("ask",  0) or 0)
-        last = float(r.get("lastPrice", 0) or 0)
+        def _fval(v):
+            """Safe float that treats NaN/inf/None as 0 — NaN is truthy so `x or 0` doesn't work."""
+            try:
+                f = float(v)
+                return f if np.isfinite(f) else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        bid  = _fval(r.get("bid"))
+        ask  = _fval(r.get("ask"))
+        last = _fval(r.get("lastPrice"))
         mark = (bid + ask) / 2 if (bid > 0 and ask > 0) else (last if last > 0 else None)
 
-        try:
-            iv = float(r.get("impliedVolatility") or 0)
-        except (ValueError, TypeError):
-            iv = 0.0
-        if not (np.isfinite(iv) and iv > 0):
-            iv = 0.35  # fallback: 35% vol when chain IV is missing/zero/NaN
+        iv_raw = _fval(r.get("impliedVolatility"))
+        iv = iv_raw if iv_raw > 0 else 0.35  # fallback when chain IV is missing/zero/NaN
 
         return mark, iv
     except Exception:

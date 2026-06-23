@@ -234,12 +234,13 @@ JSON ONLY — no markdown, no code fences:
   "news": [
     {{"score":<0-10>,"sentiment":"bullish"|"bearish"|"neutral","headline":"<specific plausible recent headline>","source":"<e.g. Bloomberg>","time":"<e.g. 2h ago>"}}
   ],
+  "trade_levels": {{"entry":<current spot or best entry price>,"target":<30-day price target>,"stop":<stop loss price>,"risk_reward":"<e.g. 1:2.5>"}},
   "play": null | {{"direction":"CALL"|"PUT","strike":<near ATM>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est float>,"conviction":"HIGH"|"MEDIUM"|"LOW","thesis":"<1 sentence: structure rationale>"}}
 }}
 
 Exactly 3 news items. PLAY only if genuine asymmetric edge — otherwise null."""
 
-    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1700,
         messages=[{"role": "user", "content": prompt}])
     from scanner import _lenient_json
     return _lenient_json(r.content[0].text)
@@ -574,6 +575,38 @@ Be directional and specific. No hedging."""
                 return {"error": str(e)}
         return _cached_swr("outlook", produce, ttl=3600, stale_ttl=14400)
 
+    @app.get("/why-now")
+    def why_now_endpoint(ticker: str):
+        """Fresh AI take on today's specific price action — no caching."""
+        ticker = ticker.upper().strip()
+        tech = technicals(ticker)
+        if tech is None:
+            return {"error": "No data found"}
+        try:
+            client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            w52h, w52l, spot = tech.get('week52High'), tech.get('week52Low'), tech.get('spot')
+            w52_pct = ""
+            if w52h and w52l and spot and w52h != w52l:
+                pct = (spot - w52l) / (w52h - w52l) * 100
+                w52_pct = f"(52W: {pct:.0f}th %ile)"
+            earn_ctx = f"earnings in {tech['daysToEarn']}d" if tech.get('daysToEarn') is not None else ""
+            prompt = f"""Sharp market analyst. Today: {datetime.date.today()}.
+
+{ticker} ({tech['name']}) is at ${spot} ({tech['chg']:+.1f}% TODAY) {w52_pct}.
+RSI {tech['rsi']} | IV {tech['iv']}% | P/C {tech.get('pcRatio','n/a')} | Rel Vol {tech.get('relVol','?')}× {earn_ctx}
+
+Write ONE crisp paragraph (under 110 words) answering:
+What is happening to this stock TODAY specifically? Is today's move meaningful signal or just noise?
+What should a trader watching this right now pay attention to or do?
+
+Be direct. Specific numbers. No hedging. No "it could go either way." Take a position."""
+            r = client.messages.create(model="claude-sonnet-4-6", max_tokens=220,
+                messages=[{"role":"user","content":prompt}])
+            return _json_safe({"ticker":ticker,"take":r.content[0].text.strip(),
+                               "spot":tech['spot'],"chg":tech['chg']})
+        except Exception as e:
+            return {"error":str(e)}
+
     @app.get("/sector")
     def sector_endpoint(name: str):
         # Drill-down: AI explanation of what's driving a sector + 30-90 day forecast.
@@ -658,6 +691,7 @@ JSON ONLY:
         # Enrich each active position with stage/conviction from cached research.
         for p in active:
             sc, conviction, stage = None, None, None
+            rb = {}
             try:
                 rb = _cached(f"research:{p['ticker']}", lambda t=p['ticker']: research(t))
                 sc         = rb.get("score")
@@ -673,6 +707,8 @@ JSON ONLY:
             p["score"]      = sc_num
             p["stage"]      = stage
             p["conviction"] = conviction
+            p["reason"]       = rb.get("reason")
+            p["trade_levels"] = rb.get("trade_levels")
             rec = _recommend(sc, p.get("pnl_pct"), p.get("dte"), conviction)
             spot = p.get("spot")
             p["stop_rec"] = _stop_recommendation(p.get("type"), spot)

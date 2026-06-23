@@ -234,6 +234,8 @@ function Sparkline({ data, w=120, h=32, color }) {
 const stageEmoji = (s) => ({"Breakout":"🚀","Trending":"📈","Coiling":"🔄","Oversold Bounce":"⚡","Resistance Test":"🧱","Running Out of Steam":"😮‍💨","Deteriorating":"⚠️","Collapsing":"🔻"}[s]||"");
 const stageColor = (s) => ["Breakout","Trending","Oversold Bounce"].includes(s)?C.up:["Deteriorating","Collapsing"].includes(s)?C.down:["Resistance Test","Running Out of Steam"].includes(s)?C.amber:C.cold;
 const convictionColor = (c) => c==="Strong Setup"?C.up:c==="Risky Setup"?C.down:C.amber;
+const convictionToRec = (c) => c==="Strong Setup"?"BUY":c==="Risky Setup"?"SELL":"HOLD";
+const recColor = (r) => r==="BUY"?C.up : r==="SELL"?C.down : C.amber;
 
 // Hover-to-inspect price chart: crosshair + dot + floating price/date label
 function InteractiveChart({ data, dates, color, h=130 }) {
@@ -324,8 +326,9 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
             <span style={{ fontSize:10, color:C.amber, fontWeight:600 }}>API error</span>
           ) : d.stage ? (
             <>
-              <div style={{ fontSize:11.5, fontWeight:700, color:stageColor(d.stage), lineHeight:1.3 }}>{stageEmoji(d.stage)} {d.stage}</div>
-              {d.conviction && <div style={{ fontSize:9.5, color:convictionColor(d.conviction), marginTop:3, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.04em" }}>{d.conviction}</div>}
+              <div style={{ fontFamily:C.mono, fontSize:12, fontWeight:800, letterSpacing:"0.07em", color:recColor(convictionToRec(d.conviction)), marginBottom:2 }}>{convictionToRec(d.conviction)}</div>
+              <div style={{ fontSize:11, fontWeight:700, color:stageColor(d.stage), lineHeight:1.3 }}>{stageEmoji(d.stage)} {d.stage}</div>
+              {d.conviction && <div style={{ fontSize:9.5, color:convictionColor(d.conviction), marginTop:2, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.04em" }}>{d.conviction}</div>}
             </>
           ) : aiEnabled ? (
             <span style={{ fontSize:10, color:C.faint }}>Analyzing…</span>
@@ -354,7 +357,7 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
         <span style={{ fontFamily:C.mono, fontSize:10, color:C.sub, background:C.panel2, padding:"2px 7px", borderRadius:4 }}>RSI {d.rsi}</span>
         {d.iv   && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber,  background:`${C.amber}14`,  padding:"2px 7px", borderRadius:4 }}>IV {d.iv}%</span>}
         {d.relVol >= 1.5 && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber, background:`${C.amber}14`, padding:"2px 7px", borderRadius:4 }}>{d.relVol}× vol</span>}
-        {d.daysToEarn != null && d.daysToEarn <= 30 && <span style={{ fontFamily:C.mono, fontSize:10, color:C.violet, background:`${C.violet}14`, padding:"2px 7px", borderRadius:4 }}>EARN {d.daysToEarn}d</span>}
+        {d.daysToEarn != null && d.daysToEarn <= 45 && <span style={{ fontFamily:C.mono, fontSize:10, color:C.violet, background:`${C.violet}14`, padding:"2px 7px", borderRadius:4 }}>Earn {d.daysToEarn}d</span>}
         {d.pcRatio != null && <span style={{ fontFamily:C.mono, fontSize:10, color:d.pcRatio>1.2?C.down:d.pcRatio<0.8?C.up:C.sub, background:C.panel2, padding:"2px 7px", borderRadius:4 }}>P/C {d.pcRatio}</span>}
         {d.play && <span style={{ fontFamily:C.mono, fontSize:10, color:C.up, background:`${C.up}14`, padding:"2px 7px", borderRadius:4 }}>PLAY ✓</span>}
       </div>
@@ -398,10 +401,22 @@ function NewsItem({ n }) {
 function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
   const [d, setD]   = useState(null);
   const [err, setErr] = useState(null);
+  const [whyNow, setWhyNow]       = useState(null);
+  const [whyLoading, setWhyLoading] = useState(false);
   useEffect(()=>{
     setD(null); setErr(null);
     fetchResearch(ticker, aiEnabled).then(x=> x.error ? setErr(x.error) : setD(x)).catch(e=>setErr(e.message));
   },[ticker, aiEnabled]);
+
+  const fetchWhyNow = useCallback(async () => {
+    setWhyLoading(true); setWhyNow(null);
+    try {
+      const r = await fetch(`${API}/why-now?ticker=${ticker}`);
+      const j = await r.json();
+      setWhyNow(j.error ? null : j.take);
+    } catch { setWhyNow(null); }
+    finally { setWhyLoading(false); }
+  }, [ticker]);
 
   if (err) return (
     <div style={{ maxWidth:860, margin:"0 auto", padding:"20px 26px" }}>
@@ -439,7 +454,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
       </div>
 
       {/* ── Price + Score row ──────────────────────────────── */}
-      <div style={{ display:"flex", gap:14, marginBottom:22 }}>
+      <div style={{ display:"flex", gap:14, marginBottom:22, flexWrap:"wrap" }}>
         <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1 }}>
           <div style={{ fontFamily:C.mono, fontSize:30, color:C.ink, fontWeight:600 }}>${d.spot}</div>
           <div style={{ fontFamily:C.mono, fontSize:14, color:d.chg>=0?C.up:C.down, display:"flex", alignItems:"center", gap:4, marginTop:2 }}><Trend v={d.chg}/>{d.chg>=0?"+":""}{d.chg}% today</div>
@@ -462,8 +477,9 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
           <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"flex-start", gap:14 }}>
             <div style={{ fontSize:38, lineHeight:1, flexShrink:0, marginTop:2 }}>{stageEmoji(d.stage) || "🔍"}</div>
             <div style={{ flex:1 }}>
-              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.08em", marginBottom:5 }}>30-DAY SETUP</div>
-              <div style={{ fontSize:16, fontWeight:700, color:stageColor(d.stage)||C.sub, marginBottom:d.conviction?6:0 }}>{d.stage || "—"}</div>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.08em", marginBottom:5 }}>30-DAY SIGNAL</div>
+              {d.conviction && <div style={{ fontFamily:C.mono, fontSize:20, fontWeight:800, letterSpacing:"0.08em", color:recColor(convictionToRec(d.conviction)), marginBottom:4 }}>{convictionToRec(d.conviction)}</div>}
+              <div style={{ fontSize:14, fontWeight:700, color:stageColor(d.stage)||C.sub, marginBottom:d.conviction?6:0 }}>{d.stage || "—"}</div>
               {d.conviction && (
                 <span style={{ fontFamily:C.mono, fontSize:9.5, fontWeight:700,
                   color:convictionColor(d.conviction),
@@ -478,7 +494,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
           <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:14, opacity:0.55 }}>
             <div style={{ fontSize:38, lineHeight:1, flexShrink:0 }}>🔍</div>
             <div>
-              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.08em" }}>30-DAY SETUP</div>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.08em" }}>30-DAY SIGNAL</div>
               <div style={{ fontSize:13, color:C.faint, fontWeight:500, marginTop:4 }}>{aiFail ? "API error" : "AI Insights off"}</div>
               <div style={{ fontSize:10.5, color:C.faint, marginTop:3 }}>enable in Settings →</div>
             </div>
@@ -601,6 +617,42 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
               <span style={{ color:C.violet, fontWeight:600 }}>Smart money signal: </span>{d.options_read}
             </div>
           )}
+        </div>
+      )}
+
+      {aiOk && d.trade_levels && (
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:14 }}>
+          <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:12 }}>Today's Play</div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:10 }}>
+            {[
+              ["ENTRY",  `$${d.trade_levels.entry}`,       C.cold],
+              ["TARGET", `$${d.trade_levels.target}`,      C.up  ],
+              ["STOP",   `$${d.trade_levels.stop}`,        C.down],
+              ["R:R",    d.trade_levels.risk_reward || "—",C.amber],
+            ].map(([label, value, col]) => (
+              <div key={label} style={{ background:C.panel2, borderRadius:9, padding:"10px 12px", textAlign:"center" }}>
+                <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.07em", marginBottom:5 }}>{label}</div>
+                <div style={{ fontFamily:C.mono, fontSize:14, fontWeight:700, color:col }}>{value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {aiEnabled && (
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:14 }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom: whyNow ? 12 : 0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+              <Zap size={14} color={C.violet}/>
+              <span style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase" }}>Why Now?</span>
+            </div>
+            <button onClick={fetchWhyNow} disabled={whyLoading}
+              style={{ background:C.violet, border:"none", borderRadius:7, padding:"6px 14px", color:"#fff", cursor:whyLoading?"wait":"pointer", fontSize:11.5, fontWeight:700, opacity:whyLoading?0.7:1, display:"flex", alignItems:"center", gap:6 }}>
+              {whyLoading ? <><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> Thinking…</> : "Re-evaluate today"}
+            </button>
+          </div>
+          {whyNow && <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.65 }}>{whyNow}</div>}
+          {!whyNow && !whyLoading && <div style={{ fontSize:11, color:C.faint, marginTop:6 }}>Get a fresh take on today's specific price action.</div>}
         </div>
       )}
 
@@ -1139,6 +1191,7 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
   const [payoff, setPayoff]           = useState(null);
   const [sort, setSort]               = useState({ key:null, dir:null });
   const [dragId, setDragId]           = useState(null);
+  const [tooltip, setTooltip]         = useState(null);
 
   const a       = data?.analytics || {};
   const active  = data?.positions || [];
@@ -1148,20 +1201,15 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
   const num = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
   const sectors = Object.entries(a.sector_alloc||{}).sort((x,y)=>y[1]-x[1]);
   const totalAlloc = sectors.reduce((s,[,v])=>s+v,0) || 1;
-  const GRID = "1.5fr 1fr 1fr 1fr 1fr 1fr 0.8fr 0.9fr 0.8fr 0.8fr 1.1fr 1.3fr 78px";
+  const GRID = "minmax(140px,2fr) minmax(60px,1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
   const COLS = [
-    {key:"ticker",      label:"Position", align:"left"},
-    {key:"cost_basis",  label:"Cost",     align:"right"},
-    {key:"spot",        label:"Spot",     align:"right"},
-    {key:"current_val", label:"Value",    align:"right"},
-    {key:"pnl",         label:"P&L",      align:"right"},
-    {key:"pnl_pct",     label:"P&L %",    align:"right"},
-    {key:"delta",       label:"Δ",        align:"right"},
-    {key:"theta",       label:"Θ/day",    align:"right"},
-    {key:"iv",          label:"IV",       align:"right"},
-    {key:"dte",         label:"DTE",      align:"right"},
-    {key:"stop",        label:"Stop",     align:"right"},
-    {key:"score",       label:"Setup",    align:"right"},
+    {key:"ticker",      label:"Position",  align:"left"},
+    {key:"spot",        label:"Spot",      align:"right"},
+    {key:"pnl",         label:"P&L",       align:"right"},
+    {key:"pnl_pct",     label:"P&L %",     align:"right"},
+    {key:"dte",         label:"DTE",       align:"right"},
+    {key:"stop",        label:"Stop",      align:"right"},
+    {key:"score",       label:"Signal",    align:"right"},
   ];
   const toggleSort = (key)=> setSort(s=> s.key!==key ? {key,dir:"desc"} : s.dir==="desc" ? {key,dir:"asc"} : {key:null,dir:null});
   const sortVal = (p,key)=> key==="ticker" ? (p.ticker||"") : (p[key] ?? -Infinity);
@@ -1170,7 +1218,6 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         if (typeof xv==="string") return sort.dir==="asc" ? xv.localeCompare(yv) : yv.localeCompare(xv);
         return sort.dir==="asc" ? xv-yv : yv-xv; })
     : active;
-  const recColor   = (r)=> r==="BUY"?C.up : r==="SELL"?C.down : C.amber;
   const scoreColr  = (s)=> s==null?C.faint : s>=67?C.up : s>=40?C.amber : C.down;
 
   const Stat = ({ label, value, sub, col }) => (
@@ -1253,8 +1300,8 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
 
           {/* Active positions */}
           <div style={{ fontSize:11, color:C.faint, marginBottom:7 }}>{sort.key ? "Sorted — clear the sort (click the header again) to drag-reorder" : "Click a column to sort · drag the handle to reorder"}</div>
-          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, overflowX:"auto", marginBottom:16 }}>
-           <div style={{ minWidth:1180 }}>
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, marginBottom:16 }}>
+           <div>
             <div style={{ display:"grid", gridTemplateColumns:GRID, padding:"10px 16px", borderBottom:`1px solid ${C.line}`, fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>
               {COLS.map((c)=>(
                 <div key={c.key} onClick={()=>toggleSort(c.key)} title="Sort"
@@ -1278,7 +1325,8 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                   onDragOver={canDrag?(e=>e.preventDefault()):undefined}
                   onDrop={canDrag?(e=>{ e.preventDefault(); if(dragId && dragId!==p.id) onReorder(dragId,p.id); setDragId(null); }):undefined}
                   onDragEnd={canDrag?(()=>setDragId(null)):undefined}
-                  style={{ display:"grid", gridTemplateColumns:GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity: dragId===p.id?0.4:1 }}
+                  onClick={()=>onOpen&&onOpen(p.ticker)}
+                  style={{ display:"grid", gridTemplateColumns:GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity: dragId===p.id?0.4:1, cursor:"pointer" }}
                   onMouseEnter={e=>e.currentTarget.style.background=C.panel2} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                   <div style={{ display:"flex", alignItems:"center", gap:7, minWidth:0 }} onClick={()=>onOpen&&onOpen(p.ticker)}>
                     {canDrag && <GripVertical size={13} color={C.faint} style={{ flexShrink:0, cursor:"grab" }}/>}
@@ -1287,15 +1335,10 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                       <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>{isOpt ? `${p.qty}x · exp ${p.expiry}` : `${p.qty} shares`}</span>
                     </div>
                   </div>
-                  <div style={{ textAlign:"right", color:C.sub }}>${(p.cost_basis||0).toLocaleString()}</div>
-                  <div style={{ textAlign:"right" }}>${num(p.spot)}</div>
-                  <div style={{ textAlign:"right" }}>${(p.current_val||0).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-                  <div style={{ textAlign:"right", color:(p.pnl||0)>=0?C.up:C.down }}>{(p.pnl||0)>=0?"+":""}{(p.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-                  <div style={{ textAlign:"right", color:(p.pnl_pct||0)>=0?C.up:C.down }}>{((p.pnl_pct||0)*100).toFixed(1)}%</div>
-                  <div style={{ textAlign:"right", color:C.sub }}>{num(p.delta,2)}</div>
-                  <div style={{ textAlign:"right", color:C.sub }}>{p.theta?num(p.theta,2):"—"}</div>
-                  <div style={{ textAlign:"right", color:C.amber }}>{p.iv?`${(p.iv*100).toFixed(0)}%`:"—"}</div>
-                  <div style={{ textAlign:"right", color:C.sub }}>{p.dte??"—"}</div>
+                  <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }}>${num(p.spot)}</div>
+                  <div style={{ textAlign:"right", color:(p.pnl||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{(p.pnl||0)>=0?"+":""}{(p.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+                  <div style={{ textAlign:"right", color:(p.pnl_pct||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{((p.pnl_pct||0)*100).toFixed(1)}%</div>
+                  <div style={{ textAlign:"right", color:C.sub, fontFamily:C.mono, fontSize:12 }}>{p.dte??"—"}</div>
                   <div style={{ textAlign:"right" }}>
                     {p.stop!=null ? (
                       <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end" }}>
@@ -1306,15 +1349,25 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                       <span style={{ color:C.faint, fontSize:10 }} title="recommended stop">rec ${p.stop_rec ?? "—"}</span>
                     )}
                   </div>
-                  <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:2 }}>
-                    {p.conviction ? (
-                      <span style={{ fontSize:9.5, fontWeight:700, color:convictionColor(p.conviction), textAlign:"right", lineHeight:1.3 }}>
-                        {p.stage ? stageEmoji(p.stage)+" " : ""}{p.conviction}
-                      </span>
-                    ) : (
-                      <span style={{ fontWeight:700, color:scoreColr(p.score) }}>{p.score==null?"—":p.score}</span>
+                  <div style={{ position:"relative" }}
+                    onMouseEnter={()=>setTooltip(p.id)}
+                    onMouseLeave={()=>setTooltip(null)}>
+                    <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:2, cursor:"default" }}>
+                      <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.06em", color:recColor(p.rec||convictionToRec(p.conviction)) }}>{p.rec||convictionToRec(p.conviction)||"—"}</span>
+                      {p.stage && <span style={{ fontSize:9, color:stageColor(p.stage), lineHeight:1.3, textAlign:"right" }}>{stageEmoji(p.stage)} {p.stage}</span>}
+                      {p.conviction && <span style={{ fontSize:8.5, fontWeight:600, color:convictionColor(p.conviction), textTransform:"uppercase", letterSpacing:"0.03em" }}>{p.conviction}</span>}
+                    </div>
+                    {tooltip===p.id && (
+                      <div style={{ position:"absolute", right:0, bottom:"100%", zIndex:100, background:C.panel2, border:`1px solid ${C.line}`, borderRadius:10, padding:"12px 14px", width:240, boxShadow:"0 8px 24px rgba(0,0,0,0.3)", pointerEvents:"none" }}>
+                        {p.reason && <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.5, marginBottom:8, fontStyle:"italic" }}>{p.reason}</div>}
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+                          {p.trade_levels?.entry  && <div><div style={{ fontSize:8.5, color:C.faint }}>ENTRY</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.ink }}>${p.trade_levels.entry}</div></div>}
+                          {p.trade_levels?.target && <div><div style={{ fontSize:8.5, color:C.faint }}>TARGET</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.up }}>${p.trade_levels.target}</div></div>}
+                          {(p.stop||p.stop_rec) && <div><div style={{ fontSize:8.5, color:C.faint }}>STOP</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.down }}>${p.stop||p.stop_rec}</div></div>}
+                          {p.trade_levels?.risk_reward && <div><div style={{ fontSize:8.5, color:C.faint }}>R:R</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.amber }}>{p.trade_levels.risk_reward}</div></div>}
+                        </div>
+                      </div>
                     )}
-                    {p.rec && <span style={{ fontSize:8.5, fontWeight:700, letterSpacing:"0.04em", color:recColor(p.rec), background:`${recColor(p.rec)}1c`, padding:"1px 6px", borderRadius:4 }}>{p.rec}</span>}
                   </div>
                   <div style={{ display:"flex", gap:9, justifyContent:"flex-end", alignItems:"center" }}>
                     {isOpt && <button onClick={(e)=>{e.stopPropagation();setPayoff(p);}} title="Payoff diagram" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><LineChart size={13}/></button>}
@@ -1874,8 +1927,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
     setCardCache(prev => prev[ticker] === data ? prev : { ...prev, [ticker]: data });
   }, []);
 
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
   return (
-    <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif" }}>
+    <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif", overflowX:"hidden" }}>
       {/* ── Sticky top nav — always visible ─────────────────── */}
       <div style={{ borderBottom:`1px solid ${C.line}`, padding:"14px 26px", position:"sticky", top:0, background:C.bg, zIndex:20 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:20, maxWidth:1180, margin:"0 auto" }}>
@@ -1888,7 +1942,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               onFocus={e=>e.target.style.borderColor=C.cold} onBlur={e=>e.target.style.borderColor=C.line}/>
             {query && <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={14}/></button>}
           </div>
-          <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0 }}>
+          <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0, flexWrap:"wrap" }}>
             {[["watchlist","Watchlist"],["portfolio","Portfolio"],["brief","News"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
                 style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500,

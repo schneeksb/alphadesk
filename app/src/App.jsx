@@ -3,8 +3,6 @@ import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight
 import { authEnabled, supabase } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
 
-// Module-level flag updated reactively — avoids prop-drilling into child components
-let _aiEnabled = false;
 
 /* ════════════════════════════════════════════════════════════════════
    AlphaDesk — LIVE app  (run locally against research.py backend)
@@ -67,8 +65,8 @@ const savePositions = (l) => { try { localStorage.setItem(POS_KEY, JSON.stringif
 const newId = () => (typeof crypto!=="undefined" && crypto.randomUUID) ? crypto.randomUUID() : `p_${Math.random().toString(36).slice(2)}`;
 
 // ── BACKEND CALLS ─────────────────────────────────────────────────────
-async function fetchResearch(ticker) {
-  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${_aiEnabled ? 1 : 0}`);
+async function fetchResearch(ticker, ai = false) {
+  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${ai ? 1 : 0}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -225,14 +223,15 @@ function ScoreDial({ score, size=44 }) {
 }
 
 // ── WATCHLIST CARD (fetches its own data) ─────────────────────────────
-function WatchCard({ ticker, onOpen, onRemove }) {
+function WatchCard({ ticker, onOpen, onRemove, aiEnabled }) {
   const [d, setD]       = useState(null);
   const [err, setErr]   = useState(false);
   useEffect(()=>{
     let alive = true;
-    fetchResearch(ticker).then(x=>{ if(alive){ x.error?setErr(true):setD(x); }}).catch(()=>alive&&setErr(true));
+    setD(null); setErr(false);
+    fetchResearch(ticker, aiEnabled).then(x=>{ if(alive){ x.error?setErr(true):setD(x); }}).catch(()=>alive&&setErr(true));
     return ()=>{ alive=false; };
-  },[ticker]);
+  },[ticker, aiEnabled]);
 
   if (err) return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 17px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
@@ -303,13 +302,13 @@ function NewsItem({ n }) {
 }
 
 // ── DETAIL PAGE ───────────────────────────────────────────────────────
-function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch }) {
+function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
   const [d, setD]   = useState(null);
   const [err, setErr] = useState(null);
   useEffect(()=>{
     setD(null); setErr(null);
-    fetchResearch(ticker).then(x=> x.error ? setErr(x.error) : setD(x)).catch(e=>setErr(e.message));
-  },[ticker]);
+    fetchResearch(ticker, aiEnabled).then(x=> x.error ? setErr(x.error) : setD(x)).catch(e=>setErr(e.message));
+  },[ticker, aiEnabled]);
 
   if (err) return (
     <div style={{ maxWidth:860, margin:"0 auto", padding:"20px 26px" }}>
@@ -1259,8 +1258,6 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [aiEnabled, setAiEnabled] = useState(false);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
-  // Keep module-level flag in sync so fetchResearch (called from child components) sees it
-  useEffect(()=>{ _aiEnabled = aiEnabled; }, [aiEnabled]);
 
   // localStorage fallback (instant load on first paint)
   useEffect(()=>{ saveWL(watchlist); },[watchlist]);
@@ -1342,7 +1339,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
   if (detail) return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif" }}>
-      <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch}/>
+      <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled}/>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
@@ -1392,7 +1389,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                     onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
                     onDragEnd={()=>setWlDrag(null)}
                     style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
-                    <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker}/>
+                    <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled}/>
                   </div>
                 ))}
               </div>

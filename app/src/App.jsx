@@ -138,13 +138,18 @@ async function savePositionsServer(positions) {
 // ── SUPABASE CROSS-DEVICE SYNC ────────────────────────────────────────
 async function sbLoad(uid) {
   if (!supabase || !uid) return null;
-  const { data, error } = await supabase.from("portfolios").select("data").eq("user_id", uid).single();
-  if (error || !data) return null;
-  return data.data;
+  const { data, error } = await supabase
+    .from("portfolios").select("data").eq("user_id", uid).maybeSingle();
+  if (error) { console.error("[sb] load error:", error.message); return null; }
+  return data?.data ?? null;
 }
 async function sbSave(uid, payload) {
   if (!supabase || !uid) return;
-  await supabase.from("portfolios").upsert({ user_id: uid, data: payload, updated_at: new Date().toISOString() });
+  const { error } = await supabase.from("portfolios").upsert(
+    { user_id: uid, data: payload, updated_at: new Date().toISOString() },
+    { onConflict: "user_id" }
+  );
+  if (error) console.error("[sb] save error:", error.message);
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────
@@ -1195,10 +1200,9 @@ function PayoffModal({ position: p, onClose }) {
 }
 
 // ── SETTINGS (theme + account) ────────────────────────────────────────
-function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled }) {
+function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled, userEmail }) {
   const [open, setOpen] = useState(false);
-  const session = useSession();
-  const email = session?.user?.email;
+  const email = userEmail;
   return (
     <div style={{ position:"relative", flexShrink:0 }}>
       <button onClick={()=>setOpen(o=>!o)} title="Settings" style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 9px", color:open?C.ink:C.sub, cursor:"pointer", display:"flex" }}><Settings size={15}/></button>
@@ -1225,10 +1229,10 @@ function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled }) {
                 </div>
               </label>
             </div>
-            {authEnabled && session && (
+            {email && (
               <div style={{ marginTop:14, paddingTop:12, borderTop:`1px solid ${C.line}` }}>
                 <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:7 }}>ACCOUNT</div>
-                {email && <div style={{ fontSize:11.5, color:C.sub, marginBottom:9, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{email}</div>}
+                <div style={{ fontSize:11.5, color:C.sub, marginBottom:9, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{email}</div>
                 <button onClick={signOut} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"center", gap:7, background:"none", border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 0", color:C.sub, fontSize:12, fontWeight:600, cursor:"pointer" }}><LogOut size={13}/> Sign out</button>
               </div>
             )}
@@ -1240,7 +1244,7 @@ function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled }) {
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────
-export default function AlphaDesk() {
+export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [tab, setTab]             = useState("watchlist");
   const [watchlist, setWatchlist] = useState(loadWL);
   const [detail, setDetail]       = useState(null);
@@ -1257,9 +1261,6 @@ export default function AlphaDesk() {
 
   // Keep module-level flag in sync so fetchResearch (called from child components) sees it
   useEffect(()=>{ _aiEnabled = aiEnabled; }, [aiEnabled]);
-
-  const session = useSession();
-  const userId  = session?.user?.id ?? null;
 
   // localStorage fallback (instant load on first paint)
   useEffect(()=>{ saveWL(watchlist); },[watchlist]);
@@ -1365,7 +1366,7 @@ export default function AlphaDesk() {
             ))}
           </div>
           <AlertsBell alerts={portfolio?.alerts} loading={pfLoading}/>
-          <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled}/>
+          <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled} userEmail={userEmail}/>
         </div>
       </div>
       <MacroRibbon/>

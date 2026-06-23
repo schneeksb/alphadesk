@@ -69,6 +69,11 @@ const AI_KEY  = "alphadesk:ai";
 const loadAI  = () => { try { return localStorage.getItem(AI_KEY) === "true"; } catch { return false; } };
 const saveAI  = (v) => { try { localStorage.setItem(AI_KEY, v ? "true" : "false"); } catch {} };
 
+const loadProfile = () => {
+  try { return JSON.parse(localStorage.getItem("alphadesk:profile") || "null") || null; } catch { return null; }
+};
+const saveProfile = (p) => { try { localStorage.setItem("alphadesk:profile", JSON.stringify(p)); } catch {} };
+
 // ── ALERT HISTORY (persistent, 30-day rolling window) ─────────────────
 const ALERT_KEY    = "alphadesk:alerts";
 const ALERT_MAX_MS = 30 * 24 * 60 * 60 * 1000;
@@ -111,8 +116,8 @@ function mergeAlerts(existing, fresh) {
 }
 
 // ── BACKEND CALLS ─────────────────────────────────────────────────────
-async function fetchResearch(ticker, ai = false) {
-  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${ai ? 1 : 0}`);
+async function fetchResearch(ticker, ai = false, profile = "") {
+  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${ai ? 1 : 0}&profile=${encodeURIComponent(profile||"")}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -190,6 +195,15 @@ async function fetchSectorRotation() {
 }
 async function fetchOutlook() {
   const r = await fetch(`${API}/outlook`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchPortfolioAnalysis(positions, analytics, cash, profile) {
+  const r = await fetch(`${API}/portfolio-analysis`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ positions, analytics, cash, profile }),
+  });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -274,15 +288,15 @@ function InteractiveChart({ data, dates, color, h=130 }) {
 
 
 // ── WATCHLIST CARD (fetches its own data) ─────────────────────────────
-function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
+function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
   const [d, setD]       = useState(null);
   const [err, setErr]   = useState(false);
   useEffect(()=>{
     let alive = true;
     setD(null); setErr(false);
-    fetchResearch(ticker, aiEnabled).then(x=>{ if(alive){ x.error?setErr(true):(setD(x), onData?.(ticker, x)); }}).catch(()=>alive&&setErr(true));
+    fetchResearch(ticker, aiEnabled, profile).then(x=>{ if(alive){ x.error?setErr(true):(setD(x), onData?.(ticker, x)); }}).catch(()=>alive&&setErr(true));
     return ()=>{ alive=false; };
-  },[ticker, aiEnabled]);
+  },[ticker, aiEnabled, profile]);
 
   if (err) return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 17px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
@@ -398,25 +412,25 @@ function NewsItem({ n }) {
 }
 
 // ── DETAIL PAGE ───────────────────────────────────────────────────────
-function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
+function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, profile }) {
   const [d, setD]   = useState(null);
   const [err, setErr] = useState(null);
   const [whyNow, setWhyNow]       = useState(null);
   const [whyLoading, setWhyLoading] = useState(false);
   useEffect(()=>{
     setD(null); setErr(null);
-    fetchResearch(ticker, aiEnabled).then(x=> x.error ? setErr(x.error) : setD(x)).catch(e=>setErr(e.message));
-  },[ticker, aiEnabled]);
+    fetchResearch(ticker, aiEnabled, profile).then(x=> x.error ? setErr(x.error) : setD(x)).catch(e=>setErr(e.message));
+  },[ticker, aiEnabled, profile]);
 
   const fetchWhyNow = useCallback(async () => {
     setWhyLoading(true); setWhyNow(null);
     try {
-      const r = await fetch(`${API}/why-now?ticker=${ticker}`);
+      const r = await fetch(`${API}/why-now?ticker=${ticker}&profile=${encodeURIComponent(profile||"")}`);
       const j = await r.json();
       setWhyNow(j.error ? null : j.take);
     } catch { setWhyNow(null); }
     finally { setWhyLoading(false); }
-  }, [ticker]);
+  }, [ticker, profile]);
 
   if (err) return (
     <div style={{ maxWidth:860, margin:"0 auto", padding:"20px 26px" }}>
@@ -1183,8 +1197,110 @@ function PositionForm({ initial, onSubmit, onClose }) {
   );
 }
 
+// ── AI PORTFOLIO ANALYSIS ─────────────────────────────────────────────
+function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
+  const [analysis, setAnalysis] = useState(null);
+  const [loading, setLoading]   = useState(false);
+  const [err, setErr]           = useState(null);
+
+  const run = useCallback(async () => {
+    if (!aiEnabled || !data?.positions?.length) return;
+    setLoading(true); setErr(null);
+    try {
+      const result = await fetchPortfolioAnalysis(
+        data.positions, data.analytics, cash,
+        profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""
+      );
+      if (result.error) setErr(result.error);
+      else setAnalysis(result);
+    } catch(e) { setErr(e.message); }
+    finally { setLoading(false); }
+  }, [aiEnabled, data, cash, profile]);
+
+  useEffect(()=>{ if (aiEnabled && data?.positions?.length) run(); }, [aiEnabled, data?.positions?.length]);
+
+  const healthColor = (h) => h==="Strong"?C.up:h==="Balanced"?C.cold:h==="At Risk"?C.amber:C.down;
+
+  if (!aiEnabled) return (
+    <div style={{ background:C.panel, border:`1px dashed ${C.line}`, borderRadius:14, padding:"20px 24px", marginBottom:18, opacity:0.7 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:10 }}>
+        <Activity size={15} color={C.sub}/>
+        <span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>AI Portfolio Analysis</span>
+        <span style={{ fontSize:10, color:C.faint, marginLeft:"auto" }}>AI Insights OFF</span>
+      </div>
+      <div style={{ fontSize:12, color:C.sub, lineHeight:1.65 }}>
+        Turn on AI Insights to get: Portfolio Health Score · Concentration Risk · Greeks in Plain English · Biggest Opportunity · Biggest Risk · Overall Recommendation tailored to your trader profile.
+      </div>
+    </div>
+  );
+
+  if (!data?.positions?.length) return null;
+
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${analysis ? healthColor(analysis.health_score)+"50" : C.line}`, borderRadius:14, padding:"18px 20px", marginBottom:18 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom: analysis||loading ? 14 : 0 }}>
+        <Activity size={15} color={analysis ? healthColor(analysis.health_score) : C.sub}/>
+        <span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>AI Portfolio Analysis</span>
+        {profile && <span style={{ fontSize:10, color:C.faint, fontStyle:"italic" }}>
+          {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"")} · {({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day Trader"}[profile.style]||"")} profile
+        </span>}
+        <button onClick={run} disabled={loading} style={{ marginLeft:"auto", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:7, padding:"5px 12px", color:loading?C.faint:C.sub, fontSize:11, cursor:loading?"wait":"pointer", display:"flex", alignItems:"center", gap:5 }}>
+          {loading ? <><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> Analyzing…</> : <><RefreshCw size={11}/> Refresh</>}
+        </button>
+      </div>
+
+      {err && <div style={{ color:C.amber, fontSize:12, marginBottom:10 }}>Analysis error: {err}</div>}
+
+      {loading && !analysis && (
+        <div style={{ textAlign:"center", padding:"20px 0", color:C.sub, fontSize:12 }}>
+          <Loader2 size={16} style={{ animation:"spin 1s linear infinite", display:"inline" }}/> Analyzing your portfolio as a whole book…
+        </div>
+      )}
+
+      {analysis && (
+        <>
+          {/* Health Score row */}
+          <div style={{ display:"flex", alignItems:"center", gap:12, background:C.panel2, borderRadius:10, padding:"12px 16px", marginBottom:14 }}>
+            <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:800, color:healthColor(analysis.health_score), letterSpacing:"0.06em" }}>{analysis.health_score?.toUpperCase()}</span>
+            <div style={{ width:1, height:20, background:C.line }}/>
+            <span style={{ fontSize:13, color:C.ink }}>{analysis.health_summary}</span>
+          </div>
+
+          {/* 4-section grid */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:14 }}>
+            <div style={{ background:C.panel2, borderRadius:10, padding:"12px 14px" }}>
+              <div style={{ fontSize:9.5, color:C.amber, letterSpacing:"0.07em", marginBottom:6 }}>CONCENTRATION RISK</div>
+              <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.55 }}>{analysis.concentration}</div>
+            </div>
+            <div style={{ background:C.panel2, borderRadius:10, padding:"12px 14px" }}>
+              <div style={{ fontSize:9.5, color:C.violet, letterSpacing:"0.07em", marginBottom:6 }}>GREEKS IN PLAIN ENGLISH</div>
+              <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.55 }}>{analysis.greeks_plain}</div>
+            </div>
+            <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}30`, borderRadius:10, padding:"12px 14px" }}>
+              <div style={{ fontSize:9.5, color:C.up, letterSpacing:"0.07em", marginBottom:6 }}>BIGGEST OPPORTUNITY</div>
+              <div style={{ fontSize:12, fontWeight:700, color:C.ink, marginBottom:4 }}>{analysis.opportunity?.ticker}</div>
+              <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.5 }}>{analysis.opportunity?.reason}</div>
+            </div>
+            <div style={{ background:`${C.amber}0c`, border:`1px solid ${C.amber}30`, borderRadius:10, padding:"12px 14px" }}>
+              <div style={{ fontSize:9.5, color:C.amber, letterSpacing:"0.07em", marginBottom:6 }}>BIGGEST RISK</div>
+              <div style={{ fontSize:12, fontWeight:700, color:C.ink, marginBottom:4 }}>{analysis.risk?.ticker}</div>
+              <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.5 }}>{analysis.risk?.reason}</div>
+            </div>
+          </div>
+
+          {/* Recommendation */}
+          <div style={{ background:C.panel2, borderRadius:10, padding:"12px 16px", borderLeft:`3px solid ${C.cold}` }}>
+            <div style={{ fontSize:9.5, color:C.cold, letterSpacing:"0.07em", marginBottom:6 }}>OVERALL RECOMMENDATION</div>
+            <div style={{ fontSize:13, color:C.ink, lineHeight:1.65 }}>{analysis.recommendation}</div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── PORTFOLIO (manual positions, Greeks, P&L; expired in an envelope) ───
-function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen }) {
+function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
@@ -1326,6 +1442,8 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
             <CashCard/>
             <MarginCard/>
           </div>
+
+          <PortfolioAnalysis data={data} aiEnabled={aiEnabled} cash={cash} profile={profile}/>
 
           {/* Active positions */}
           <div style={{ fontSize:11, color:C.faint, marginBottom:7 }}>{sort.key ? "Sorted — clear the sort (click the header again) to drag-reorder" : "Click a column to sort · drag the handle to reorder"}</div>
@@ -1789,8 +1907,96 @@ function PayoffModal({ position: p, onClose }) {
   );
 }
 
+// ── TRADER PROFILE MODAL ──────────────────────────────────────────────
+const PROFILE_OPTIONS = {
+  riskTolerance: {
+    label: "Risk Tolerance",
+    options: [
+      { value:"conservative", label:"Conservative", desc:"Protect capital, small steady gains" },
+      { value:"moderate",     label:"Moderate",     desc:"Balanced growth with manageable risk" },
+      { value:"aggressive",   label:"Aggressive",   desc:"High risk, high reward" },
+      { value:"degen",        label:"Degen",        desc:"Maximum risk, options heavy, big swings" },
+    ]
+  },
+  goal: {
+    label: "Primary Goal",
+    options: [
+      { value:"growth",      label:"Growth",      desc:"Maximize portfolio value long term" },
+      { value:"income",      label:"Income",      desc:"Generate consistent returns" },
+      { value:"speculation", label:"Speculation", desc:"Find big asymmetric opportunities" },
+      { value:"hedging",     label:"Hedging",     desc:"Protect existing positions" },
+    ]
+  },
+  style: {
+    label: "Trading Style",
+    options: [
+      { value:"longterm",   label:"Long-Term Investor", desc:"Months to years" },
+      { value:"swing",      label:"Swing Trader",       desc:"Days to weeks, technical setups" },
+      { value:"options",    label:"Options Trader",     desc:"Leverage and Greeks focused" },
+      { value:"daytrader",  label:"Day Trader",         desc:"Intraday moves" },
+    ]
+  },
+  level: {
+    label: "Experience Level",
+    options: [
+      { value:"beginner",      label:"Beginner",      desc:"Learning the basics" },
+      { value:"intermediate",  label:"Intermediate",  desc:"Comfortable with most strategies" },
+      { value:"advanced",      label:"Advanced",      desc:"Experienced across products" },
+      { value:"professional",  label:"Professional",  desc:"Full-time or institutional" },
+    ]
+  },
+};
+
+function TraderProfileModal({ profile, onSave, onClose }) {
+  const defaults = { riskTolerance:"moderate", goal:"growth", style:"swing", level:"intermediate" };
+  const [draft, setDraft] = useState(profile || defaults);
+  const set = (k, v) => setDraft(d => ({...d, [k]:v}));
+
+  return (
+    <div style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
+      onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
+      <div style={{ background:C.bg, border:`1px solid ${C.line}`, borderRadius:16, padding:"28px 30px", width:"100%", maxWidth:520, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 24px 80px rgba(0,0,0,0.5)" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:22 }}>
+          <div>
+            <div style={{ fontSize:18, fontWeight:700, color:C.ink }}>Trader Profile</div>
+            <div style={{ fontSize:11.5, color:C.sub, marginTop:3 }}>Personalizes all AI analysis to your style</div>
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:4 }}><X size={18}/></button>
+        </div>
+        {Object.entries(PROFILE_OPTIONS).map(([key, section])=>(
+          <div key={key} style={{ marginBottom:20 }}>
+            <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:10 }}>{section.label}</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              {section.options.map(opt=>{
+                const sel = draft[key] === opt.value;
+                return (
+                  <div key={opt.value} onClick={()=>set(key, opt.value)}
+                    style={{ background:sel?`${C.cold}18`:C.panel, border:`1.5px solid ${sel?C.cold:C.line}`, borderRadius:10, padding:"10px 13px", cursor:"pointer", transition:"all .15s" }}>
+                    <div style={{ fontSize:12.5, fontWeight:700, color:sel?C.cold:C.ink }}>{opt.label}</div>
+                    <div style={{ fontSize:10.5, color:C.sub, marginTop:3 }}>{opt.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+        <div style={{ display:"flex", gap:9, marginTop:6 }}>
+          <button onClick={()=>{ onSave(draft); onClose(); }}
+            style={{ flex:1, background:C.cold, border:"none", borderRadius:10, padding:"11px 0", color:"#fff", fontSize:13.5, fontWeight:700, cursor:"pointer" }}>
+            Save Profile
+          </button>
+          <button onClick={onClose}
+            style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:10, padding:"11px 18px", color:C.sub, fontSize:13, cursor:"pointer" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── SETTINGS (theme + account) ────────────────────────────────────────
-function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled, userEmail }) {
+function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled, userEmail, onProfileOpen }) {
   const [open, setOpen] = useState(false);
   const email = userEmail;
   return (
@@ -1800,6 +2006,13 @@ function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled, userEmail }) {
         <>
           <div onClick={()=>setOpen(false)} style={{ position:"fixed", inset:0, zIndex:40 }}/>
           <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:240, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.4)", zIndex:50, padding:"12px 14px" }}>
+            <div style={{ marginBottom:14, paddingBottom:14, borderBottom:`1px solid ${C.line}` }}>
+              <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:9 }}>TRADER PROFILE</div>
+              <button onClick={()=>{ setOpen(false); onProfileOpen(); }}
+                style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"9px 12px", color:C.ink, fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                Edit Trader Profile <ChevronDown size={12} color={C.faint} style={{ transform:"rotate(-90deg)" }}/>
+              </button>
+            </div>
             <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:9 }}>APPEARANCE</div>
             <div style={{ display:"flex", gap:6, background:C.panel2, borderRadius:9, padding:4, border:`1px solid ${C.line}` }}>
               {[["light","Light",Sun],["dark","Dark",Moon]].map(([id,label,Icon])=>(
@@ -1846,6 +2059,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [margin, setMargin]       = useState(0);
   const [marginRate, setMarginRate] = useState(0);
   const [cash, setCash]           = useState(0);
+  const [profile, setProfile]     = useState(loadProfile);
+  const [showProfile, setShowProfile] = useState(false);
   const [theme, setTheme]         = useState(loadTheme);
   const [aiEnabled, setAiEnabled]       = useState(loadAI);
   const [alertHistory, setAlertHistory] = useState(loadAlerts);
@@ -1857,6 +2072,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ savePositions(positions); },[positions]);
   useEffect(()=>{ saveAlerts(alertHistory); },[alertHistory]);
   useEffect(()=>{ saveAI(aiEnabled); },[aiEnabled]);
+  useEffect(()=>{ if (profile) saveProfile(profile); },[profile]);
 
   // Primary sync: Supabase (logged-in) or server positions.json (anonymous)
   useEffect(()=>{
@@ -1873,6 +2089,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.margin    != null)  setMargin(data.margin);
         if (data.marginRate != null) setMarginRate(data.marginRate);
         if (data.cash      != null)  setCash(data.cash);
+        if (data.profile   != null)  setProfile(data.profile);
         if (data.theme)              { setTheme(data.theme); applyTheme(data.theme); }
         if (data.aiEnabled != null)    setAiEnabled(data.aiEnabled);
         if (data.alertHistory?.length) setAlertHistory(data.alertHistory);
@@ -1888,13 +2105,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, margin, marginRate, cash, theme, aiEnabled, alertHistory };
+  sbState.current = { positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, margin, marginRate, cash, theme, aiEnabled, alertHistory, userId]);
+  },[positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, userId]);
 
   const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); if(!userId) saveSettingsServer({ margin:m, margin_rate:r }); };
   const onCash   = (c)=>{ setCash(c); };
@@ -1983,14 +2200,25 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             ))}
           </div>
           <AlertsBell alertHistory={alertHistory} setAlertHistory={setAlertHistory} onNavigate={onAlertNavigate}/>
-          <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled} userEmail={userEmail}/>
+          {profile && (
+            <div onClick={()=>setShowProfile(true)} title="Edit Trader Profile" style={{ display:"flex", alignItems:"center", gap:6, background:C.panel, border:`1px solid ${C.line}`, borderRadius:8, padding:"5px 10px", cursor:"pointer", flexShrink:0 }}>
+              <span style={{ fontSize:10.5, color:C.cold, fontWeight:700 }}>
+                {({conservative:"🛡️",moderate:"⚖️",aggressive:"⚡",degen:"🔥"}[profile.riskTolerance]||"👤")}
+              </span>
+              <span style={{ fontSize:10.5, color:C.sub, whiteSpace:"nowrap" }}>
+                {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"?")} · {({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day"}[profile.style]||"?")}
+              </span>
+            </div>
+          )}
+          {showProfile && <TraderProfileModal profile={profile} onSave={p=>{ setProfile(p); }} onClose={()=>setShowProfile(false)}/>}
+          <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled} userEmail={userEmail} onProfileOpen={()=>setShowProfile(true)}/>
         </div>
       </div>
       <MacroRibbon/>
 
       {/* ── Content area ─────────────────────────────────────── */}
       {detail ? (
-        <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled}/>
+        <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
       ) : (
         <div style={{ maxWidth:1180, margin:"0 auto", padding:"22px 26px 60px" }}>
           {tab==="watchlist" && (
@@ -2035,14 +2263,14 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                       onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
                       onDragEnd={()=>setWlDrag(null)}
                       style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
-                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData}/>
+                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
                     </div>
                   ))}
                 </div>
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
           {tab==="brief" && <BriefingRoom/>}
           {tab==="map" && <SectorMap/>}
         </div>

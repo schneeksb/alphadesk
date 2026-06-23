@@ -170,7 +170,7 @@ def technicals(ticker):
     }
 
 
-def ai_analysis_and_news(ticker, tech):
+def ai_analysis_and_news(ticker, tech, profile: str = ""):
     """Stage-based 30-day forward outlook: where is this stock in its current cycle?"""
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -187,6 +187,8 @@ def ai_analysis_and_news(ticker, tech):
     if a.get('targetMean') and spot:
         upside = (a['targetMean'] - spot) / spot * 100
         analyst_ctx = f"\nAnalyst consensus: {a.get('recKey','?')} · {a.get('count','?')} analysts · mean target ${a['targetMean']:.2f} ({upside:+.1f}% from here)"
+    profile_block = _profile_ctx(profile)
+    profile_intro = f"\n{profile_block}\n" if profile_block else ""
 
     prompt = f"""You are an elite technical-fundamental analyst reading the PRICE ACTION STORY of {ticker} ({tech['name']}) as of {datetime.date.today()}.
 
@@ -200,7 +202,7 @@ Price: ${spot} ({tech['chg']:+.1f}% today) | RSI {tech['rsi']} | {w52_ctx}
 Options: IV {tech['iv']}% | {pc_ctx} | Rel Vol {tech.get('relVol','?')}×
 Fundamentals: P/E {tech['fundamentals']['pe']} | Rev Growth {tech['fundamentals']['revGrowth']} | Margin {tech['fundamentals']['grossMargin']} | Sector: {tech['sector']}
 Earnings: {earn_ctx}{analyst_ctx}
-
+{profile_intro}
 ASSIGN ONE STAGE that best describes where this stock is RIGHT NOW in its cycle:
   Breakout — clearing resistance with volume, momentum building, likely continuation
   Trending — established uptrend, healthy pullbacks, buyers in control
@@ -257,7 +259,50 @@ def _json_safe(o):
     return o
 
 
-def research(ticker, ai=False):
+def _profile_ctx(profile: str) -> str:
+    """Convert profile string 'risk|goal|style|level' into an AI instruction block."""
+    if not profile:
+        return ""
+    parts = profile.split("|")
+    risk  = parts[0] if len(parts) > 0 else "moderate"
+    goal  = parts[1] if len(parts) > 1 else "growth"
+    style = parts[2] if len(parts) > 2 else "swing"
+    level = parts[3] if len(parts) > 3 else "intermediate"
+    risk_map  = {"conservative":"Conservative — capital preservation first, prefers wide stops and low-risk setups",
+                 "moderate":"Moderate — balanced risk/reward, comfortable with occasional volatility",
+                 "aggressive":"Aggressive — high risk/reward seeker, comfortable with large swings",
+                 "degen":"Degen — maximum risk, options-heavy, loves big asymmetric swings"}
+    goal_map  = {"growth":"Growth — maximize portfolio value long-term",
+                 "income":"Income — generate consistent premium / dividend returns",
+                 "speculation":"Speculation — find big asymmetric opportunities",
+                 "hedging":"Hedging — protect existing positions from downside"}
+    style_map = {"longterm":"Long-Term Investor — months to years horizon",
+                 "swing":"Swing Trader — days to weeks, technical setups",
+                 "options":"Options Trader — leverage and Greeks-focused",
+                 "daytrader":"Day Trader — intraday moves, tight stops"}
+    level_map = {"beginner":"Beginner","intermediate":"Intermediate","advanced":"Advanced","professional":"Professional"}
+    lines = [
+        f"TRADER PROFILE (tailor ALL analysis and recommendations to this user):",
+        f"  Risk Tolerance: {risk_map.get(risk, risk)}",
+        f"  Primary Goal: {goal_map.get(goal, goal)}",
+        f"  Trading Style: {style_map.get(style, style)}",
+        f"  Experience: {level_map.get(level, level)}",
+    ]
+    # Style-specific guidance
+    if risk in ("aggressive","degen"):
+        lines.append("  → Prefer higher risk/reward setups, shorter DTE, further OTM strikes, concentrated bets.")
+    if risk == "conservative":
+        lines.append("  → Prefer LEAPS, blue chips, wide stops, defined-risk trades, smaller sizing.")
+    if goal == "income":
+        lines.append("  → Lean toward premium-selling ideas (covered calls, cash-secured puts, credit spreads).")
+    if style == "options":
+        lines.append("  → Emphasize Greeks analysis, IV rank, options structure, and theta management.")
+    if style == "daytrader":
+        lines.append("  → Focus on intraday setups, momentum, and tight stops. Ignore long-term fundamentals.")
+    return "\n".join(lines)
+
+
+def research(ticker, ai=False, profile: str = ""):
     """Full research bundle for one ticker. AI layer only runs when ai=True.
     Always returns price/technicals so the card loads even when AI is off."""
     ticker = ticker.upper().strip()
@@ -269,7 +314,7 @@ def research(ticker, ai=False):
                 "news": [], "play": None, "ai_error": "ai_disabled"}
         return _json_safe({"ticker": ticker, **tech, **stub})
     try:
-        ai_data = ai_analysis_and_news(ticker, tech)
+        ai_data = ai_analysis_and_news(ticker, tech, profile)
     except Exception as e:
         ai_data = {"score": None, "signal": "neutral", "summary": None,
                    "news": [], "play": None, "ai_error": str(e)}
@@ -469,9 +514,9 @@ try:
         return {"ok": True, "time": datetime.datetime.now().isoformat()}
 
     @app.get("/research")
-    def research_endpoint(ticker: str, ai: int = 0):
+    def research_endpoint(ticker: str, ai: int = 0, profile: str = ""):
         t = ticker.upper().strip()
-        return _cached(f"research:{t}:ai{ai}", lambda: research(t, ai=bool(ai)))
+        return _cached(f"research:{t}:{ai}:{profile}", lambda: research(t, ai=bool(ai), profile=profile))
 
     @app.get("/sectors")
     def sectors_endpoint():
@@ -544,7 +589,7 @@ try:
         return _cached("sectors_rotation", produce)
 
     @app.get("/outlook")
-    def outlook_endpoint():
+    def outlook_endpoint(profile: str = ""):
         def produce():
             try:
                 from scanner import _lenient_json, fetch_climate, fetch_sectors
@@ -553,10 +598,12 @@ try:
                 top = sorted(sectors, key=lambda s: s.get("month",0), reverse=True)[:3]
                 bot = sorted(sectors, key=lambda s: s.get("month",0))[:2]
                 sc  = climate.get("macro_score", 50)
+                profile_block = _profile_ctx(profile)
+                profile_line = f"\n{profile_block}" if profile_block else ""
                 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
                 prompt = f"""Market strategist. Date: {datetime.date.today()}. Macro: {sc}/100 ({climate.get('posture','neutral')}).
 Top sectors (1mo): {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in top)}
-Lagging: {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in bot)}
+Lagging: {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in bot)}{profile_line}
 
 1-3 month forward market outlook. JSON ONLY:
 {{"headline":"<bold 10-word directional call>","regime":"bull"|"bear"|"neutral"|"volatile",
@@ -576,7 +623,7 @@ Be directional and specific. No hedging."""
         return _cached_swr("outlook", produce, ttl=3600, stale_ttl=14400)
 
     @app.get("/why-now")
-    def why_now_endpoint(ticker: str):
+    def why_now_endpoint(ticker: str, profile: str = ""):
         """Fresh AI take on today's specific price action — no caching."""
         ticker = ticker.upper().strip()
         tech = technicals(ticker)
@@ -590,10 +637,12 @@ Be directional and specific. No hedging."""
                 pct = (spot - w52l) / (w52h - w52l) * 100
                 w52_pct = f"(52W: {pct:.0f}th %ile)"
             earn_ctx = f"earnings in {tech['daysToEarn']}d" if tech.get('daysToEarn') is not None else ""
+            profile_block = _profile_ctx(profile)
+            profile_line = f"\n{profile_block}" if profile_block else ""
             prompt = f"""Sharp market analyst. Today: {datetime.date.today()}.
 
 {ticker} ({tech['name']}) is at ${spot} ({tech['chg']:+.1f}% TODAY) {w52_pct}.
-RSI {tech['rsi']} | IV {tech['iv']}% | P/C {tech.get('pcRatio','n/a')} | Rel Vol {tech.get('relVol','?')}× {earn_ctx}
+RSI {tech['rsi']} | IV {tech['iv']}% | P/C {tech.get('pcRatio','n/a')} | Rel Vol {tech.get('relVol','?')}× {earn_ctx}{profile_line}
 
 Write ONE crisp paragraph (under 110 words) answering:
 What is happening to this stock TODAY specifically? Is today's move meaningful signal or just noise?
@@ -606,6 +655,97 @@ Be direct. Specific numbers. No hedging. No "it could go either way." Take a pos
                                "spot":tech['spot'],"chg":tech['chg']})
         except Exception as e:
             return {"error":str(e)}
+
+    @app.post("/portfolio-analysis")
+    def portfolio_analysis_endpoint(payload: dict = Body(default={})):
+        """AI analysis of the full portfolio as a book. Not cached — always fresh."""
+        positions_in = payload.get("positions") or []
+        analytics    = payload.get("analytics") or {}
+        cash_val     = float(payload.get("cash") or 0)
+        profile_str  = payload.get("profile") or ""
+
+        if not positions_in:
+            return {"error": "No positions provided"}
+        try:
+            client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+            profile_block = _profile_ctx(profile_str)
+            profile_parts = profile_str.split("|") if profile_str else []
+            risk  = profile_parts[0] if len(profile_parts) > 0 else "moderate"
+            goal  = profile_parts[1] if len(profile_parts) > 1 else "growth"
+            style = profile_parts[2] if len(profile_parts) > 2 else "swing"
+
+            # Summarize positions
+            pos_lines = []
+            for p in positions_in:
+                ticker = p.get("ticker","?")
+                typ    = p.get("type","?")
+                strike = p.get("strike")
+                expiry = p.get("expiry","")
+                qty    = p.get("qty",0)
+                pnl    = p.get("pnl") or 0
+                pnl_pct= (p.get("pnl_pct") or 0)*100
+                val    = p.get("current_val") or 0
+                dte    = p.get("dte")
+                stage  = p.get("stage","")
+                conv   = p.get("conviction","")
+                delta  = p.get("delta")
+                theta  = p.get("theta")
+                iv_raw = p.get("iv")
+                iv     = f"{iv_raw*100:.0f}%" if iv_raw else "—"
+
+                label = f"{ticker} ${strike}{typ[0]}" if strike else f"{ticker} {typ}"
+                dte_s = f"DTE {dte}d · " if dte else ""
+                greeks_s = ""
+                if delta is not None and theta is not None:
+                    greeks_s = f" | Δ{delta:.2f} Θ${theta:.2f}/day"
+                pos_lines.append(
+                    f"  • {label} qty={qty} | ${val:,.0f} val | P&L ${pnl:+,.0f} ({pnl_pct:+.1f}%) | "
+                    f"{dte_s}IV {iv} | {stage} {conv}{greeks_s}"
+                )
+
+            total_val  = analytics.get("total_value") or 0
+            total_pnl  = analytics.get("total_pnl") or 0
+            net_delta  = analytics.get("net_delta") or 0
+            daily_theta= analytics.get("daily_theta") or 0
+            sector_alloc = analytics.get("sector_alloc") or {}
+            sector_s   = " · ".join(f"{k} {v*100:.0f}%" for k,v in sorted(sector_alloc.items(), key=lambda x:-x[1]))
+
+            prompt = f"""You are a senior portfolio manager reviewing a client's holdings on {datetime.date.today()}.
+
+{profile_block}
+
+PORTFOLIO SNAPSHOT:
+Total Value: ${total_val:,.0f} | Cash: ${cash_val:,.0f} | Combined: ${total_val+cash_val:,.0f}
+Total P&L: ${total_pnl:+,.0f} | Net Delta: {net_delta:.0f} | Daily Theta: ${daily_theta:.2f}/day
+Sector Exposure: {sector_s or "—"}
+
+POSITIONS:
+{chr(10).join(pos_lines)}
+
+Analyze this portfolio as a WHOLE BOOK — not individual stocks. Think like a portfolio manager.
+Personalize every insight to the trader's profile above.
+
+JSON ONLY — no markdown:
+{{
+  "health_score": "Strong"|"Balanced"|"At Risk"|"Needs Attention",
+  "health_summary": "<one-line overall portfolio health — specific, not generic>",
+  "concentration": "<concentration risk in plain English: what is too heavy, what % it is, why it matters for THIS trader's profile>",
+  "greeks_plain": "<Greeks in plain English: what the net delta and daily theta MEAN in real terms — e.g. 'You lose $X/day to theta and need X% up move in Y days to break even'. Calibrate urgency to trader profile.>",
+  "opportunity": {{"ticker":"<ticker>","reason":"<1-2 sentences: why THIS position has the most upside right now, specific>"}},
+  "risk": {{"ticker":"<ticker>","reason":"<1-2 sentences: what makes THIS the most vulnerable right now, what to watch>"}},
+  "recommendation": "<2-3 sentences: what this specific portfolio needs right now — specific action, e.g. trim X to reduce concentration, add hedge in Y, take profits on Z. Calibrated to their risk profile.>"
+}}
+
+Be direct, specific, and personalized. Do NOT flag concentration as a problem for aggressive/degen traders — that's their style."""
+
+            r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
+                messages=[{"role":"user","content":prompt}])
+            from scanner import _lenient_json
+            data = _lenient_json(r.content[0].text)
+            return _json_safe({"generated_at": datetime.datetime.now().isoformat(), **data})
+        except Exception as e:
+            return {"error": str(e)}
 
     @app.get("/sector")
     def sector_endpoint(name: str):

@@ -171,64 +171,75 @@ def technicals(ticker):
 
 
 def ai_analysis_and_news(ticker, tech):
-    """Panel-of-investors 30-day forward outlook. Score = forward setup quality, not past perf."""
+    """Stage-based 30-day forward outlook: where is this stock in its current cycle?"""
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    # Build enriched context strings
-    earn_ctx = f"in {tech['daysToEarn']}d ({tech['fundamentals']['nextEarnings']})" if tech.get('daysToEarn') is not None else f"date unknown ({tech['fundamentals']['nextEarnings']})"
+    earn_ctx = f"in {tech['daysToEarn']}d ({tech['fundamentals']['nextEarnings']})" if tech.get('daysToEarn') is not None else f"unknown ({tech['fundamentals']['nextEarnings']})"
     w52h, w52l, spot = tech.get('week52High'), tech.get('week52Low'), tech.get('spot')
     w52_ctx = ""
     if w52h and w52l and spot and w52h != w52l:
         pct = (spot - w52l) / (w52h - w52l) * 100
-        w52_ctx = f"52W ${w52l}–${w52h} (at {pct:.0f}th %ile)"
+        w52_ctx = f"52W ${w52l}–${w52h} (at {pct:.0f}th %ile — {'near highs' if pct>80 else 'near lows' if pct<20 else 'mid-range'})"
     pc = tech.get('pcRatio')
-    pc_ctx = f"P/C {pc} ({'heavy hedging' if pc and pc > 1.2 else 'call-heavy/bullish' if pc and pc < 0.8 else 'neutral'})" if pc else "P/C n/a"
+    pc_ctx = f"P/C {pc} ({'heavy put hedging' if pc and pc>1.2 else 'call-heavy/bullish flow' if pc and pc<0.8 else 'neutral flow'})" if pc else "P/C n/a"
     analyst_ctx = ""
     a = tech.get('analyst', {})
     if a.get('targetMean') and spot:
         upside = (a['targetMean'] - spot) / spot * 100
-        analyst_ctx = f"\nAnalyst consensus: {a.get('recKey','?')} · {a.get('count','?')} analysts · mean target ${a['targetMean']:.2f} ({upside:+.1f}% upside)"
+        analyst_ctx = f"\nAnalyst consensus: {a.get('recKey','?')} · {a.get('count','?')} analysts · mean target ${a['targetMean']:.2f} ({upside:+.1f}% from here)"
 
-    prompt = f"""You are a panel of elite investors giving a FORWARD-LOOKING 30-DAY SETUP SCORE for {ticker} ({tech['name']}). Today: {datetime.date.today()}.
+    prompt = f"""You are an elite technical-fundamental analyst reading the PRICE ACTION STORY of {ticker} ({tech['name']}) as of {datetime.date.today()}.
 
-Combined analytical lens:
-• Warren Buffett — is the business durable, is valuation attractive at this price?
-• Stan Druckenmiller — macro tailwinds/headwinds, is momentum with or against this name?
-• Quant options trader — what does the options market's current structure tell us about smart money?
+Combine three lenses:
+• Chart reading — where is this stock in its current cycle? What is price saying?
+• Fundamentals — does the business support or undermine the technical setup?
+• Options intelligence — what is smart money positioning telling us right now?
 
 MARKET DATA:
 Price: ${spot} ({tech['chg']:+.1f}% today) | RSI {tech['rsi']} | {w52_ctx}
 Options: IV {tech['iv']}% | {pc_ctx} | Rel Vol {tech.get('relVol','?')}×
-Fundamentals: P/E {tech['fundamentals']['pe']} | Rev Growth {tech['fundamentals']['revGrowth']} | Gross Margin {tech['fundamentals']['grossMargin']} | Sector: {tech['sector']}
+Fundamentals: P/E {tech['fundamentals']['pe']} | Rev Growth {tech['fundamentals']['revGrowth']} | Margin {tech['fundamentals']['grossMargin']} | Sector: {tech['sector']}
 Earnings: {earn_ctx}{analyst_ctx}
 
-SCORE 0-10 for 30-DAY FORWARD SETUP QUALITY (not backward performance):
-  0-2 = Strong short / high-conviction avoid
-  3-4 = Lean bearish, risks outweigh near-term reward
-  5   = Neutral, coin flip, no clear edge
-  6-7 = Lean bullish, setup tilts positive
-  8-10 = Strong bull setup with real near-term catalysts
+ASSIGN ONE STAGE that best describes where this stock is RIGHT NOW in its cycle:
+  Breakout — clearing resistance with volume, momentum building, likely continuation
+  Trending — established uptrend, healthy pullbacks, buyers in control
+  Coiling — wedging/consolidating near a key level, big directional move imminent
+  Oversold Bounce — hit major support or oversold extreme, selling exhausted, mean reversion likely
+  Resistance Test — approaching major ceiling, breakout-or-rejection decision point
+  Running Out of Steam — momentum fading, distribution signs, rally may be ending
+  Deteriorating — lower highs and lows forming, sellers gaining control
+  Collapsing — aggressive selling/breakdown, avoid or consider short
 
-Use the FULL range. Avoid clustering at 4-6. Be decisive.
+CONVICTION for the next 30 days (be honest — most stocks are Watch and Wait):
+  Strong Setup — clear directional edge with specific catalyst, act now
+  Watch and Wait — mixed or unclear signals, let price confirm direction first
+  Risky Setup — risk outweighs reward, protect capital
+
+REASON: one line written like an experienced trader talking — name the specific technical situation or catalyst defining this moment and what likely happens next 30 days.
+  Good: "Wedging above 200-day MA with earnings catalyst in 18 days — coil resolves on print."
+  Good: "Failed breakout on earnings gap-down, now retesting critical $180 support with declining volume."
+  Bad: "Stock is at a key level and could go up or down."
 
 JSON ONLY — no markdown, no code fences:
 {{
-  "score": <float 0-10, one decimal>,
+  "stage": "Breakout"|"Trending"|"Coiling"|"Oversold Bounce"|"Resistance Test"|"Running Out of Steam"|"Deteriorating"|"Collapsing",
+  "conviction": "Strong Setup"|"Watch and Wait"|"Risky Setup",
+  "reason": "<one specific trader-voice line: current technical situation + 30-day likely outcome>",
   "signal": "hot"|"cold"|"neutral",
-  "setup": "strong"|"risky"|"wait",
-  "outlook_30d": "<2-3 sentences: what is the MOST LIKELY outcome in the next 30 days and WHY — specific, directional, not hedged>",
-  "catalysts": ["<specific named event/catalyst that could push price UP in 30d>", "<second catalyst>"],
-  "risks": ["<specific named risk that could hurt it in next 30d>", "<second risk>"],
-  "options_read": "<2 sentences: what IV {tech['iv']}% + P/C {pc} tells us about where smart money is positioned right now>",
+  "outlook_30d": "<2-3 sentences: forward 30-day outlook, specific and directional, not hedged>",
+  "catalysts": ["<specific named event that could push price UP>", "<second catalyst>"],
+  "risks": ["<specific named risk in next 30 days>", "<second risk>"],
+  "options_read": "<2 sentences: what IV {tech['iv']}% + P/C {pc} says about smart money positioning>",
   "news": [
     {{"score":<0-10>,"sentiment":"bullish"|"bearish"|"neutral","headline":"<specific plausible recent headline>","source":"<e.g. Bloomberg>","time":"<e.g. 2h ago>"}}
   ],
-  "play": null | {{"direction":"CALL"|"PUT","strike":<near ATM>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est float>,"conviction":"HIGH"|"MEDIUM"|"LOW","thesis":"<1 sentence: why this structure, not just direction>"}}
+  "play": null | {{"direction":"CALL"|"PUT","strike":<near ATM>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est float>,"conviction":"HIGH"|"MEDIUM"|"LOW","thesis":"<1 sentence: structure rationale>"}}
 }}
 
-Exactly 3 news items with varied scores. PLAY only if there is genuine asymmetric edge in the next 30 days — otherwise null."""
+Exactly 3 news items. PLAY only if genuine asymmetric edge — otherwise null."""
 
-    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1400,
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
         messages=[{"role": "user", "content": prompt}])
     from scanner import _lenient_json
     return _lenient_json(r.content[0].text)
@@ -350,20 +361,25 @@ def _write_positions(positions):
         json.dump(positions, f, indent=2)
 
 
-def _recommend(score, pnl_pct, dte):
-    """HOLD / BUY / SELL from conviction (AI score 0-10) + the position's own state."""
+def _recommend(score, pnl_pct, dte, conviction=None):
+    """HOLD / BUY / SELL from stage conviction + position state."""
     if pnl_pct is not None and pnl_pct <= -0.25:
-        return "SELL"                                  # stop-loss discipline
-    if dte is not None and dte < 21 and (score is None or score < 6):
-        return "SELL"                                  # option bleeding theta with no conviction
+        return "SELL"                                   # stop-loss discipline always
+    if conviction == "Risky Setup":
+        return "SELL"                                   # AI says risk > reward
+    if dte is not None and dte < 21 and conviction != "Strong Setup" and (score is None or score < 6):
+        return "SELL"                                   # theta bleeding, no conviction to hold
+    if conviction == "Strong Setup":
+        return "HOLD" if (pnl_pct or 0) >= 0.6 else "BUY"
+    # Fallback: numeric score (backward compat with cached research)
     if score is None:
         return "HOLD"
     if score >= 7:
-        return "HOLD" if (pnl_pct or 0) >= 0.6 else "BUY"   # bullish, but don't chase a huge winner
+        return "HOLD" if (pnl_pct or 0) >= 0.6 else "BUY"
     if score <= 3.5:
         return "SELL"
     if pnl_pct is not None and pnl_pct >= 0.5:
-        return "SELL"                                  # neutral conviction + big gain → take profits
+        return "SELL"                                   # neutral conviction + big gain → take profits
     return "HOLD"
 
 
@@ -639,17 +655,25 @@ JSON ONLY:
         expired = [p for p in valued if p.get("expired")]
         errored = [p for p in valued if p.get("error")]
         active  = [p for p in valued if not p.get("expired") and not p.get("error")]
-        # Enrich each active position: 0-100 bullishness score (cached AI sentiment),
-        # a HOLD/BUY/SELL rec, a recommended stop, and analysis of the user's entered stop.
+        # Enrich each active position with stage/conviction from cached research.
         for p in active:
-            sc = None
+            sc, conviction, stage = None, None, None
             try:
                 rb = _cached(f"research:{p['ticker']}", lambda t=p['ticker']: research(t))
-                sc = rb.get("score")
+                sc         = rb.get("score")
+                conviction = rb.get("conviction")
+                stage      = rb.get("stage")
             except Exception:
                 pass
-            p["score"]    = round(sc * 10) if isinstance(sc, (int, float)) else None
-            rec = _recommend(sc, p.get("pnl_pct"), p.get("dte"))
+            # Map conviction to 0-100 for the Signal column; fall back to numeric score
+            if   conviction == "Strong Setup":    sc_num = 80
+            elif conviction == "Risky Setup":     sc_num = 20
+            elif conviction == "Watch and Wait":  sc_num = 50
+            else: sc_num = round(sc * 10) if isinstance(sc, (int, float)) else None
+            p["score"]      = sc_num
+            p["stage"]      = stage
+            p["conviction"] = conviction
+            rec = _recommend(sc, p.get("pnl_pct"), p.get("dte"), conviction)
             spot = p.get("spot")
             p["stop_rec"] = _stop_recommendation(p.get("type"), spot)
             st = p.get("stop")

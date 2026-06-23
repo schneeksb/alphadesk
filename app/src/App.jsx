@@ -231,7 +231,9 @@ function Sparkline({ data, w=120, h=32, color }) {
     </svg>
   );
 }
-const scoreLabel = (s) => s==null?"AI off":s>=7?"Bullish":s>=6?"Lean Bull":s>=4?"Neutral":s>=3?"Lean Bear":"Bearish";
+const stageEmoji = (s) => ({"Breakout":"🚀","Trending":"📈","Coiling":"🔄","Oversold Bounce":"⚡","Resistance Test":"🧱","Running Out of Steam":"😮‍💨","Deteriorating":"⚠️","Collapsing":"🔻"}[s]||"");
+const stageColor = (s) => ["Breakout","Trending","Oversold Bounce"].includes(s)?C.up:["Deteriorating","Collapsing"].includes(s)?C.down:["Resistance Test","Running Out of Steam"].includes(s)?C.amber:C.cold;
+const convictionColor = (c) => c==="Strong Setup"?C.up:c==="Risky Setup"?C.down:C.amber;
 
 // Hover-to-inspect price chart: crosshair + dot + floating price/date label
 function InteractiveChart({ data, dates, color, h=130 }) {
@@ -268,20 +270,6 @@ function InteractiveChart({ data, dates, color, h=130 }) {
   );
 }
 
-function ScoreDial({ score, size=44 }) {
-  const has = score!=null && !isNaN(score);
-  const col = scoreColor(score), pct = has ? score/10 : 0, r = size/2-3;
-  return (
-    <div style={{ position:"relative", width:size, height:size, flexShrink:0 }}>
-      <svg width={size} height={size} style={{ transform:"rotate(-90deg)" }}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={C.line} strokeWidth={3}/>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={3}
-          strokeDasharray={`${pct*2*Math.PI*r} ${2*Math.PI*r}`} strokeLinecap="round"/>
-      </svg>
-      <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:C.mono, fontSize:size>40?13:11, fontWeight:700, color:col }}>{has ? score.toFixed(1) : "—"}</div>
-    </div>
-  );
-}
 
 // ── WATCHLIST CARD (fetches its own data) ─────────────────────────────
 function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
@@ -331,15 +319,17 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
             return <div style={{ fontFamily:C.mono, fontSize:10, color:upside>=0?C.up:C.down, marginTop:2 }}>{upside>=0?"+":""}{upside.toFixed(0)}% to target · {(d.analyst.recKey||"").replace(/_/g," ")}</div>;
           })()}
         </div>
-        <div style={{ display:"flex", alignItems:"center", gap:11 }}>
-          <div style={{ textAlign:"right" }}>
-            <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.06em" }}>SENTIMENT</div>
-            <div style={{ fontSize:11, fontWeight:600,
-              color: aiEnabled && d.ai_error && d.ai_error !== "ai_disabled" ? C.amber : scoreColor(d.score) }}>
-              {aiEnabled && d.ai_error && d.ai_error !== "ai_disabled" ? "API error" : scoreLabel(d.score)}
-            </div>
-          </div>
-          <ScoreDial score={d.score}/>
+        <div style={{ textAlign:"right", maxWidth:150 }}>
+          {aiEnabled && d.ai_error && d.ai_error !== "ai_disabled" ? (
+            <span style={{ fontSize:10, color:C.amber, fontWeight:600 }}>API error</span>
+          ) : d.stage ? (
+            <>
+              <div style={{ fontSize:11.5, fontWeight:700, color:stageColor(d.stage), lineHeight:1.3 }}>{stageEmoji(d.stage)} {d.stage}</div>
+              {d.conviction && <div style={{ fontSize:9.5, color:convictionColor(d.conviction), marginTop:3, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.04em" }}>{d.conviction}</div>}
+            </>
+          ) : aiEnabled ? (
+            <span style={{ fontSize:10, color:C.faint }}>Analyzing…</span>
+          ) : null}
         </div>
       </div>
       {d.history && <div style={{ marginTop:10 }}><Sparkline data={d.history} h={30} color={d.chg>=0?C.up:C.down}/></div>}
@@ -368,6 +358,9 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData }) {
         {d.pcRatio != null && <span style={{ fontFamily:C.mono, fontSize:10, color:d.pcRatio>1.2?C.down:d.pcRatio<0.8?C.up:C.sub, background:C.panel2, padding:"2px 7px", borderRadius:4 }}>P/C {d.pcRatio}</span>}
         {d.play && <span style={{ fontFamily:C.mono, fontSize:10, color:C.up, background:`${C.up}14`, padding:"2px 7px", borderRadius:4 }}>PLAY ✓</span>}
       </div>
+      {d.reason && aiEnabled && !(d.ai_error && d.ai_error !== "ai_disabled") && (
+        <div style={{ fontSize:10.5, color:C.sub, marginTop:9, lineHeight:1.45, borderTop:`1px solid ${C.line}`, paddingTop:9, fontStyle:"italic" }}>{d.reason}</div>
+      )}
     </div>
   );
 }
@@ -466,21 +459,28 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled }) {
           })()}
         </div>
         {aiOk ? (
-          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:16 }}>
-            <ScoreDial score={d.score} size={56}/>
-            <div>
-              <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em" }}>ALPHADESK SCORE</div>
-              <div style={{ fontSize:17, color:scoreColor(d.score), fontWeight:700 }}>{scoreLabel(d.score)}</div>
-              <div style={{ fontSize:10.5, color:C.faint, marginTop:2 }}>30-day forward setup · 0 – 10</div>
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"flex-start", gap:14 }}>
+            <div style={{ fontSize:38, lineHeight:1, flexShrink:0, marginTop:2 }}>{stageEmoji(d.stage) || "🔍"}</div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.08em", marginBottom:5 }}>30-DAY SETUP</div>
+              <div style={{ fontSize:16, fontWeight:700, color:stageColor(d.stage)||C.sub, marginBottom:d.conviction?6:0 }}>{d.stage || "—"}</div>
+              {d.conviction && (
+                <span style={{ fontFamily:C.mono, fontSize:9.5, fontWeight:700,
+                  color:convictionColor(d.conviction),
+                  background:`${convictionColor(d.conviction)}14`,
+                  border:`1px solid ${convictionColor(d.conviction)}40`,
+                  borderRadius:5, padding:"2px 8px" }}>{d.conviction}</span>
+              )}
+              {d.reason && <div style={{ fontSize:11.5, color:C.sub, marginTop:8, lineHeight:1.5, fontStyle:"italic" }}>{d.reason}</div>}
             </div>
           </div>
         ) : (
-          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:12, opacity:0.55 }}>
-            <ScoreDial score={null} size={56}/>
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 20px", flex:1, display:"flex", alignItems:"center", gap:14, opacity:0.55 }}>
+            <div style={{ fontSize:38, lineHeight:1, flexShrink:0 }}>🔍</div>
             <div>
-              <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em" }}>ALPHADESK SCORE</div>
-              <div style={{ fontSize:13, color:C.faint, fontWeight:500, marginTop:2 }}>{aiFail ? "API error" : "AI Insights off"}</div>
-              <div style={{ fontSize:10.5, color:C.faint, marginTop:2 }}>enable in Settings →</div>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.08em" }}>30-DAY SETUP</div>
+              <div style={{ fontSize:13, color:C.faint, fontWeight:500, marginTop:4 }}>{aiFail ? "API error" : "AI Insights off"}</div>
+              <div style={{ fontSize:10.5, color:C.faint, marginTop:3 }}>enable in Settings →</div>
             </div>
           </div>
         )}
@@ -1161,7 +1161,7 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
     {key:"iv",          label:"IV",       align:"right"},
     {key:"dte",         label:"DTE",      align:"right"},
     {key:"stop",        label:"Stop",     align:"right"},
-    {key:"score",       label:"Signal",   align:"right"},
+    {key:"score",       label:"Setup",    align:"right"},
   ];
   const toggleSort = (key)=> setSort(s=> s.key!==key ? {key,dir:"desc"} : s.dir==="desc" ? {key,dir:"asc"} : {key:null,dir:null});
   const sortVal = (p,key)=> key==="ticker" ? (p.ticker||"") : (p[key] ?? -Infinity);
@@ -1307,7 +1307,13 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                     )}
                   </div>
                   <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:2 }}>
-                    <span style={{ fontWeight:700, color:scoreColr(p.score) }}>{p.score==null?"—":p.score}</span>
+                    {p.conviction ? (
+                      <span style={{ fontSize:9.5, fontWeight:700, color:convictionColor(p.conviction), textAlign:"right", lineHeight:1.3 }}>
+                        {p.stage ? stageEmoji(p.stage)+" " : ""}{p.conviction}
+                      </span>
+                    ) : (
+                      <span style={{ fontWeight:700, color:scoreColr(p.score) }}>{p.score==null?"—":p.score}</span>
+                    )}
                     {p.rec && <span style={{ fontSize:8.5, fontWeight:700, letterSpacing:"0.04em", color:recColor(p.rec), background:`${recColor(p.rec)}1c`, padding:"1px 6px", borderRadius:4 }}>{p.rec}</span>}
                   </div>
                   <div style={{ display:"flex", gap:9, justifyContent:"flex-end", alignItems:"center" }}>

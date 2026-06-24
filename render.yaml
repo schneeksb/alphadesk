@@ -12,5 +12,7 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false          # set this in the Render dashboard (do NOT commit your key)
+      - key: YT_API_KEY
+        sync: false          # YouTube Data API v3 key — set in Render dashboard (Market Pulse)
       - key: PYTHON_VERSION
         value: "3.11.9"

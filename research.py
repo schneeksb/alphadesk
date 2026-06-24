@@ -663,17 +663,20 @@ try:
 
     @app.get("/yt-insights")
     def yt_insights_endpoint():
-        """Fetch analyst videos via YouTube RSS (stdlib only) + transcripts via youtube-transcript-api."""
+        """Market Pulse: RSS for recent video IDs/titles + YouTube Data API v3 for
+        description/tags, then Claude expands the thesis implied by the title.
+        Transcripts are NOT used — YouTube blocks timedtext from datacenter IPs."""
         def produce():
-            import json as _json, re as _re, urllib.request, time as _time
+            import json as _json, re as _re, urllib.request, urllib.parse
             import xml.etree.ElementTree as _ET
-            from concurrent.futures import ThreadPoolExecutor, wait as _wait, FIRST_COMPLETED
+            from concurrent.futures import ThreadPoolExecutor, wait as _wait
 
-            try:
-                from youtube_transcript_api import YouTubeTranscriptApi
-                yta_available = True
-            except ImportError:
-                yta_available = False
+            # YouTube blocks transcript fetching (timedtext) from datacenter IPs like
+            # Render, but the Data API v3 and RSS feeds are NOT blocked. Approach:
+            #   RSS  -> recent video IDs + titles (free, no quota)
+            #   Data API videos.list -> full description + tags (1 unit/call, batched)
+            #   Claude -> expand the thesis implied by the title using market knowledge
+            YT_API_KEY = os.getenv("YT_API_KEY", "").strip()
 
             _YT_NS = {
                 "atom":  "http://www.w3.org/2005/Atom",
@@ -702,96 +705,91 @@ try:
                                     "pub": pub, "desc": desc, "is_short": is_short})
                 return entries
 
-            def _get_transcript(vid):
-                """Return transcript text or None. Hard 6s wall-clock cap via Future."""
-                if not yta_available or not vid:
-                    return None
+            def _fetch_video_meta(vids):
+                """Batch-fetch description + tags from YouTube Data API v3 (videos.list).
+                Costs 1 quota unit per call regardless of how many IDs (up to 50).
+                Returns {vid: {"description": str, "tags": [..]}}. {} if no key/error."""
+                vids = [v for v in vids if v]
+                if not YT_API_KEY or not vids:
+                    return {}
+                params = urllib.parse.urlencode({
+                    "part": "snippet",
+                    "id": ",".join(vids[:50]),
+                    "key": YT_API_KEY,
+                })
+                url = f"https://www.googleapis.com/youtube/v3/videos?{params}"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 try:
-                    tlist = YouTubeTranscriptApi.list_transcripts(vid)
-                    try:
-                        t = tlist.find_manually_created_transcript(["en", "en-US", "en-GB"])
-                    except Exception:
-                        try:
-                            t = tlist.find_generated_transcript(["en", "en-US", "en-GB"])
-                        except Exception:
-                            t = next(iter(tlist))
-                    parts = t.fetch()
-                    text = " ".join(p["text"] for p in parts)[:4000]
-                    return text if len(text) > 80 else None
+                    with urllib.request.urlopen(req, timeout=6) as r:
+                        payload = _json.loads(r.read())
                 except Exception:
-                    return None
+                    return {}
+                out = {}
+                for item in payload.get("items", []):
+                    sn = item.get("snippet", {}) or {}
+                    out[item.get("id", "")] = {
+                        "description": (sn.get("description") or "").strip(),
+                        "tags": sn.get("tags") or [],
+                    }
+                return out
 
             ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-            # The exact extraction brief, transcript-only. Returns a structured
-            # insight object, or None when the video is pure promotion / no signal.
-            _EXTRACT_PROMPT = (
-                "You are analyzing a financial YouTube video transcript. Extract the "
-                "2-3 most important actionable insights for a stock investor. Focus on: "
-                "specific stocks or sectors mentioned, market direction calls, macro "
-                "observations, or trading ideas. Return only the insights — no "
-                "promotional content, no calls to action, no affiliate links. Be specific "
-                "and concrete. If the transcript contains no useful financial insights, "
-                "return null."
-            )
-
-            def _extract_insights(analyst, v, transcript_text):
-                """Send a transcript to Claude. Return an insight dict, or None to skip
-                this video (no transcript signal / pure promo)."""
+            def _expand_thesis(analyst, v):
+                """Claude reads the title + tags + description (NO transcript — blocked on
+                Render) and expands the implied thesis using its market knowledge."""
+                tags = ", ".join(v.get("tags", [])[:15])
+                desc = (v.get("desc") or "")[:600]
                 prompt = (
-                    f"{_EXTRACT_PROMPT}\n\n"
-                    f"Analyst: {analyst['name']} ({analyst['focus']})\n"
-                    f"Video title: {v['title']}\n\n"
-                    f"Transcript:\n{transcript_text}\n\n"
-                    f"Respond with JSON only, no markdown. Either:\n"
+                    f"You are a market strategist interpreting a finance YouTube video for a "
+                    f"stock investor. You are given the video's title, tags, and description — "
+                    f"NOT a transcript. For this analyst the TITLE typically states the actual "
+                    f"thesis (e.g. 'Bonds are telling you where stocks rotate next' IS the call).\n\n"
+                    f"Analyst: {analyst['name']} — focus: {analyst['focus']}\n"
+                    f"Video title: {v['title']}\n"
+                    f"Tags: {tags or '(none)'}\n"
+                    f"Description (often mostly promo — ignore links, codes, and CTAs): {desc or '(none)'}\n\n"
+                    f"TASK: Infer the thesis the analyst is making and EXPAND it using your own "
+                    f"knowledge of current markets. Produce 2-3 concrete, actionable insights for "
+                    f"an investor — name the specific stocks, sectors, asset classes, rates, or "
+                    f"macro forces implied. Frame as: given the analyst said X, here is what that "
+                    f"means for investors. Be specific; do not restate the title verbatim.\n\n"
+                    f"Respond with JSON only, no markdown:\n"
                     f'{{"insights": ["insight 1", "insight 2", "insight 3"], '
-                    f'"takeaway": "one sentence summarizing the single most important thing the analyst said", '
-                    f'"sentiment": "bullish" | "bearish" | "neutral"}}\n'
-                    f"Or, if there are no useful financial insights, respond with exactly:\n"
-                    f"null"
+                    f'"takeaway": "one sentence — the single most important implication for an investor", '
+                    f'"sentiment": "bullish" | "bearish" | "neutral"}}'
                 )
                 try:
                     rsp = ai_client.messages.create(
-                        model="claude-haiku-4-5-20251001", max_tokens=400,
+                        model="claude-haiku-4-5-20251001", max_tokens=450,
                         messages=[{"role": "user", "content": prompt}]
                     )
                     raw = rsp.content[0].text.strip()
-                except Exception:
-                    return None
-
-                # Strip code fences if the model wrapped its JSON
-                if raw.startswith("```"):
-                    raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
-                if raw.lower() == "null" or not raw:
-                    return None
-                try:
+                    if raw.startswith("```"):
+                        raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
                     data = _json.loads(raw)
                 except Exception:
-                    return None
-                if data is None:
-                    return None
+                    data = {}
 
                 points = [str(p).strip() for p in (data.get("insights") or []) if str(p).strip()]
                 if not points:
-                    return None  # nothing useful — treat as promo, skip the video
+                    points = [v["title"]]   # title alone is the thesis — never drop the video
                 sent = str(data.get("sentiment", "neutral")).lower()
                 if sent not in ("bullish", "bearish", "neutral"):
                     sent = "neutral"
                 takeaway = str(data.get("takeaway", "")).strip() or points[0]
                 return {
                     "title": v["title"], "link": v["link"], "published": v["pub"],
-                    "source": "transcript",
+                    "source": "data-api",
                     "points": points[:3],
                     "summary": points[0],          # back-compat for older frontend
                     "takeaway": takeaway,
                     "sentiment": sent,
                 }
 
-            # Per analyst: scan recent uploads, fetch transcripts, skip videos with no
-            # transcript or no real insight. Collect up to TARGET_GOOD insight videos,
-            # scanning at most MAX_SCAN candidates to stay inside the time budget.
-            TARGET_GOOD = 2
-            MAX_SCAN    = 4
+            # Per analyst: take the 2 most relevant recent uploads (Shorts first for
+            # analysts who post them), enrich with Data API metadata, expand each thesis.
+            TARGET = 2
 
             def _process_analyst(analyst):
                 try:
@@ -807,22 +805,22 @@ try:
                     others = [c for c in candidates if not c["is_short"]]
                     candidates = shorts + others  # prioritize Shorts, keep rest as fallback
 
+                target = candidates[:TARGET]
+                if not target:
+                    return {"id": analyst["id"], "name": analyst["name"],
+                            "label": analyst["label"], "weight": analyst["weight"],
+                            "insights": []}
+
+                # One batched Data API call enriches all target videos with tags + full desc
+                meta = _fetch_video_meta([v["vid"] for v in target])
                 insights = []
-                for v in candidates[:MAX_SCAN]:
-                    if len(insights) >= TARGET_GOOD:
-                        break
-                    # Fetch transcript with a 6s hard cap via a sub-executor
-                    with ThreadPoolExecutor(max_workers=1) as tp:
-                        fut = tp.submit(_get_transcript, v["vid"])
-                        try:
-                            transcript_text = fut.result(timeout=6)
-                        except Exception:
-                            transcript_text = None
-                    if not transcript_text:
-                        continue  # no spoken transcript — skip, try the next video
-                    item = _extract_insights(analyst, v, transcript_text)
-                    if item:           # only keep videos with real insights
-                        insights.append(item)
+                for v in target:
+                    m = meta.get(v["vid"])
+                    if m:
+                        if m.get("description"):
+                            v["desc"] = m["description"]   # Data API desc is fuller than RSS
+                        v["tags"] = m.get("tags", [])
+                    insights.append(_expand_thesis(analyst, v))
 
                 return {"id": analyst["id"], "name": analyst["name"],
                         "label": analyst["label"], "weight": analyst["weight"],
@@ -848,9 +846,9 @@ try:
 
             analysts_out = [results_map.get(a["id"], {"id": a["id"], "name": a["name"],
                 "label": a["label"], "weight": a["weight"], "insights": []}) for a in ANALYSTS]
-            return _json_safe({"analysts": analysts_out})
+            return _json_safe({"analysts": analysts_out, "data_api": bool(YT_API_KEY)})
 
-        # Transcript fetch + Claude analysis is expensive — cache 6h, serve stale up to 24h.
+        # Data API metadata + Claude thesis expansion is expensive — cache 6h, serve stale up to 24h.
         return _cached_swr("yt-insights", produce, ttl=21600, stale_ttl=86400)
 
     @app.get("/sectors")

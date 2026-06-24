@@ -121,6 +121,11 @@ async function fetchResearch(ticker, ai = false, profile = "") {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchChart(ticker, range) {
+  const r = await fetch(`${API}/chart?ticker=${encodeURIComponent(ticker)}&range=${range}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchBriefing() {
   const r = await fetch(`${API}/briefing`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -245,6 +250,74 @@ function Sparkline({ data, w=120, h=32, color }) {
     </svg>
   );
 }
+const RANGES = [
+  { key:"1d", label:"1D", days:null },
+  { key:"1w", label:"1W", days:5 },
+  { key:"1m", label:"1M", days:21 },
+  { key:"3m", label:"3M", days:63 },
+  { key:"6m", label:"6M", days:126 },
+  { key:"1y", label:"1Y", days:252 },
+  { key:"5y", label:"5Y", days:null },
+];
+
+function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="3m" }) {
+  const [range, setRange] = useState(defaultRange);
+  const [extras, setExtras] = useState({});
+  const [fetching, setFetching] = useState(false);
+
+  const rConf = RANGES.find(r => r.key === range);
+  let chartData, chartDates;
+  if (rConf?.days != null) {
+    chartData  = (history || []).slice(-rConf.days);
+    chartDates = (history_dates || []).slice(-rConf.days);
+  } else if (extras[range]) {
+    chartData  = extras[range].history;
+    chartDates = extras[range].history_dates;
+  } else {
+    chartData  = (history || []).slice(-63);
+    chartDates = (history_dates || []).slice(-63);
+  }
+
+  const handleRange = async (key) => {
+    setRange(key);
+    const conf = RANGES.find(r => r.key === key);
+    if (conf?.days == null && !extras[key] && ticker) {
+      setFetching(true);
+      try {
+        const d = await fetchChart(ticker, key);
+        if (!d.error) setExtras(prev => ({ ...prev, [key]: d }));
+      } catch {}
+      setFetching(false);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+        <div style={{ display:"flex", gap:1 }}>
+          {RANGES.map(r => (
+            <button key={r.key} onClick={() => handleRange(r.key)}
+              style={{ background:range===r.key ? C.line : "transparent", border:"none", borderRadius:5,
+                padding:"3px 8px", color:range===r.key ? C.ink : C.faint,
+                fontSize:11, fontFamily:C.mono, fontWeight:600, cursor:"pointer", transition:"color .1s" }}
+              onMouseEnter={e => { if (range!==r.key) e.currentTarget.style.color=C.sub; }}
+              onMouseLeave={e => { if (range!==r.key) e.currentTarget.style.color=C.faint; }}>
+              {r.label}
+            </button>
+          ))}
+        </div>
+        <span style={{ fontSize:10.5, color:C.faint }}>hover to inspect</span>
+      </div>
+      {fetching
+        ? <div style={{ height:130, display:"flex", alignItems:"center", justifyContent:"center", color:C.faint, gap:6, fontSize:12 }}>
+            <Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Loading…
+          </div>
+        : <InteractiveChart data={chartData} dates={chartDates} color={color}/>
+      }
+    </div>
+  );
+}
+
 const stageEmoji = (s) => ({"Breakout":"🚀","Trending":"📈","Coiling":"🔄","Oversold Bounce":"⚡","Resistance Test":"🧱","Running Out of Steam":"😮‍💨","Deteriorating":"⚠️","Collapsing":"🔻"}[s]||"");
 const stageColor = (s) => ["Breakout","Trending","Oversold Bounce"].includes(s)?C.up:["Deteriorating","Collapsing"].includes(s)?C.down:["Resistance Test","Running Out of Steam"].includes(s)?C.amber:C.cold;
 const convictionColor = (c) => c==="Strong Setup"?C.up:c==="Risky Setup"?C.down:C.amber;
@@ -291,6 +364,7 @@ function InteractiveChart({ data, dates, color, h=130 }) {
 function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
   const [d, setD]       = useState(null);
   const [err, setErr]   = useState(false);
+  const [sparkRange, setSparkRange] = useState("1m");
   useEffect(()=>{
     let alive = true;
     setD(null); setErr(false);
@@ -349,7 +423,21 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
           ) : null}
         </div>
       </div>
-      {d.history && <div style={{ marginTop:10 }}><Sparkline data={d.history} h={30} color={d.chg>=0?C.up:C.down}/></div>}
+      {d.history && (
+        <div style={{ marginTop:10 }} onClick={e => e.stopPropagation()}>
+          <div style={{ display:"flex", gap:1, marginBottom:4 }}>
+            {RANGES.filter(r => r.days && r.days <= 126).map(r => (
+              <button key={r.key} onClick={()=>setSparkRange(r.key)}
+                style={{ background:sparkRange===r.key?C.line:"transparent", border:"none", borderRadius:4,
+                  padding:"1px 6px", color:sparkRange===r.key?C.ink:C.faint,
+                  fontSize:9.5, fontFamily:C.mono, fontWeight:600, cursor:"pointer" }}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+          <Sparkline data={d.history.slice(-(RANGES.find(r=>r.key===sparkRange)?.days||21))} h={30} color={d.chg>=0?C.up:C.down}/>
+        </div>
+      )}
 
       {/* 52-week range bar */}
       {d.week52High && d.week52Low && (
@@ -516,14 +604,10 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
         )}
       </div>
 
-      {/* ── 60-Day Chart ───────────────────────────────────── */}
+      {/* ── Price Chart ────────────────────────────────────── */}
       {d.history && (
         <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px 12px", marginBottom:14 }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:10 }}>
-            <span style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.1em", textTransform:"uppercase" }}>60-Day Price</span>
-            <span style={{ fontSize:10.5, color:C.faint }}>hover to inspect</span>
-          </div>
-          <InteractiveChart data={d.history} dates={d.history_dates} color={d.chg>=0?C.up:C.down}/>
+          <ChartWithRanges ticker={ticker} history={d.history} history_dates={d.history_dates} color={d.chg>=0?C.up:C.down}/>
         </div>
       )}
 

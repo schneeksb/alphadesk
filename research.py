@@ -29,7 +29,7 @@ load_dotenv()
 def technicals(ticker):
     """Price, % change, RSI, ATM IV, fundamentals from Yahoo."""
     tk = yf.Ticker(ticker)
-    h  = tk.history(period="60d")
+    h  = tk.history(period="1y")
     if h.empty:
         return None
     c = h["Close"].dropna()          # latest bar may be unsettled (NaN); use last valid close
@@ -157,8 +157,8 @@ def technicals(ticker):
         "week52High": round(week52_high, 2) if week52_high else None,
         "week52Low":  round(week52_low, 2)  if week52_low  else None,
         "daysToEarn": days_to_earn,
-        "history":      [round(float(x), 2) for x in c.tail(60).tolist()],
-        "history_dates":[d.strftime("%Y-%m-%d") for d in c.tail(60).index],
+        "history":      [round(float(x), 2) for x in c.tail(252).tolist()],
+        "history_dates":[d.strftime("%Y-%m-%d") for d in c.tail(252).index],
         "analyst":    analyst,
         "yahoo_news": yahoo_news,
         "fundamentals": {
@@ -517,6 +517,34 @@ try:
     def research_endpoint(ticker: str, ai: int = 0, profile: str = ""):
         t = ticker.upper().strip()
         return _cached(f"research:{t}:{ai}:{profile}", lambda: research(t, ai=bool(ai), profile=profile))
+
+    @app.get("/chart")
+    def chart_endpoint(ticker: str, range: str = "5y"):
+        """Extended price history: 1D (intraday 5m) or 5Y (weekly). Daily ranges use /research."""
+        t = ticker.upper().strip()
+        if range not in ("1d", "5y"):
+            return {"error": "range must be '1d' or '5y'"}
+        def produce():
+            try:
+                tk = yf.Ticker(t)
+                if range == "1d":
+                    h = tk.history(period="1d", interval="5m")
+                    date_fmt = "%H:%M"
+                else:
+                    h = tk.history(period="5y", interval="1wk")
+                    date_fmt = "%Y-%m-%d"
+                if h.empty:
+                    return {"error": "no data"}
+                c = h["Close"].dropna()
+                return _json_safe({
+                    "history":      [round(float(x), 2) for x in c.tolist()],
+                    "history_dates": [d.strftime(date_fmt) for d in c.index],
+                })
+            except Exception as e:
+                return {"error": str(e)}
+        ttl   = 300   if range == "1d" else 3600
+        stale = 900   if range == "1d" else 86400
+        return _cached_swr(f"chart:{t}:{range}", produce, ttl=ttl, stale_ttl=stale)
 
     @app.get("/sectors")
     def sectors_endpoint():

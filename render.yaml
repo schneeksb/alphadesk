@@ -6,10 +6,11 @@ services:
     runtime: python
     plan: free
     region: oregon
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --no-cache-dir --force-reinstall -r requirements.txt
     startCommand: uvicorn research:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false          # set this in the Render dashboard (do NOT commit your key)
-      # Python version is set via runtime.txt (python-3.11.9)
+      - key: PYTHON_VERSION
+        value: "3.11.9"

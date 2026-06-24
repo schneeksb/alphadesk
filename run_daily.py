@@ -92,9 +92,7 @@ def get_option_mark_price(ticker_obj, strike, expiry_str, option_type="call"):
 
 
 def layer1_data_valuation(portfolio=None):
-    """Value a list of positions (defaults to module PORTFOLIO). Each result carries
-    an `expired` flag (option past expiry) and an `error` string if it couldn't be valued.
-    Robust to arbitrary user-entered positions — one bad entry never sinks the batch.
+    """Value a list of positions concurrently (yfinance calls run in parallel threads).
 
     Options P&L logic:
       - cost_basis is stored as TOTAL dollars paid (premium × contracts × 100)
@@ -102,66 +100,64 @@ def layer1_data_valuation(portfolio=None):
         fallback: Black-Scholes price (raw, unrounded) × contracts × 100
       - pnl = current_val - cost_basis
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     if portfolio is None:
         portfolio = PORTFOLIO
-    print("\n[L1] Fetching spot prices & computing Greeks...")
-    r = 0.053; today = datetime.date.today(); results = []
+    print(f"\n[L1] Valuing {len(portfolio)} position(s) in parallel...")
+    r_rate = 0.053; today = datetime.date.today()
 
     def _err(pos, msg):
         return {**pos, "spot": None, "current_val": 0, "pnl": 0, "pnl_pct": 0,
                 "delta": 0, "theta": 0, "vega": 0, "iv": None, "dte": None,
                 "expired": False, "error": msg}
 
-    for pos in portfolio:
+    def _value_one(pos):
         try:
-            tk = yf.Ticker(pos["ticker"])
-            c  = tk.history(period="5d")["Close"].dropna()
+            tk   = yf.Ticker(pos["ticker"])
+            c    = tk.history(period="5d")["Close"].dropna()
             if c.empty:
-                results.append(_err(pos, "No market data")); continue
+                return _err(pos, "No market data")
             spot = float(c.iloc[-1])
             cb   = float(pos.get("cost_basis") or 0)
 
             if pos["type"] == "SHARES":
                 cv  = spot * pos["qty"]
                 pnl = cv - cb
-                print(f"  [SHR] {pos['ticker']} | spot=${spot:.2f} | qty={pos['qty']} | "
-                      f"cv=${cv:.2f} | cost=${cb:.2f} | pnl=${pnl:+.2f}")
-                results.append({**pos, "spot": round(spot,2), "current_val": round(cv,2),
-                                "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
-                                "delta": 1.0, "theta": 0, "vega": 0, "iv": None, "dte": None,
-                                "expired": False})
+                print(f"  [SHR] {pos['ticker']} spot=${spot:.2f} cv=${cv:.2f} pnl=${pnl:+.2f}")
+                return {**pos, "spot": round(spot,2), "current_val": round(cv,2),
+                        "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
+                        "delta": 1.0, "theta": 0, "vega": 0, "iv": None, "dte": None,
+                        "expired": False}
             else:
                 expiry  = datetime.date.fromisoformat(pos["expiry"])
                 raw_dte = (expiry - today).days
                 dte     = max(raw_dte, 0)
                 T       = dte / 365.0
                 qty     = pos["qty"]
-
-                # Prefer real market price from chain; fall back to Black-Scholes
                 mark_price, iv = get_option_mark_price(tk, pos["strike"], pos["expiry"], pos["type"].lower())
-                greeks = black_scholes_greeks(spot, pos["strike"], T, r, iv, pos["type"].lower())
-
+                greeks = black_scholes_greeks(spot, pos["strike"], T, r_rate, iv, pos["type"].lower())
                 if mark_price is not None and mark_price > 0:
-                    cv = mark_price * qty * 100   # live market value
-                    price_source = f"chain mark ${mark_price:.3f}"
+                    cv = mark_price * qty * 100
+                    src = f"chain ${mark_price:.3f}"
                 else:
-                    # B-S price is raw/unrounded — multiply first, THEN round
                     cv = greeks["price"] * qty * 100
-                    price_source = f"B-S ${greeks['price']:.4f}"
-
+                    src = f"BS ${greeks['price']:.4f}"
                 pnl = cv - cb
-
                 pnl_pct_str = f"{pnl/cb*100:+.1f}%" if cb else "N/A"
                 print(f"  [OPT] {pos['ticker']} ${pos.get('strike')} {pos['type']} "
-                      f"exp {pos['expiry']} | DTE={dte} | spot=${spot:.2f} | "
-                      f"IV={iv:.0%} | price={price_source} | "
-                      f"cv=${cv:.2f} | cost=${cb:.2f} | pnl=${pnl:+.2f} | pnl%={pnl_pct_str}")
-
-                results.append({**pos, "spot": round(spot,2), "current_val": round(cv,2),
-                                "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
-                                "dte": dte, "iv": round(iv,3), "expired": raw_dte < 0, **greeks})
+                      f"DTE={dte} IV={iv:.0%} {src} cv=${cv:.2f} pnl={pnl_pct_str}")
+                return {**pos, "spot": round(spot,2), "current_val": round(cv,2),
+                        "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
+                        "dte": dte, "iv": round(iv,3), "expired": raw_dte < 0, **greeks}
         except Exception as e:
-            results.append(_err(pos, str(e)))
+            return _err(pos, str(e))
+
+    # Run all positions concurrently; preserve original order via index map
+    results = [None] * len(portfolio)
+    with ThreadPoolExecutor(max_workers=min(len(portfolio), 8)) as ex:
+        futs = {ex.submit(_value_one, pos): i for i, pos in enumerate(portfolio)}
+        for fut in as_completed(futs):
+            results[futs[fut]] = fut.result()
     return results
 
 

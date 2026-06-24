@@ -2095,6 +2095,14 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveAI(aiEnabled); },[aiEnabled]);
   useEffect(()=>{ if (profile) saveProfile(profile); },[profile]);
 
+  // Keep-alive: ping the backend every 8 min so Render never cold-starts mid-session
+  useEffect(()=>{
+    const ping = () => fetch(`${API}/health`).catch(()=>{});
+    ping(); // immediate ping on mount
+    const id = setInterval(ping, 8 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // Primary sync: Supabase (logged-in) or server positions.json (anonymous)
   useEffect(()=>{
     if (userId) {

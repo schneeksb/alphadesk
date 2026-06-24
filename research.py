@@ -671,10 +671,8 @@ try:
 
                 try:
                     from youtube_transcript_api import YouTubeTranscriptApi
-                    _yta = YouTubeTranscriptApi()
                     yta_available = True
                 except ImportError:
-                    _yta = None
                     yta_available = False
 
                 ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -717,8 +715,8 @@ try:
                         transcript_text = None
                         if yta_available and v["vid"]:
                             try:
-                                fetched = _yta.fetch(v["vid"])
-                                transcript_text = " ".join(s.text for s in fetched)[:3000]
+                                parts = YouTubeTranscriptApi.get_transcript(v["vid"], languages=["en"])
+                                transcript_text = " ".join(p["text"] for p in parts)[:3000]
                             except Exception:
                                 pass
 
@@ -773,10 +771,10 @@ try:
 
                 return _json_safe({"analysts": analysts_out})
 
-            except (ImportError, ModuleNotFoundError) as e:
-                return {"error": f"import_error: {e}", "analysts": []}
+            except ImportError as e:
+                return {"error": f"Missing dependency: {e}. Check Render build logs.", "analysts": []}
             except Exception as e:
-                return {"error": f"runtime_error: {e}", "analysts": []}
+                return {"error": str(e), "analysts": []}
         return _cached_swr("yt-insights", produce, ttl=3600, stale_ttl=86400)
 
     @app.get("/sectors")

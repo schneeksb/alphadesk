@@ -723,39 +723,73 @@ try:
 
                 insights = []
                 for v in target:
-                    # 1. transcript  2. description  3. title only
+                    # --- Transcript fetch: try multiple approaches for best coverage ---
                     transcript_text = None
                     if yta_available and v["vid"]:
                         try:
-                            parts = YouTubeTranscriptApi.get_transcript(v["vid"], languages=["en"])
-                            transcript_text = " ".join(p["text"] for p in parts)[:3000]
+                            # list_transcripts lets us pick the best available track
+                            tlist = YouTubeTranscriptApi.list_transcripts(v["vid"])
+                            try:
+                                # Prefer manual English caption
+                                t = tlist.find_manually_created_transcript(["en", "en-US", "en-GB"])
+                            except Exception:
+                                try:
+                                    # Fall back to auto-generated English
+                                    t = tlist.find_generated_transcript(["en", "en-US", "en-GB"])
+                                except Exception:
+                                    # Last resort: first available track (may be another language)
+                                    t = next(iter(tlist))
+                            parts = t.fetch()
+                            transcript_text = " ".join(p["text"] for p in parts).strip()
+                            # Cap at 5000 chars — enough for full Short or key portion of long video
+                            transcript_text = transcript_text[:5000] if len(transcript_text) > 5000 else transcript_text
                         except Exception:
                             pass
 
-                    if transcript_text:
-                        source, content = "transcript", f"Title: {v['title']}\nTranscript: {transcript_text}"
-                    elif v["desc"]:
-                        source, content = "description", f"Title: {v['title']}\nDescription: {v['desc']}"
+                    # --- Build content block: transcript > description > title only ---
+                    if transcript_text and len(transcript_text) > 100:
+                        source = "transcript"
+                        content = f"Transcript:\n{transcript_text}"
+                    elif v["desc"] and len(v["desc"]) > 40:
+                        source = "description"
+                        content = f"Description:\n{v['desc']}"
                     else:
-                        source, content = "title", f"Title: {v['title']}"
+                        source = "title"
+                        content = ""
 
+                    # --- Claude Haiku: extract real insight, strip promo noise ---
+                    prompt = (
+                        f"You are analyzing a finance YouTube video for a stock/options trader.\n\n"
+                        f"Analyst: {analyst['name']} — specialty: {analyst['focus']}\n"
+                        f"Video title: {v['title']}\n"
+                        f"{content}\n\n"
+                        f"TASK: Extract the genuine market insight from this video.\n\n"
+                        f"RULES:\n"
+                        f"- summary: One specific sentence capturing the actual thesis or market call — include asset names, price levels, or macro conditions mentioned. Do NOT paraphrase the title.\n"
+                        f"- takeaway: One clean, actionable sentence a trader can act on TODAY. STRIP all promotional language: course links, Discord invites, affiliate codes, 'smash like', subscribe CTAs, and any mention of the analyst's paid products.\n"
+                        f"- sentiment: 'bullish', 'bearish', or 'neutral' — based on the actual position or thesis in the content, not the title tone.\n\n"
+                        f"JSON only — no markdown, no explanation:\n"
+                        f'{{ "summary": "...", "takeaway": "...", "sentiment": "bullish"|"bearish"|"neutral" }}'
+                    )
                     try:
                         rsp = ai_client.messages.create(
-                            model="claude-haiku-4-5-20251001", max_tokens=250,
-                            messages=[{"role": "user", "content":
-                                f"Finance YouTube video by {analyst['name']} (specialty: {analyst['focus']}).\n"
-                                f"Extract the core market insight for a trader.\n\n{content}\n\n"
-                                f"JSON only — no markdown:\n"
-                                f'{{"summary":"one sentence key insight","takeaway":"one actionable point for a stock/options trader","sentiment":"bullish"|"bearish"|"neutral"}}'}]
+                            model="claude-haiku-4-5-20251001", max_tokens=300,
+                            messages=[{"role": "user", "content": prompt}]
                         )
                         data = _json.loads(rsp.content[0].text.strip())
                         insights.append({"title": v["title"], "link": v["link"],
                                          "published": v["pub"], "source": source, **data})
                     except Exception:
+                        # Bare fallback — scrub obvious promo patterns from desc
+                        raw_tk = _re.sub(
+                            r"(https?://\S+|bit\.ly\S*|discord\S*|subscribe|smash like"
+                            r"|affiliate|coupon|promo|use code\s+\S+|link in bio|check out my)",
+                            "", v["desc"], flags=_re.IGNORECASE
+                        ).strip()[:200]
                         insights.append({"title": v["title"], "link": v["link"],
                                          "published": v["pub"], "source": source,
                                          "summary": v["title"],
-                                         "takeaway": v["desc"][:180] if v["desc"] else "See video.",
+                                         "takeaway": raw_tk or "See video for details.",
                                          "sentiment": "neutral"})
 
                 return {"id": analyst["id"], "name": analyst["name"],

@@ -1998,19 +1998,45 @@ function SectorMap({ watchlist=[], cardCache={}, onOpen }) {
   const [rotation, setRotation] = useState(null);
   const [mapData, setMapData] = useState(null);
   const [err, setErr]         = useState(null);
+  const [warming, setWarming] = useState(false);
   const [updated, setUpdated] = useState(null);
   const [sel, setSel]         = useState(null);
   const [pulseTick, setPulseTick] = useState(0);
+  const retryRef = useRef(null);
 
   const load = useCallback(()=>{
-    setErr(null); setD(null);
-    fetchSectors().then(x=>{ x.error?setErr(x.error):setD(x); setUpdated(new Date()); }).catch(e=>setErr(e.message));
+    setErr(null); setD(null); setWarming(false);
+    if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
+    fetchSectors()
+      .then(x=>{ x.error ? setErr(x.error) : setD(x); setUpdated(new Date()); })
+      .catch(()=>{
+        // Network error = likely cold start. Show "warming up" and retry after 12s.
+        setWarming(true);
+        retryRef.current = setTimeout(()=>{
+          setWarming(false);
+          fetchSectors()
+            .then(x=>{ x.error ? setErr(x.error) : setD(x); setUpdated(new Date()); })
+            .catch(e=>setErr(e.message));
+        }, 12000);
+      });
     fetchSectorRotation().then(x=>{ if(!x.error) setRotation(x); }).catch(()=>{});
     fetchMapData(watchlist).then(x=>{ if(!x.error) setMapData(x); }).catch(()=>{});
   },[watchlist]);
-  useEffect(()=>{ load(); },[load]);
+  useEffect(()=>{ load(); return ()=>{ if(retryRef.current) clearTimeout(retryRef.current); }; },[load]);
 
-  if (err) return <div style={{ padding:40, textAlign:"center", color:C.down }}>Sector map unavailable: {err}<br/><span style={{ color:C.faint, fontSize:12 }}>Is the backend running on {API}?</span></div>;
+  if (warming) return (
+    <div style={{ padding:60, textAlign:"center", color:C.sub }}>
+      <Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/>
+      <div style={{ marginTop:10, fontWeight:600 }}>Waking up backend…</div>
+      <div style={{ marginTop:6, fontSize:12, color:C.faint }}>Render free tier cold-starts in ~15s. Retrying automatically.</div>
+    </div>
+  );
+  if (err) return (
+    <div style={{ padding:40, textAlign:"center", color:C.down }}>
+      Sector map unavailable: {err}
+      <br/><button onClick={load} style={{ marginTop:12, padding:"7px 16px", borderRadius:8, border:`1px solid ${C.line}`, background:C.panel, color:C.sub, cursor:"pointer", fontSize:12 }}>Retry</button>
+    </div>
+  );
   if (!d)  return <div style={{ padding:60, textAlign:"center", color:C.sub }}><Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:10 }}>Mapping the market…</div></div>;
 
   const sectors = d.sectors || [];

@@ -665,9 +665,9 @@ try:
     def yt_insights_endpoint():
         """Fetch analyst videos via YouTube RSS (stdlib only) + transcripts via youtube-transcript-api."""
         def produce():
-            import json as _json, re as _re, urllib.request
+            import json as _json, re as _re, urllib.request, time as _time
             import xml.etree.ElementTree as _ET
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import ThreadPoolExecutor, wait as _wait, FIRST_COMPLETED
 
             try:
                 from youtube_transcript_api import YouTubeTranscriptApi
@@ -680,31 +680,88 @@ try:
                 "yt":    "http://www.youtube.com/xml/schemas/2015",
                 "media": "http://search.yahoo.com/mrss/",
             }
+            _PROMO_RE = _re.compile(
+                r"(https?://\S+|bit\.ly\S*|discord\S*|subscribe|smash\s+like"
+                r"|affiliate|coupon|promo|use\s+code\s+\S+|link\s+in\s+bio|check\s+out\s+my"
+                r"|join\s+my|free\s+\w+\s+course|patreon)",
+                _re.IGNORECASE
+            )
 
             def _fetch_rss(channel_id):
-                """Fetch YouTube channel RSS using only stdlib urllib + ElementTree."""
                 url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as r:
+                with urllib.request.urlopen(req, timeout=5) as r:   # tight 5s socket timeout
                     return _ET.fromstring(r.read())
 
-            def _parse_entries(root, max_scan=15):
+            def _parse_entries(root):
                 entries = []
-                for entry in root.findall("atom:entry", _YT_NS)[:max_scan]:
+                for entry in root.findall("atom:entry", _YT_NS)[:10]:
                     vid   = entry.findtext("yt:videoId",  namespaces=_YT_NS) or ""
                     title = entry.findtext("atom:title",  namespaces=_YT_NS) or ""
                     pub   = (entry.findtext("atom:published", namespaces=_YT_NS) or "")[:10]
                     link_el = entry.find("atom:link[@rel='alternate']", _YT_NS)
                     link  = link_el.get("href") if link_el is not None else f"https://youtube.com/watch?v={vid}"
-                    raw_desc = entry.findtext("media:group/media:description", namespaces=_YT_NS) or ""
-                    desc  = _re.sub(r"<[^>]+>", "", raw_desc).strip()
+                    raw   = entry.findtext("media:group/media:description", namespaces=_YT_NS) or ""
+                    desc  = _re.sub(r"<[^>]+>", "", raw).strip()
                     combo = (title + " " + desc + " " + link).lower()
                     is_short = "#short" in combo or "/shorts/" in link
                     entries.append({"vid": vid, "title": title, "link": link,
                                     "pub": pub, "desc": desc, "is_short": is_short})
                 return entries
 
+            def _get_transcript(vid):
+                """Return transcript text or None. Hard 6s wall-clock cap via Future."""
+                if not yta_available or not vid:
+                    return None
+                try:
+                    tlist = YouTubeTranscriptApi.list_transcripts(vid)
+                    try:
+                        t = tlist.find_manually_created_transcript(["en", "en-US", "en-GB"])
+                    except Exception:
+                        try:
+                            t = tlist.find_generated_transcript(["en", "en-US", "en-GB"])
+                        except Exception:
+                            t = next(iter(tlist))
+                    parts = t.fetch()
+                    text = " ".join(p["text"] for p in parts)[:4000]
+                    return text if len(text) > 80 else None
+                except Exception:
+                    return None
+
             ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+            def _summarise(analyst, v, transcript_text):
+                if transcript_text:
+                    source  = "transcript"
+                    content = f"Transcript:\n{transcript_text}"
+                elif v["desc"] and len(v["desc"]) > 40:
+                    source  = "description"
+                    content = f"Description:\n{v['desc']}"
+                else:
+                    source, content = "title", ""
+
+                prompt = (
+                    f"Finance YouTube video — Analyst: {analyst['name']} ({analyst['focus']})\n"
+                    f"Title: {v['title']}\n{content}\n\n"
+                    f"Extract the genuine market insight. Rules:\n"
+                    f"- summary: one specific sentence — name assets/levels/conditions. Don't paraphrase the title.\n"
+                    f"- takeaway: one clean actionable sentence. Remove ALL promo: links, Discord, courses, CTAs.\n"
+                    f"- sentiment: bullish/bearish/neutral based on actual thesis, not title tone.\n"
+                    f"JSON only: {{\"summary\":\"...\",\"takeaway\":\"...\",\"sentiment\":\"bullish\"|\"bearish\"|\"neutral\"}}"
+                )
+                try:
+                    rsp = ai_client.messages.create(
+                        model="claude-haiku-4-5-20251001", max_tokens=250,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    data = _json.loads(rsp.content[0].text.strip())
+                    return {"title": v["title"], "link": v["link"], "published": v["pub"],
+                            "source": source, **data}
+                except Exception:
+                    clean = _PROMO_RE.sub("", v["desc"]).strip()[:180]
+                    return {"title": v["title"], "link": v["link"], "published": v["pub"],
+                            "source": source, "summary": v["title"],
+                            "takeaway": clean or "See video.", "sentiment": "neutral"}
 
             def _process_analyst(analyst):
                 try:
@@ -712,94 +769,42 @@ try:
                 except Exception as e:
                     return {"id": analyst["id"], "name": analyst["name"],
                             "label": analyst["label"], "weight": analyst["weight"],
-                            "error": f"RSS unavailable: {e}", "insights": []}
+                            "error": f"RSS: {e}", "insights": []}
 
                 candidates = _parse_entries(root)
                 if analyst.get("shorts_first"):
                     shorts = [c for c in candidates if c["is_short"]]
-                    target = shorts[:analyst["videos"]] if shorts else candidates[:analyst["videos"]]
+                    target = shorts[:1] if shorts else candidates[:1]  # 1 video keeps us fast
                 else:
-                    target = candidates[:analyst["videos"]]
+                    target = candidates[:1]  # 1 video per analyst on free tier
 
                 insights = []
                 for v in target:
-                    # --- Transcript fetch: try multiple approaches for best coverage ---
-                    transcript_text = None
-                    if yta_available and v["vid"]:
+                    # Fetch transcript with 6s hard cap using a sub-executor
+                    with ThreadPoolExecutor(max_workers=1) as tp:
+                        fut = tp.submit(_get_transcript, v["vid"])
                         try:
-                            # list_transcripts lets us pick the best available track
-                            tlist = YouTubeTranscriptApi.list_transcripts(v["vid"])
-                            try:
-                                # Prefer manual English caption
-                                t = tlist.find_manually_created_transcript(["en", "en-US", "en-GB"])
-                            except Exception:
-                                try:
-                                    # Fall back to auto-generated English
-                                    t = tlist.find_generated_transcript(["en", "en-US", "en-GB"])
-                                except Exception:
-                                    # Last resort: first available track (may be another language)
-                                    t = next(iter(tlist))
-                            parts = t.fetch()
-                            transcript_text = " ".join(p["text"] for p in parts).strip()
-                            # Cap at 5000 chars — enough for full Short or key portion of long video
-                            transcript_text = transcript_text[:5000] if len(transcript_text) > 5000 else transcript_text
+                            transcript_text = fut.result(timeout=6)
                         except Exception:
-                            pass
-
-                    # --- Build content block: transcript > description > title only ---
-                    if transcript_text and len(transcript_text) > 100:
-                        source = "transcript"
-                        content = f"Transcript:\n{transcript_text}"
-                    elif v["desc"] and len(v["desc"]) > 40:
-                        source = "description"
-                        content = f"Description:\n{v['desc']}"
-                    else:
-                        source = "title"
-                        content = ""
-
-                    # --- Claude Haiku: extract real insight, strip promo noise ---
-                    prompt = (
-                        f"You are analyzing a finance YouTube video for a stock/options trader.\n\n"
-                        f"Analyst: {analyst['name']} — specialty: {analyst['focus']}\n"
-                        f"Video title: {v['title']}\n"
-                        f"{content}\n\n"
-                        f"TASK: Extract the genuine market insight from this video.\n\n"
-                        f"RULES:\n"
-                        f"- summary: One specific sentence capturing the actual thesis or market call — include asset names, price levels, or macro conditions mentioned. Do NOT paraphrase the title.\n"
-                        f"- takeaway: One clean, actionable sentence a trader can act on TODAY. STRIP all promotional language: course links, Discord invites, affiliate codes, 'smash like', subscribe CTAs, and any mention of the analyst's paid products.\n"
-                        f"- sentiment: 'bullish', 'bearish', or 'neutral' — based on the actual position or thesis in the content, not the title tone.\n\n"
-                        f"JSON only — no markdown, no explanation:\n"
-                        f'{{ "summary": "...", "takeaway": "...", "sentiment": "bullish"|"bearish"|"neutral" }}'
-                    )
-                    try:
-                        rsp = ai_client.messages.create(
-                            model="claude-haiku-4-5-20251001", max_tokens=300,
-                            messages=[{"role": "user", "content": prompt}]
-                        )
-                        data = _json.loads(rsp.content[0].text.strip())
-                        insights.append({"title": v["title"], "link": v["link"],
-                                         "published": v["pub"], "source": source, **data})
-                    except Exception:
-                        # Bare fallback — scrub obvious promo patterns from desc
-                        raw_tk = _re.sub(
-                            r"(https?://\S+|bit\.ly\S*|discord\S*|subscribe|smash like"
-                            r"|affiliate|coupon|promo|use code\s+\S+|link in bio|check out my)",
-                            "", v["desc"], flags=_re.IGNORECASE
-                        ).strip()[:200]
-                        insights.append({"title": v["title"], "link": v["link"],
-                                         "published": v["pub"], "source": source,
-                                         "summary": v["title"],
-                                         "takeaway": raw_tk or "See video for details.",
-                                         "sentiment": "neutral"})
+                            transcript_text = None
+                    insights.append(_summarise(analyst, v, transcript_text))
 
                 return {"id": analyst["id"], "name": analyst["name"],
                         "label": analyst["label"], "weight": analyst["weight"],
                         "insights": insights}
 
+            # Run all 9 analysts in parallel but cap total wall-clock at 22s
+            # (leaves 8s buffer before Render's 30s request timeout)
             results_map = {}
-            with ThreadPoolExecutor(max_workers=9) as pool:
+            deadline = 22  # seconds
+            with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {pool.submit(_process_analyst, a): a["id"] for a in ANALYSTS}
-                for fut in as_completed(futures):
+                done, pending = _wait(list(futures), timeout=deadline)
+                for fut in pending:
+                    fut.cancel()
+                    aid = futures[fut]
+                    results_map[aid] = {"id": aid, "error": "timeout", "insights": []}
+                for fut in done:
                     aid = futures[fut]
                     try:
                         results_map[aid] = fut.result()

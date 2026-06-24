@@ -1951,7 +1951,15 @@ function MarketPulsePanel({ refreshTick=0 }) {
                     {v.sentiment}
                   </span>
                 </div>
-                {v.summary && <div style={{ fontSize:11, color:C.sub, lineHeight:1.45, marginBottom:3 }}>{v.summary}</div>}
+                {Array.isArray(v.points) && v.points.length > 0 ? (
+                  <ul style={{ margin:"0 0 4px", paddingLeft:16, display:"flex", flexDirection:"column", gap:3 }}>
+                    {v.points.map((p, j) => (
+                      <li key={j} style={{ fontSize:11, color:C.sub, lineHeight:1.45 }}>{p}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  v.summary && <div style={{ fontSize:11, color:C.sub, lineHeight:1.45, marginBottom:3 }}>{v.summary}</div>
+                )}
                 {v.takeaway && <div style={{ fontSize:10.5, color:C.ink, background:`${C.line}50`, borderRadius:5, padding:"4px 8px", lineHeight:1.4 }}>→ {v.takeaway}</div>}
                 <div style={{ fontSize:9.5, color:C.faint, fontFamily:C.mono, marginTop:4 }}>{v.published}</div>
               </div>

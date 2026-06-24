@@ -680,13 +680,6 @@ try:
                 "yt":    "http://www.youtube.com/xml/schemas/2015",
                 "media": "http://search.yahoo.com/mrss/",
             }
-            _PROMO_RE = _re.compile(
-                r"(https?://\S+|bit\.ly\S*|discord\S*|subscribe|smash\s+like"
-                r"|affiliate|coupon|promo|use\s+code\s+\S+|link\s+in\s+bio|check\s+out\s+my"
-                r"|join\s+my|free\s+\w+\s+course|patreon)",
-                _re.IGNORECASE
-            )
-
             def _fetch_rss(channel_id):
                 url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -730,38 +723,75 @@ try:
 
             ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-            def _summarise(analyst, v, transcript_text):
-                if transcript_text:
-                    source  = "transcript"
-                    content = f"Transcript:\n{transcript_text}"
-                elif v["desc"] and len(v["desc"]) > 40:
-                    source  = "description"
-                    content = f"Description:\n{v['desc']}"
-                else:
-                    source, content = "title", ""
+            # The exact extraction brief, transcript-only. Returns a structured
+            # insight object, or None when the video is pure promotion / no signal.
+            _EXTRACT_PROMPT = (
+                "You are analyzing a financial YouTube video transcript. Extract the "
+                "2-3 most important actionable insights for a stock investor. Focus on: "
+                "specific stocks or sectors mentioned, market direction calls, macro "
+                "observations, or trading ideas. Return only the insights — no "
+                "promotional content, no calls to action, no affiliate links. Be specific "
+                "and concrete. If the transcript contains no useful financial insights, "
+                "return null."
+            )
 
+            def _extract_insights(analyst, v, transcript_text):
+                """Send a transcript to Claude. Return an insight dict, or None to skip
+                this video (no transcript signal / pure promo)."""
                 prompt = (
-                    f"Finance YouTube video — Analyst: {analyst['name']} ({analyst['focus']})\n"
-                    f"Title: {v['title']}\n{content}\n\n"
-                    f"Extract the genuine market insight. Rules:\n"
-                    f"- summary: one specific sentence — name assets/levels/conditions. Don't paraphrase the title.\n"
-                    f"- takeaway: one clean actionable sentence. Remove ALL promo: links, Discord, courses, CTAs.\n"
-                    f"- sentiment: bullish/bearish/neutral based on actual thesis, not title tone.\n"
-                    f"JSON only: {{\"summary\":\"...\",\"takeaway\":\"...\",\"sentiment\":\"bullish\"|\"bearish\"|\"neutral\"}}"
+                    f"{_EXTRACT_PROMPT}\n\n"
+                    f"Analyst: {analyst['name']} ({analyst['focus']})\n"
+                    f"Video title: {v['title']}\n\n"
+                    f"Transcript:\n{transcript_text}\n\n"
+                    f"Respond with JSON only, no markdown. Either:\n"
+                    f'{{"insights": ["insight 1", "insight 2", "insight 3"], '
+                    f'"takeaway": "one sentence summarizing the single most important thing the analyst said", '
+                    f'"sentiment": "bullish" | "bearish" | "neutral"}}\n'
+                    f"Or, if there are no useful financial insights, respond with exactly:\n"
+                    f"null"
                 )
                 try:
                     rsp = ai_client.messages.create(
-                        model="claude-haiku-4-5-20251001", max_tokens=250,
+                        model="claude-haiku-4-5-20251001", max_tokens=400,
                         messages=[{"role": "user", "content": prompt}]
                     )
-                    data = _json.loads(rsp.content[0].text.strip())
-                    return {"title": v["title"], "link": v["link"], "published": v["pub"],
-                            "source": source, **data}
+                    raw = rsp.content[0].text.strip()
                 except Exception:
-                    clean = _PROMO_RE.sub("", v["desc"]).strip()[:180]
-                    return {"title": v["title"], "link": v["link"], "published": v["pub"],
-                            "source": source, "summary": v["title"],
-                            "takeaway": clean or "See video.", "sentiment": "neutral"}
+                    return None
+
+                # Strip code fences if the model wrapped its JSON
+                if raw.startswith("```"):
+                    raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
+                if raw.lower() == "null" or not raw:
+                    return None
+                try:
+                    data = _json.loads(raw)
+                except Exception:
+                    return None
+                if data is None:
+                    return None
+
+                points = [str(p).strip() for p in (data.get("insights") or []) if str(p).strip()]
+                if not points:
+                    return None  # nothing useful — treat as promo, skip the video
+                sent = str(data.get("sentiment", "neutral")).lower()
+                if sent not in ("bullish", "bearish", "neutral"):
+                    sent = "neutral"
+                takeaway = str(data.get("takeaway", "")).strip() or points[0]
+                return {
+                    "title": v["title"], "link": v["link"], "published": v["pub"],
+                    "source": "transcript",
+                    "points": points[:3],
+                    "summary": points[0],          # back-compat for older frontend
+                    "takeaway": takeaway,
+                    "sentiment": sent,
+                }
+
+            # Per analyst: scan recent uploads, fetch transcripts, skip videos with no
+            # transcript or no real insight. Collect up to TARGET_GOOD insight videos,
+            # scanning at most MAX_SCAN candidates to stay inside the time budget.
+            TARGET_GOOD = 2
+            MAX_SCAN    = 4
 
             def _process_analyst(analyst):
                 try:
@@ -774,20 +804,25 @@ try:
                 candidates = _parse_entries(root)
                 if analyst.get("shorts_first"):
                     shorts = [c for c in candidates if c["is_short"]]
-                    target = shorts[:1] if shorts else candidates[:1]  # 1 video keeps us fast
-                else:
-                    target = candidates[:1]  # 1 video per analyst on free tier
+                    others = [c for c in candidates if not c["is_short"]]
+                    candidates = shorts + others  # prioritize Shorts, keep rest as fallback
 
                 insights = []
-                for v in target:
-                    # Fetch transcript with 6s hard cap using a sub-executor
+                for v in candidates[:MAX_SCAN]:
+                    if len(insights) >= TARGET_GOOD:
+                        break
+                    # Fetch transcript with a 6s hard cap via a sub-executor
                     with ThreadPoolExecutor(max_workers=1) as tp:
                         fut = tp.submit(_get_transcript, v["vid"])
                         try:
                             transcript_text = fut.result(timeout=6)
                         except Exception:
                             transcript_text = None
-                    insights.append(_summarise(analyst, v, transcript_text))
+                    if not transcript_text:
+                        continue  # no spoken transcript — skip, try the next video
+                    item = _extract_insights(analyst, v, transcript_text)
+                    if item:           # only keep videos with real insights
+                        insights.append(item)
 
                 return {"id": analyst["id"], "name": analyst["name"],
                         "label": analyst["label"], "weight": analyst["weight"],
@@ -815,7 +850,8 @@ try:
                 "label": a["label"], "weight": a["weight"], "insights": []}) for a in ANALYSTS]
             return _json_safe({"analysts": analysts_out})
 
-        return _cached_swr("yt-insights", produce, ttl=3600, stale_ttl=86400)
+        # Transcript fetch + Claude analysis is expensive — cache 6h, serve stale up to 24h.
+        return _cached_swr("yt-insights", produce, ttl=21600, stale_ttl=86400)
 
     @app.get("/sectors")
     def sectors_endpoint():

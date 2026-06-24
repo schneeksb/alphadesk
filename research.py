@@ -663,118 +663,119 @@ try:
 
     @app.get("/yt-insights")
     def yt_insights_endpoint():
-        """Fetch all 9 trusted analysts' latest videos and return ranked insight cards."""
+        """Fetch analyst videos via YouTube RSS (stdlib only) + transcripts via youtube-transcript-api."""
         def produce():
+            import json as _json, re as _re, urllib.request
+            import xml.etree.ElementTree as _ET
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
             try:
-                import feedparser, json as _json, re as _re
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from youtube_transcript_api import YouTubeTranscriptApi
+                yta_available = True
+            except ImportError:
+                yta_available = False
 
+            _YT_NS = {
+                "atom":  "http://www.w3.org/2005/Atom",
+                "yt":    "http://www.youtube.com/xml/schemas/2015",
+                "media": "http://search.yahoo.com/mrss/",
+            }
+
+            def _fetch_rss(channel_id):
+                """Fetch YouTube channel RSS using only stdlib urllib + ElementTree."""
+                url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return _ET.fromstring(r.read())
+
+            def _parse_entries(root, max_scan=15):
+                entries = []
+                for entry in root.findall("atom:entry", _YT_NS)[:max_scan]:
+                    vid   = entry.findtext("yt:videoId",  namespaces=_YT_NS) or ""
+                    title = entry.findtext("atom:title",  namespaces=_YT_NS) or ""
+                    pub   = (entry.findtext("atom:published", namespaces=_YT_NS) or "")[:10]
+                    link_el = entry.find("atom:link[@rel='alternate']", _YT_NS)
+                    link  = link_el.get("href") if link_el is not None else f"https://youtube.com/watch?v={vid}"
+                    raw_desc = entry.findtext("media:group/media:description", namespaces=_YT_NS) or ""
+                    desc  = _re.sub(r"<[^>]+>", "", raw_desc).strip()
+                    combo = (title + " " + desc + " " + link).lower()
+                    is_short = "#short" in combo or "/shorts/" in link
+                    entries.append({"vid": vid, "title": title, "link": link,
+                                    "pub": pub, "desc": desc, "is_short": is_short})
+                return entries
+
+            ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+            def _process_analyst(analyst):
                 try:
-                    from youtube_transcript_api import YouTubeTranscriptApi
-                    yta_available = True
-                except ImportError:
-                    yta_available = False
-
-                ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
-                def _strip_html(s):
-                    return _re.sub(r"<[^>]+>", "", s or "").strip()
-
-                def _get_videos(analyst):
-                    """Fetch RSS + transcripts for one analyst. Returns analyst card dict."""
-                    cid = analyst["channel_id"]
-                    feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}")
-                    if not feed.entries:
-                        return {"id": analyst["id"], "name": analyst["name"],
-                                "label": analyst["label"], "weight": analyst["weight"],
-                                "error": "Feed unavailable", "insights": []}
-
-                    # Build candidate list from first 15 entries
-                    candidates = []
-                    for entry in feed.entries[:15]:
-                        vid   = entry.get("yt_videoid", "")
-                        title = entry.get("title", "")
-                        link  = entry.get("link", f"https://youtube.com/watch?v={vid}")
-                        pub   = (entry.get("published", "") or "")[:10]
-                        desc  = _strip_html(entry.get("media_description") or entry.get("summary") or "")
-                        combo = (title + " " + desc + " " + (link or "")).lower()
-                        is_short = "#short" in combo or "/shorts/" in (link or "")
-                        candidates.append({"vid": vid, "title": title, "link": link,
-                                           "pub": pub, "desc": desc, "is_short": is_short})
-
-                    # Prioritise Shorts for Nicholas Crown; otherwise take latest N
-                    if analyst.get("shorts_first"):
-                        shorts = [c for c in candidates if c["is_short"]]
-                        target = shorts[:analyst["videos"]] if shorts else candidates[:analyst["videos"]]
-                    else:
-                        target = candidates[:analyst["videos"]]
-
-                    insights = []
-                    for v in target:
-                        # 1. Transcript → 2. Description → 3. Title only
-                        transcript_text = None
-                        if yta_available and v["vid"]:
-                            try:
-                                parts = YouTubeTranscriptApi.get_transcript(v["vid"], languages=["en"])
-                                transcript_text = " ".join(p["text"] for p in parts)[:3000]
-                            except Exception:
-                                pass
-
-                        if transcript_text:
-                            source  = "transcript"
-                            content = f"Title: {v['title']}\nTranscript: {transcript_text}"
-                        elif v["desc"]:
-                            source  = "description"
-                            content = f"Title: {v['title']}\nDescription: {v['desc']}"
-                        else:
-                            source  = "title"
-                            content = f"Title: {v['title']}"
-
-                        try:
-                            rsp = ai_client.messages.create(
-                                model="claude-haiku-4-5-20251001", max_tokens=250,
-                                messages=[{"role": "user", "content":
-                                    f"Finance YouTube video by {analyst['name']} (specialty: {analyst['focus']}).\n"
-                                    f"Extract the core market insight for a trader.\n\n{content}\n\n"
-                                    f"JSON only — no markdown:\n"
-                                    f'{{"summary":"one sentence key insight","takeaway":"one actionable point for a stock/options trader","sentiment":"bullish"|"bearish"|"neutral"}}'}]
-                            )
-                            data = _json.loads(rsp.content[0].text.strip())
-                            insights.append({"title": v["title"], "link": v["link"],
-                                             "published": v["pub"], "source": source, **data})
-                        except Exception:
-                            insights.append({"title": v["title"], "link": v["link"],
-                                             "published": v["pub"], "source": source,
-                                             "summary": v["title"],
-                                             "takeaway": v["desc"][:180] if v["desc"] else "See video.",
-                                             "sentiment": "neutral"})
-
+                    root = _fetch_rss(analyst["channel_id"])
+                except Exception as e:
                     return {"id": analyst["id"], "name": analyst["name"],
                             "label": analyst["label"], "weight": analyst["weight"],
-                            "insights": insights}
+                            "error": f"RSS unavailable: {e}", "insights": []}
 
-                # Fetch all analysts in parallel
-                results_map = {}
-                with ThreadPoolExecutor(max_workers=9) as pool:
-                    futures = {pool.submit(_get_videos, a): a["id"] for a in ANALYSTS}
-                    for fut in as_completed(futures):
-                        aid = futures[fut]
+                candidates = _parse_entries(root)
+                if analyst.get("shorts_first"):
+                    shorts = [c for c in candidates if c["is_short"]]
+                    target = shorts[:analyst["videos"]] if shorts else candidates[:analyst["videos"]]
+                else:
+                    target = candidates[:analyst["videos"]]
+
+                insights = []
+                for v in target:
+                    # 1. transcript  2. description  3. title only
+                    transcript_text = None
+                    if yta_available and v["vid"]:
                         try:
-                            results_map[aid] = fut.result()
-                        except Exception as e:
-                            results_map[aid] = {"id": aid, "error": str(e), "insights": []}
+                            parts = YouTubeTranscriptApi.get_transcript(v["vid"], languages=["en"])
+                            transcript_text = " ".join(p["text"] for p in parts)[:3000]
+                        except Exception:
+                            pass
 
-                # Return in trust-weight order (ANALYSTS list is already ordered)
-                analysts_out = [results_map.get(a["id"], {"id": a["id"], "name": a["name"],
-                    "label": a["label"], "weight": a["weight"], "insights": []})
-                    for a in ANALYSTS]
+                    if transcript_text:
+                        source, content = "transcript", f"Title: {v['title']}\nTranscript: {transcript_text}"
+                    elif v["desc"]:
+                        source, content = "description", f"Title: {v['title']}\nDescription: {v['desc']}"
+                    else:
+                        source, content = "title", f"Title: {v['title']}"
 
-                return _json_safe({"analysts": analysts_out})
+                    try:
+                        rsp = ai_client.messages.create(
+                            model="claude-haiku-4-5-20251001", max_tokens=250,
+                            messages=[{"role": "user", "content":
+                                f"Finance YouTube video by {analyst['name']} (specialty: {analyst['focus']}).\n"
+                                f"Extract the core market insight for a trader.\n\n{content}\n\n"
+                                f"JSON only — no markdown:\n"
+                                f'{{"summary":"one sentence key insight","takeaway":"one actionable point for a stock/options trader","sentiment":"bullish"|"bearish"|"neutral"}}'}]
+                        )
+                        data = _json.loads(rsp.content[0].text.strip())
+                        insights.append({"title": v["title"], "link": v["link"],
+                                         "published": v["pub"], "source": source, **data})
+                    except Exception:
+                        insights.append({"title": v["title"], "link": v["link"],
+                                         "published": v["pub"], "source": source,
+                                         "summary": v["title"],
+                                         "takeaway": v["desc"][:180] if v["desc"] else "See video.",
+                                         "sentiment": "neutral"})
 
-            except ImportError as e:
-                return {"error": f"Missing dependency: {e}. Check Render build logs.", "analysts": []}
-            except Exception as e:
-                return {"error": str(e), "analysts": []}
+                return {"id": analyst["id"], "name": analyst["name"],
+                        "label": analyst["label"], "weight": analyst["weight"],
+                        "insights": insights}
+
+            results_map = {}
+            with ThreadPoolExecutor(max_workers=9) as pool:
+                futures = {pool.submit(_process_analyst, a): a["id"] for a in ANALYSTS}
+                for fut in as_completed(futures):
+                    aid = futures[fut]
+                    try:
+                        results_map[aid] = fut.result()
+                    except Exception as e:
+                        results_map[aid] = {"id": aid, "error": str(e), "insights": []}
+
+            analysts_out = [results_map.get(a["id"], {"id": a["id"], "name": a["name"],
+                "label": a["label"], "weight": a["weight"], "insights": []}) for a in ANALYSTS]
+            return _json_safe({"analysts": analysts_out})
+
         return _cached_swr("yt-insights", produce, ttl=3600, stale_ttl=86400)
 
     @app.get("/sectors")

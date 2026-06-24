@@ -12,5 +12,4 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false          # set this in the Render dashboard (do NOT commit your key)
-      - key: PYTHON_VERSION
-        value: "3.13.4"
+      # Python version is set via runtime.txt (python-3.11.9)

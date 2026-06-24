@@ -1891,55 +1891,104 @@ function EarningsMapPanel({ watchlist, cardCache, onOpen }) {
   );
 }
 
-// ── MARKET PULSE (Nicholas Crown) ────────────────────────────────────
-function MarketPulsePanel() {
-  const [data, setData] = useState(null);
+// ── MARKET PULSE (9-analyst panel) ───────────────────────────────────
+const ANALYST_LABELS = {
+  nicholas_crown:    "Macro & Market Cycles",
+  felix_friends:     "Technical Timing",
+  jerry_romine:      "Financial Analysis",
+  fin_edu_jeremy:    "Deep Value & Business Quality",
+  ticker_symbol_you: "Innovation & Tech",
+  stealth_wealth:    "Value & Accounting",
+  jeremy_makes_money:"Market Momentum",
+  fx_evolution:      "Short Term Setups",
+  figuring_out_money:"Near Term",
+};
+
+function MarketPulsePanel({ refreshTick=0 }) {
+  const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
+
   useEffect(()=>{
-    fetchYtInsights().then(x=>{ setData(x); setLoading(false); }).catch(()=>setLoading(false));
-  },[]);
-  if (loading) return (
-    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
-      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:8 }}>Market Pulse</div>
-      <div style={{ color:C.faint, fontSize:12, display:"flex", alignItems:"center", gap:6 }}><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Loading macro insights…</div>
-    </div>
-  );
-  if (!data || data.error || !data.insights?.length) return (
-    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
-      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:6 }}>Market Pulse</div>
-      <div style={{ fontSize:11.5, color:C.faint }}>
-        {data?.error || "YouTube insights unavailable."}
-        {data?.error?.includes("YT_NICHOLAS_CROWN") && <span style={{ color:C.amber }}> Set <code>YT_NICHOLAS_CROWN_CHANNEL_ID</code> in backend .env to enable.</span>}
-      </div>
-    </div>
-  );
+    setLoading(true);
+    fetchYtInsights()
+      .then(x=>{ setData(x); setLoading(false); })
+      .catch(()=>setLoading(false));
+  },[refreshTick]);
+
   const sentColor = s => s==="bullish" ? C.up : s==="bearish" ? C.down : C.faint;
-  return (
-    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-        <div style={{ fontSize:13, fontWeight:700, color:C.ink }}>Market Pulse · Nicholas Crown</div>
-        <span style={{ fontSize:10, color:C.faint }}>YouTube macro digest</span>
-      </div>
-      {data.insights.map((v, i) => (
-        <div key={i} style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none", paddingTop: i > 0 ? 12 : 0, marginTop: i > 0 ? 12 : 0 }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:6 }}>
-            <a href={v.link} target="_blank" rel="noopener noreferrer"
-              style={{ fontSize:12.5, fontWeight:700, color:C.cold, textDecoration:"none", flex:1, marginRight:8, lineHeight:1.3 }}
-              onClick={e=>e.stopPropagation()}>
-              {v.title}
-            </a>
-            <span style={{ fontSize:9, fontWeight:700, color:sentColor(v.sentiment), background:`${sentColor(v.sentiment)}18`,
-              borderRadius:4, padding:"1px 6px", flexShrink:0, textTransform:"uppercase" }}>{v.sentiment}</span>
+
+  const AnalystCard = ({ analyst, rank }) => {
+    const hasInsights = analyst.insights?.length > 0;
+    return (
+      <div style={{ background:C.bg, border:`1px solid ${C.line}`, borderRadius:10, padding:"14px 16px", display:"flex", flexDirection:"column", gap:8, minWidth:0 }}>
+        {/* Header */}
+        <div style={{ display:"flex", alignItems:"flex-start", gap:8, justifyContent:"space-between" }}>
+          <div style={{ minWidth:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+              <span style={{ fontSize:10, fontWeight:800, color:C.faint, fontFamily:C.mono }}>#{rank}</span>
+              <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{analyst.name}</span>
+            </div>
+            <span style={{ fontSize:10, color:C.cold, background:`${C.cold}14`, borderRadius:4, padding:"1px 7px", fontWeight:600, marginTop:3, display:"inline-block" }}>
+              {analyst.label || ANALYST_LABELS[analyst.id] || ""}
+            </span>
           </div>
-          {v.summary && <div style={{ fontSize:11.5, color:C.sub, marginBottom:6, lineHeight:1.45 }}>{v.summary}</div>}
-          {v.takeaways?.length > 0 && (
-            <ul style={{ margin:0, paddingLeft:16, color:C.faint, fontSize:11 }}>
-              {v.takeaways.map((t,j) => <li key={j} style={{ marginBottom:2 }}>{t}</li>)}
-            </ul>
-          )}
-          <div style={{ fontSize:10, color:C.faint, fontFamily:C.mono, marginTop:6 }}>{v.published}</div>
         </div>
-      ))}
+        {/* Insights */}
+        {!hasInsights ? (
+          <div style={{ fontSize:11, color:C.faint }}>No insights available</div>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {analyst.insights.map((v, i) => (
+              <div key={i} style={{ borderTop: i>0 ? `1px solid ${C.line}` : "none", paddingTop: i>0 ? 8 : 0 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:6, marginBottom:4 }}>
+                  <a href={v.link} target="_blank" rel="noopener noreferrer"
+                    style={{ fontSize:11.5, fontWeight:600, color:C.cold, textDecoration:"none", flex:1, lineHeight:1.35 }}
+                    onClick={e=>e.stopPropagation()}>
+                    {v.title}
+                  </a>
+                  <span style={{ fontSize:8.5, fontWeight:700, color:sentColor(v.sentiment), background:`${sentColor(v.sentiment)}18`,
+                    borderRadius:3, padding:"1px 5px", flexShrink:0, textTransform:"uppercase", whiteSpace:"nowrap" }}>
+                    {v.sentiment}
+                  </span>
+                </div>
+                {v.summary && <div style={{ fontSize:11, color:C.sub, lineHeight:1.45, marginBottom:3 }}>{v.summary}</div>}
+                {v.takeaway && <div style={{ fontSize:10.5, color:C.ink, background:`${C.line}50`, borderRadius:5, padding:"4px 8px", lineHeight:1.4 }}>→ {v.takeaway}</div>}
+                <div style={{ fontSize:9.5, color:C.faint, fontFamily:C.mono, marginTop:4 }}>{v.published}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ marginTop:32 }}>
+      {/* Section header */}
+      <div style={{ fontSize:15, fontWeight:700, color:C.ink, marginBottom:4 }}>Market Pulse</div>
+      <div style={{ fontSize:12, color:C.faint, marginBottom:14 }}>Analyst panel · ranked by trust weight · sourced from YouTube</div>
+
+      {loading ? (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:12 }}>
+          {Array.from({length:9}).map((_,i)=>(
+            <div key={i} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:"14px 16px", minHeight:100, display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <div style={{ color:C.faint, fontSize:11, display:"flex", alignItems:"center", gap:6 }}>
+                <Loader2 size={12} style={{ animation:"spin 1s linear infinite" }}/> Loading…
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : !data?.analysts?.length ? (
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:"14px 18px", color:C.faint, fontSize:12 }}>
+          {data?.error || "Market Pulse unavailable — check backend logs."}
+        </div>
+      ) : (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:12 }}>
+          {data.analysts.map((a, i) => (
+            <AnalystCard key={a.id || i} analyst={a} rank={i+1}/>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1951,6 +2000,7 @@ function SectorMap({ watchlist=[], cardCache={}, onOpen }) {
   const [err, setErr]         = useState(null);
   const [updated, setUpdated] = useState(null);
   const [sel, setSel]         = useState(null);
+  const [pulseTick, setPulseTick] = useState(0);
 
   const load = useCallback(()=>{
     setErr(null); setD(null);
@@ -1973,11 +2023,13 @@ function SectorMap({ watchlist=[], cardCache={}, onOpen }) {
           <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Market Map</div>
           <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>Sectors · Earnings · Macro Events · Options Flow</div>
         </div>
-        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontSize:11, color:C.faint, fontFamily:C.mono }}>updated {updated?.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span>
-          <button onClick={load} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"7px 11px", color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12 }}><RefreshCw size={13}/> Refresh</button>
+          <button onClick={load} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"7px 11px", color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12 }}><RefreshCw size={13}/> Refresh Map</button>
         </div>
       </div>
+
+      {/* ── TOP HALF: Visual Market Data ──────────────────────────────── */}
 
       {/* Earnings Map */}
       <EarningsMapPanel watchlist={watchlist} cardCache={cardCache} onOpen={onOpen}/>
@@ -1988,11 +2040,8 @@ function SectorMap({ watchlist=[], cardCache={}, onOpen }) {
       {/* Options Flow Map */}
       <OptionsFlowPanel flow={mapData?.options_flow}/>
 
-      {/* Market Pulse — Nicholas Crown */}
-      <MarketPulsePanel/>
-
-      {/* Sector Heatmap */}
-      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>Sector Heatmap</div>
+      {/* ── Sector Heatmap ────────────────────────────────────────────── */}
+      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10, marginTop:4 }}>Sector Heatmap</div>
       {/* Heatmap grid */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(180px, 1fr))", gap:12, marginBottom:18 }}>
         {sectors.map((s,i)=>{
@@ -2045,6 +2094,19 @@ function SectorMap({ watchlist=[], cardCache={}, onOpen }) {
         </div>
       )}
       {sel && <SectorDetail sector={sel} onClose={()=>setSel(null)}/>}
+
+      {/* ── BOTTOM HALF: Market Pulse Analyst Panel ───────────────────── */}
+      <div style={{ borderTop:`2px solid ${C.line}`, marginTop:28, paddingTop:8 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+          <div/>
+          <button onClick={()=>setPulseTick(t=>t+1)}
+            style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"6px 11px",
+              color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12 }}>
+            <RefreshCw size={13}/> Refresh Market Pulse
+          </button>
+        </div>
+        <MarketPulsePanel refreshTick={pulseTick}/>
+      </div>
     </div>
   );
 }

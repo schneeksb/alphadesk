@@ -25,6 +25,34 @@ for _s in (sys.stdout, sys.stderr):
 
 load_dotenv()
 
+# ── ANALYST PANEL ─────────────────────────────────────────────────────────
+# Ordered by trust weight (1 = highest). Channel IDs are hardcoded defaults;
+# override per-analyst via the env var listed in "env".
+ANALYSTS = [
+    {"id":"nicholas_crown",    "name":"Nicholas Crown",               "label":"Macro & Market Cycles",        "channel_id":os.getenv("YT_NICHOLAS_CROWN_CHANNEL_ID",      "UCJSICzUeXSxBvc0UAf2Up8g"), "weight":1, "focus":"macro cycles, market breathing, sector rotation",        "shorts_first":True,  "videos":3},
+    {"id":"felix_friends",     "name":"FelixFriends",                 "label":"Technical Timing",              "channel_id":os.getenv("YT_FELIX_FRIENDS_CHANNEL_ID",       "UCJtfma0mE_XrBAD9uakcjfA"), "weight":2, "focus":"moving averages and predicting market shifts",             "shorts_first":False, "videos":2},
+    {"id":"jerry_romine",      "name":"Jerry Romine Stocks",          "label":"Financial Analysis",            "channel_id":os.getenv("YT_JERRY_ROMINE_CHANNEL_ID",        "UCMiJUXvEpHHW5JTnW-ez9EA"), "weight":3, "focus":"deep financial analysis and business quality for long term holds", "shorts_first":False, "videos":2},
+    {"id":"fin_edu_jeremy",    "name":"Financial Education",          "label":"Deep Value & Business Quality", "channel_id":os.getenv("YT_FIN_EDU_CHANNEL_ID",             "UCnMn36GT_H0X-w5_ckLtlgQ"), "weight":4, "focus":"business value analysis and 1000X stock potential",        "shorts_first":False, "videos":2},
+    {"id":"ticker_symbol_you", "name":"Ticker Symbol: YOU",           "label":"Innovation & Tech",             "channel_id":os.getenv("YT_TICKER_SYMBOL_YOU_CHANNEL_ID",   "UC7kCeZ53sli_9XwuQeFxLqw"), "weight":5, "focus":"tech innovation and understanding disruptive companies",    "shorts_first":False, "videos":2},
+    {"id":"stealth_wealth",    "name":"Stealth Wealth Investing",     "label":"Value & Accounting",            "channel_id":os.getenv("YT_STEALTH_WEALTH_CHANNEL_ID",      "UCjeFguVhLAsxuFK4D4Ngr9A"), "weight":6, "focus":"accounting perspective, identifying undervalued or overvalued stocks", "shorts_first":False, "videos":2},
+    {"id":"jeremy_makes_money","name":"Jeremy Lefebvre Makes Money",  "label":"Market Momentum",               "channel_id":os.getenv("YT_JEREMY_MAKES_MONEY_CHANNEL_ID",  "UC12lnsYNt8_VthTNOuOGTmQ"), "weight":7, "focus":"reactive market analysis and current momentum",             "shorts_first":False, "videos":2},
+    {"id":"fx_evolution",      "name":"FX Evolution Trading Academy", "label":"Short Term Setups",             "channel_id":os.getenv("YT_FX_EVOLUTION_CHANNEL_ID",        "UCvJZEG5x-DVYZKTz--pS39w"), "weight":8, "focus":"short term trading setups",                               "shorts_first":False, "videos":2},
+    {"id":"figuring_out_money","name":"Figuring Out Money",           "label":"Near Term",                     "channel_id":os.getenv("YT_FIGURING_OUT_MONEY_CHANNEL_ID",  "UCfdPOTevbfCh_QHsyPeZ8MQ"), "weight":9, "focus":"near term price action and short term analysis",           "shorts_first":False, "videos":2},
+]
+
+ANALYST_WEIGHT_BLOCK = (
+    "CONTENT CREATOR INSIGHT WEIGHTING — apply in descending priority when synthesizing insights:\n"
+    "  1 (HIGHEST) Nicholas Crown: macro cycle & liquidity reads\n"
+    "  2 FelixFriends: moving-average-based market shift signals\n"
+    "  3 Jerry Romine Stocks: deep financial analysis, business quality\n"
+    "  4 Financial Education by Jeremy: business value, long-term compounders\n"
+    "  5 Ticker Symbol YOU: tech innovation, disruptive company analysis\n"
+    "  6 Stealth Wealth Investing: accounting lens, valuation signals\n"
+    "  7 Jeremy Lefebvre Makes Money: current market momentum reads\n"
+    "  8 FX Evolution Trading Academy: short-term setups — LOW WEIGHT\n"
+    "  9 (LOWEST) Figuring Out Money: near-term price action only"
+)
+
 
 def technicals(ticker):
     """Price, % change, RSI, ATM IV, fundamentals from Yahoo."""
@@ -194,6 +222,8 @@ def ai_analysis_and_news(ticker, tech, profile: str = ""):
 
 Think like: Stan Druckenmiller (macro/liquidity cycles), Phil Fisher (business quality), Howard Marks (cycle awareness), a seasoned options trader (Greeks/timing).
 
+{ANALYST_WEIGHT_BLOCK}
+
 Analyze through FOUR LENSES in this priority order:
 1. MACRO CYCLE — where are we in the rate/liquidity cycle? Does the macro environment favor or hurt this sector and stock right now?
 2. SECTOR ROTATION — is institutional money flowing into or out of {tech['sector']}? Is relative strength vs. SPY improving or deteriorating?
@@ -311,6 +341,8 @@ def _profile_ctx(profile: str) -> str:
         lines.append("  → Emphasize Greeks analysis, IV rank, options structure, and theta management.")
     if style == "daytrader":
         lines.append("  → Focus on intraday setups, momentum, and tight stops. Ignore long-term fundamentals.")
+    lines.append("")
+    lines.append(ANALYST_WEIGHT_BLOCK)
     return "\n".join(lines)
 
 
@@ -631,98 +663,118 @@ try:
 
     @app.get("/yt-insights")
     def yt_insights_endpoint():
-        """Fetch Nicholas Crown's latest YouTube Shorts and summarize key macro insights."""
+        """Fetch all 9 trusted analysts' latest videos and return ranked insight cards."""
         def produce():
             try:
-                import feedparser, json as _json
-                channel_id = os.getenv("YT_NICHOLAS_CROWN_CHANNEL_ID", "UCJSICzUeXSxBvc0UAf2Up8g")
-                feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
-                if not feed.entries:
-                    return {"error": "Could not fetch YouTube RSS feed", "insights": []}
+                import feedparser, json as _json, re as _re
+                from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                # Gather candidate videos — prefer Shorts (#Shorts in title/tags), scan up to 15 entries
-                candidates = []
-                for entry in feed.entries[:15]:
-                    video_id  = entry.get("yt_videoid", "")
-                    title     = entry.get("title", "")
-                    link      = entry.get("link", f"https://youtube.com/watch?v={video_id}")
-                    published = (entry.get("published", "") or "")[:10]
-                    # YouTube RSS includes description in media:description or summary
-                    description = (entry.get("media_description") or entry.get("summary") or "").strip()
-                    # Strip HTML tags if any
-                    import re as _re
-                    description = _re.sub(r"<[^>]+>", "", description).strip()
-                    combo = (title + " " + description).lower()
-                    is_short = "#short" in combo or "shorts" in (link or "").lower()
-                    candidates.append({
-                        "video_id": video_id, "title": title, "link": link,
-                        "published": published, "description": description, "is_short": is_short,
-                    })
-
-                # Prioritise Shorts; fall back to latest 5 if no Shorts found
-                shorts = [c for c in candidates if c["is_short"]]
-                target = (shorts[:5] if shorts else candidates[:5])
-
-                # Try youtube-transcript-api for each
                 try:
                     from youtube_transcript_api import YouTubeTranscriptApi
                     yta_available = True
                 except ImportError:
                     yta_available = False
 
-                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-                insights = []
-                for v in target:
-                    video_id, title, link, published, description = (
-                        v["video_id"], v["title"], v["link"], v["published"], v["description"]
-                    )
-                    # 1. Try transcript
-                    transcript_text = None
-                    if yta_available and video_id:
-                        try:
-                            parts = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
-                            transcript_text = " ".join(p["text"] for p in parts)[:3000]
-                        except Exception:
-                            pass
+                ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-                    # 2. Build content for AI — transcript wins, then description, then title only
-                    if transcript_text:
-                        source = "transcript"
-                        content = f"Title: {title}\nTranscript: {transcript_text}"
-                    elif description:
-                        source = "description"
-                        content = f"Title: {title}\nDescription: {description}"
+                def _strip_html(s):
+                    return _re.sub(r"<[^>]+>", "", s or "").strip()
+
+                def _get_videos(analyst):
+                    """Fetch RSS + transcripts for one analyst. Returns analyst card dict."""
+                    cid = analyst["channel_id"]
+                    feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}")
+                    if not feed.entries:
+                        return {"id": analyst["id"], "name": analyst["name"],
+                                "label": analyst["label"], "weight": analyst["weight"],
+                                "error": "Feed unavailable", "insights": []}
+
+                    # Build candidate list from first 15 entries
+                    candidates = []
+                    for entry in feed.entries[:15]:
+                        vid   = entry.get("yt_videoid", "")
+                        title = entry.get("title", "")
+                        link  = entry.get("link", f"https://youtube.com/watch?v={vid}")
+                        pub   = (entry.get("published", "") or "")[:10]
+                        desc  = _strip_html(entry.get("media_description") or entry.get("summary") or "")
+                        combo = (title + " " + desc + " " + (link or "")).lower()
+                        is_short = "#short" in combo or "/shorts/" in (link or "")
+                        candidates.append({"vid": vid, "title": title, "link": link,
+                                           "pub": pub, "desc": desc, "is_short": is_short})
+
+                    # Prioritise Shorts for Nicholas Crown; otherwise take latest N
+                    if analyst.get("shorts_first"):
+                        shorts = [c for c in candidates if c["is_short"]]
+                        target = shorts[:analyst["videos"]] if shorts else candidates[:analyst["videos"]]
                     else:
-                        source = "title"
-                        content = f"Title: {title}"
+                        target = candidates[:analyst["videos"]]
 
-                    # 3. Summarise with Claude Haiku (fast + cheap)
-                    try:
-                        r = client.messages.create(
-                            model="claude-haiku-4-5-20251001", max_tokens=220,
-                            messages=[{"role": "user", "content":
-                                f"This is a {('60-second YouTube Short' if v['is_short'] else 'YouTube video')} "
-                                f"by macro finance creator Nicholas Crown. Extract the core market insight.\n\n"
-                                f"{content}\n\n"
-                                f"Respond with JSON only — no markdown:\n"
-                                f'{{"summary":"one sentence macro insight","takeaway":"one actionable point for a stock/options trader",'
-                                f'"sentiment":"bullish"|"bearish"|"neutral"}}'}]
-                        )
-                        data = _json.loads(r.content[0].text.strip())
-                        insights.append({"title": title, "link": link, "published": published,
-                                         "source": source, **data})
-                    except Exception:
-                        # Bare fallback — still show the video
-                        insights.append({"title": title, "link": link, "published": published,
-                                         "source": source, "summary": title,
-                                         "takeaway": description[:180] if description else "See video.",
-                                         "sentiment": "neutral"})
+                    insights = []
+                    for v in target:
+                        # 1. Transcript → 2. Description → 3. Title only
+                        transcript_text = None
+                        if yta_available and v["vid"]:
+                            try:
+                                parts = YouTubeTranscriptApi.get_transcript(v["vid"], languages=["en"])
+                                transcript_text = " ".join(p["text"] for p in parts)[:3000]
+                            except Exception:
+                                pass
 
-                return _json_safe({"insights": insights, "shorts_found": len(shorts)})
+                        if transcript_text:
+                            source  = "transcript"
+                            content = f"Title: {v['title']}\nTranscript: {transcript_text}"
+                        elif v["desc"]:
+                            source  = "description"
+                            content = f"Title: {v['title']}\nDescription: {v['desc']}"
+                        else:
+                            source  = "title"
+                            content = f"Title: {v['title']}"
+
+                        try:
+                            rsp = ai_client.messages.create(
+                                model="claude-haiku-4-5-20251001", max_tokens=250,
+                                messages=[{"role": "user", "content":
+                                    f"Finance YouTube video by {analyst['name']} (specialty: {analyst['focus']}).\n"
+                                    f"Extract the core market insight for a trader.\n\n{content}\n\n"
+                                    f"JSON only — no markdown:\n"
+                                    f'{{"summary":"one sentence key insight","takeaway":"one actionable point for a stock/options trader","sentiment":"bullish"|"bearish"|"neutral"}}'}]
+                            )
+                            data = _json.loads(rsp.content[0].text.strip())
+                            insights.append({"title": v["title"], "link": v["link"],
+                                             "published": v["pub"], "source": source, **data})
+                        except Exception:
+                            insights.append({"title": v["title"], "link": v["link"],
+                                             "published": v["pub"], "source": source,
+                                             "summary": v["title"],
+                                             "takeaway": v["desc"][:180] if v["desc"] else "See video.",
+                                             "sentiment": "neutral"})
+
+                    return {"id": analyst["id"], "name": analyst["name"],
+                            "label": analyst["label"], "weight": analyst["weight"],
+                            "insights": insights}
+
+                # Fetch all analysts in parallel
+                results_map = {}
+                with ThreadPoolExecutor(max_workers=9) as pool:
+                    futures = {pool.submit(_get_videos, a): a["id"] for a in ANALYSTS}
+                    for fut in as_completed(futures):
+                        aid = futures[fut]
+                        try:
+                            results_map[aid] = fut.result()
+                        except Exception as e:
+                            results_map[aid] = {"id": aid, "error": str(e), "insights": []}
+
+                # Return in trust-weight order (ANALYSTS list is already ordered)
+                analysts_out = [results_map.get(a["id"], {"id": a["id"], "name": a["name"],
+                    "label": a["label"], "weight": a["weight"], "insights": []})
+                    for a in ANALYSTS]
+
+                return _json_safe({"analysts": analysts_out})
+
             except ImportError:
-                return {"error": "pip install feedparser youtube-transcript-api", "insights": []}
+                return {"error": "pip install feedparser youtube-transcript-api", "analysts": []}
             except Exception as e:
-                return {"error": str(e), "insights": []}
+                return {"error": str(e), "analysts": []}
         return _cached_swr("yt-insights", produce, ttl=3600, stale_ttl=86400)
 
     @app.get("/sectors")

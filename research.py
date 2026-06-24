@@ -671,8 +671,10 @@ try:
 
                 try:
                     from youtube_transcript_api import YouTubeTranscriptApi
+                    _yta = YouTubeTranscriptApi()
                     yta_available = True
                 except ImportError:
+                    _yta = None
                     yta_available = False
 
                 ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -715,8 +717,8 @@ try:
                         transcript_text = None
                         if yta_available and v["vid"]:
                             try:
-                                parts = YouTubeTranscriptApi.get_transcript(v["vid"], languages=["en"])
-                                transcript_text = " ".join(p["text"] for p in parts)[:3000]
+                                fetched = _yta.fetch(v["vid"])
+                                transcript_text = " ".join(s.text for s in fetched)[:3000]
                             except Exception:
                                 pass
 

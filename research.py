@@ -773,10 +773,10 @@ try:
 
                 return _json_safe({"analysts": analysts_out})
 
-            except ImportError:
-                return {"error": "pip install feedparser youtube-transcript-api", "analysts": []}
+            except (ImportError, ModuleNotFoundError) as e:
+                return {"error": f"import_error: {e}", "analysts": []}
             except Exception as e:
-                return {"error": str(e), "analysts": []}
+                return {"error": f"runtime_error: {e}", "analysts": []}
         return _cached_swr("yt-insights", produce, ttl=3600, stale_ttl=86400)
 
     @app.get("/sectors")

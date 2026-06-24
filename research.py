@@ -631,49 +631,94 @@ try:
 
     @app.get("/yt-insights")
     def yt_insights_endpoint():
-        """Fetch and summarize Nicholas Crown's latest YouTube videos for macro insights."""
+        """Fetch Nicholas Crown's latest YouTube Shorts and summarize key macro insights."""
         def produce():
             try:
-                import feedparser
-                from youtube_transcript_api import YouTubeTranscriptApi
-                # Set YT_NICHOLAS_CROWN_CHANNEL_ID in env — find it on his YouTube channel About page
-                channel_id = os.getenv("YT_NICHOLAS_CROWN_CHANNEL_ID", "")
-                if not channel_id:
-                    return {"error": "Set YT_NICHOLAS_CROWN_CHANNEL_ID env var to enable", "insights": []}
+                import feedparser, json as _json
+                channel_id = os.getenv("YT_NICHOLAS_CROWN_CHANNEL_ID", "UCJSICzUeXSxBvc0UAf2Up8g")
                 feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
                 if not feed.entries:
-                    return {"error": "Could not fetch YouTube feed", "insights": []}
+                    return {"error": "Could not fetch YouTube RSS feed", "insights": []}
+
+                # Gather candidate videos — prefer Shorts (#Shorts in title/tags), scan up to 15 entries
+                candidates = []
+                for entry in feed.entries[:15]:
+                    video_id  = entry.get("yt_videoid", "")
+                    title     = entry.get("title", "")
+                    link      = entry.get("link", f"https://youtube.com/watch?v={video_id}")
+                    published = (entry.get("published", "") or "")[:10]
+                    # YouTube RSS includes description in media:description or summary
+                    description = (entry.get("media_description") or entry.get("summary") or "").strip()
+                    # Strip HTML tags if any
+                    import re as _re
+                    description = _re.sub(r"<[^>]+>", "", description).strip()
+                    combo = (title + " " + description).lower()
+                    is_short = "#short" in combo or "shorts" in (link or "").lower()
+                    candidates.append({
+                        "video_id": video_id, "title": title, "link": link,
+                        "published": published, "description": description, "is_short": is_short,
+                    })
+
+                # Prioritise Shorts; fall back to latest 5 if no Shorts found
+                shorts = [c for c in candidates if c["is_short"]]
+                target = (shorts[:5] if shorts else candidates[:5])
+
+                # Try youtube-transcript-api for each
+                try:
+                    from youtube_transcript_api import YouTubeTranscriptApi
+                    yta_available = True
+                except ImportError:
+                    yta_available = False
+
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
                 insights = []
-                for entry in feed.entries[:3]:
-                    video_id = entry.get("yt_videoid", "")
-                    title    = entry.get("title", "")
-                    link     = entry.get("link", f"https://youtube.com/watch?v={video_id}")
-                    published = entry.get("published", "")[:10]
-                    if not video_id:
-                        continue
+                for v in target:
+                    video_id, title, link, published, description = (
+                        v["video_id"], v["title"], v["link"], v["published"], v["description"]
+                    )
+                    # 1. Try transcript
+                    transcript_text = None
+                    if yta_available and video_id:
+                        try:
+                            parts = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+                            transcript_text = " ".join(p["text"] for p in parts)[:3000]
+                        except Exception:
+                            pass
+
+                    # 2. Build content for AI — transcript wins, then description, then title only
+                    if transcript_text:
+                        source = "transcript"
+                        content = f"Title: {title}\nTranscript: {transcript_text}"
+                    elif description:
+                        source = "description"
+                        content = f"Title: {title}\nDescription: {description}"
+                    else:
+                        source = "title"
+                        content = f"Title: {title}"
+
+                    # 3. Summarise with Claude Haiku (fast + cheap)
                     try:
-                        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-                        text = " ".join(item["text"] for item in transcript)[:5000]
-                    except Exception:
-                        text = None
-                    if not text:
-                        insights.append({"title": title, "link": link, "published": published,
-                                         "summary": "Transcript unavailable.", "takeaways": [], "sentiment": "neutral"})
-                        continue
-                    try:
-                        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-                        r = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=350,
+                        r = client.messages.create(
+                            model="claude-haiku-4-5-20251001", max_tokens=220,
                             messages=[{"role": "user", "content":
-                                f'Summarize for a macro trader. Title: "{title}"\nTranscript: {text}\n\n'
-                                f'JSON only: {{"summary":"1-sentence macro thesis","takeaways":["...","...","..."],'
-                                f'"sectors":["..."],"sentiment":"bullish"|"bearish"|"neutral"}}'}])
-                        import json as _json
+                                f"This is a {('60-second YouTube Short' if v['is_short'] else 'YouTube video')} "
+                                f"by macro finance creator Nicholas Crown. Extract the core market insight.\n\n"
+                                f"{content}\n\n"
+                                f"Respond with JSON only — no markdown:\n"
+                                f'{{"summary":"one sentence macro insight","takeaway":"one actionable point for a stock/options trader",'
+                                f'"sentiment":"bullish"|"bearish"|"neutral"}}'}]
+                        )
                         data = _json.loads(r.content[0].text.strip())
-                        insights.append({"title": title, "link": link, "published": published, **data})
-                    except Exception:
                         insights.append({"title": title, "link": link, "published": published,
-                                         "summary": "Summary unavailable.", "takeaways": [], "sentiment": "neutral"})
-                return _json_safe({"insights": insights})
+                                         "source": source, **data})
+                    except Exception:
+                        # Bare fallback — still show the video
+                        insights.append({"title": title, "link": link, "published": published,
+                                         "source": source, "summary": title,
+                                         "takeaway": description[:180] if description else "See video.",
+                                         "sentiment": "neutral"})
+
+                return _json_safe({"insights": insights, "shorts_found": len(shorts)})
             except ImportError:
                 return {"error": "pip install feedparser youtube-transcript-api", "insights": []}
             except Exception as e:

@@ -1,3 +1,20 @@
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; padding: 0; width: 100%; min-height: 100vh; }
-body { background: #ffffff; font-family: 'Inter', system-ui, -apple-system, sans-serif; transition: background .15s; }
+body { background: #ffffff; font-family: 'Inter', system-ui, -apple-system, sans-serif; transition: background .15s; -webkit-text-size-adjust: 100%; }
+
+/* Mobile touch targets */
+button { touch-action: manipulation; }
+
+/* Show profile label on larger screens */
+@media (min-width: 500px) {
+  .profile-label { display: inline !important; }
+}
+
+/* Responsive detail page padding */
+@media (max-width: 480px) {
+  /* Prevent chart tooltip from clipping off screen */
+  [style*="position:absolute"][style*="whiteSpace:nowrap"] {
+    white-space: normal !important;
+    max-width: 140px;
+  }
+}

@@ -146,6 +146,17 @@ async function fetchClimate() {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchMapData(tickers = []) {
+  const q = tickers.length ? `?tickers=${encodeURIComponent(tickers.join(","))}` : "";
+  const r = await fetch(`${API}/map-data${q}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchYtInsights() {
+  const r = await fetch(`${API}/yt-insights`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchValue(positions, margin = 0, margin_rate = 0) {
   const r = await fetch(`${API}/value`, {
     method: "POST",
@@ -251,13 +262,19 @@ function Sparkline({ data, w=120, h=32, color }) {
   );
 }
 const RANGES = [
-  { key:"1d", label:"1D", days:null },
-  { key:"1w", label:"1W", days:5 },
-  { key:"1m", label:"1M", days:21 },
-  { key:"3m", label:"3M", days:63 },
-  { key:"6m", label:"6M", days:126 },
-  { key:"1y", label:"1Y", days:252 },
-  { key:"5y", label:"5Y", days:null },
+  { key:"1d",  label:"1D",  days:null },   // /chart 1d/5m
+  { key:"1w",  label:"1W",  days:null },   // /chart 5d/1h (hourly bars)
+  { key:"1m",  label:"1M",  days:21 },     // slice from research history
+  { key:"3m",  label:"3M",  days:63 },     // slice from research history (default)
+  { key:"6m",  label:"6M",  days:126 },    // slice from research history
+  { key:"ytd", label:"YTD", days:null },   // /chart ytd/1d
+  { key:"1y",  label:"1Y",  days:252 },    // slice from research history (all)
+  { key:"2y",  label:"2Y",  days:null },   // /chart 2y/1wk
+  { key:"5y",  label:"5Y",  days:null },   // /chart 5y/1wk
+];
+// Sparkline pills for WatchCard use daily slices (no extra fetch needed)
+const SPARK_RANGES = [
+  { key:"1w", days:5 }, { key:"1m", days:21 }, { key:"3m", days:63 }, { key:"6m", days:126 },
 ];
 
 function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="3m" }) {
@@ -268,12 +285,15 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
   const rConf = RANGES.find(r => r.key === range);
   let chartData, chartDates;
   if (rConf?.days != null) {
+    // Instant — slice from already-loaded research history
     chartData  = (history || []).slice(-rConf.days);
     chartDates = (history_dates || []).slice(-rConf.days);
   } else if (extras[range]) {
+    // Cached from a previous /chart fetch
     chartData  = extras[range].history;
     chartDates = extras[range].history_dates;
   } else {
+    // Show placeholder while loading (show what we have)
     chartData  = (history || []).slice(-63);
     chartDates = (history_dates || []).slice(-63);
   }
@@ -293,27 +313,24 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
 
   return (
     <div>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
-        <div style={{ display:"flex", gap:1 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:4 }}>
+        <div style={{ display:"flex", gap:1, flexWrap:"wrap" }}>
           {RANGES.map(r => (
             <button key={r.key} onClick={() => handleRange(r.key)}
               style={{ background:range===r.key ? C.line : "transparent", border:"none", borderRadius:5,
                 padding:"3px 8px", color:range===r.key ? C.ink : C.faint,
-                fontSize:11, fontFamily:C.mono, fontWeight:600, cursor:"pointer", transition:"color .1s" }}
+                fontSize:11, fontFamily:C.mono, fontWeight:600, cursor:"pointer", transition:"color .1s",
+                minHeight:28 }}
               onMouseEnter={e => { if (range!==r.key) e.currentTarget.style.color=C.sub; }}
               onMouseLeave={e => { if (range!==r.key) e.currentTarget.style.color=C.faint; }}>
               {r.label}
             </button>
           ))}
         </div>
-        <span style={{ fontSize:10.5, color:C.faint }}>hover to inspect</span>
+        {!fetching && <span style={{ fontSize:10.5, color:C.faint }}>hover to inspect</span>}
+        {fetching && <span style={{ fontSize:10.5, color:C.faint, display:"flex", alignItems:"center", gap:4 }}><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> Loading…</span>}
       </div>
-      {fetching
-        ? <div style={{ height:130, display:"flex", alignItems:"center", justifyContent:"center", color:C.faint, gap:6, fontSize:12 }}>
-            <Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Loading…
-          </div>
-        : <InteractiveChart data={chartData} dates={chartDates} color={color}/>
-      }
+      <InteractiveChart data={chartData} dates={chartDates} color={color}/>
     </div>
   );
 }
@@ -409,7 +426,8 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
             return <div style={{ fontFamily:C.mono, fontSize:10, color:upside>=0?C.up:C.down, marginTop:2 }}>{upside>=0?"+":""}{upside.toFixed(0)}% to target · {(d.analyst.recKey||"").replace(/_/g," ")}</div>;
           })()}
         </div>
-        <div style={{ textAlign:"right", maxWidth:150 }}>
+        <div style={{ textAlign:"right" }}>
+          {/* Always-visible signal: AI conviction when available, RSI-based fallback otherwise */}
           {aiEnabled && d.ai_error && d.ai_error !== "ai_disabled" ? (
             <span style={{ fontSize:10, color:C.amber, fontWeight:600 }}>API error</span>
           ) : d.stage ? (
@@ -418,24 +436,37 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
               <div style={{ fontSize:11, fontWeight:700, color:stageColor(d.stage), lineHeight:1.3 }}>{stageEmoji(d.stage)} {d.stage}</div>
               {d.conviction && <div style={{ fontSize:9.5, color:convictionColor(d.conviction), marginTop:2, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.04em" }}>{d.conviction}</div>}
             </>
+          ) : !aiEnabled && d.rsi ? (
+            <div style={{ fontFamily:C.mono, fontSize:12, fontWeight:800, letterSpacing:"0.07em",
+              color: d.rsi < 35 ? C.up : d.rsi > 70 ? C.down : C.amber }}>
+              {d.rsi < 35 ? "OVERSOLD" : d.rsi > 70 ? "OVERBOUGHT" : "HOLD"}
+            </div>
           ) : aiEnabled ? (
             <span style={{ fontSize:10, color:C.faint }}>Analyzing…</span>
           ) : null}
+          {/* Earnings badge */}
+          {d.daysToEarn != null && d.daysToEarn >= 0 && d.daysToEarn <= 30 && (
+            <div style={{ marginTop:4, fontSize:9.5, fontWeight:700, color: d.daysToEarn <= 7 ? C.amber : C.violet,
+              background: d.daysToEarn <= 7 ? `${C.amber}18` : `${C.violet}18`,
+              borderRadius:4, padding:"1px 6px", display:"inline-block", fontFamily:C.mono }}>
+              ER {d.daysToEarn}d
+            </div>
+          )}
         </div>
       </div>
       {d.history && (
         <div style={{ marginTop:10 }} onClick={e => e.stopPropagation()}>
           <div style={{ display:"flex", gap:1, marginBottom:4 }}>
-            {RANGES.filter(r => r.days && r.days <= 126).map(r => (
+            {SPARK_RANGES.map(r => (
               <button key={r.key} onClick={()=>setSparkRange(r.key)}
                 style={{ background:sparkRange===r.key?C.line:"transparent", border:"none", borderRadius:4,
                   padding:"1px 6px", color:sparkRange===r.key?C.ink:C.faint,
-                  fontSize:9.5, fontFamily:C.mono, fontWeight:600, cursor:"pointer" }}>
-                {r.label}
+                  fontSize:9.5, fontFamily:C.mono, fontWeight:600, cursor:"pointer", minHeight:22 }}>
+                {r.key.toUpperCase()}
               </button>
             ))}
           </div>
-          <Sparkline data={d.history.slice(-(RANGES.find(r=>r.key===sparkRange)?.days||21))} h={30} color={d.chg>=0?C.up:C.down}/>
+          <Sparkline data={d.history.slice(-(SPARK_RANGES.find(r=>r.key===sparkRange)?.days||21))} h={30} color={d.chg>=0?C.up:C.down}/>
         </div>
       )}
 
@@ -537,7 +568,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
   const newsAvg = d.news?.length ? (d.news.reduce((s,n)=>s+n.score,0)/d.news.length).toFixed(1) : "—";
 
   return (
-    <div style={{ maxWidth:860, margin:"0 auto", padding:"20px 26px 60px" }}>
+    <div style={{ maxWidth:860, margin:"0 auto", padding:"16px 14px 60px" }}>
       <button onClick={onBack} style={{ background:"none", border:"none", color:C.cold, cursor:"pointer", display:"flex", gap:5, alignItems:"center", marginBottom:18, fontSize:13 }}><ChevronLeft size={16}/> Back</button>
 
       {/* ── Header ─────────────────────────────────────────── */}
@@ -1766,9 +1797,157 @@ function sectorHeat(month) {
            txt: m >= 0 ? C.up : C.down };
 }
 
-function SectorMap() {
+// ── MACRO EVENTS TIMELINE ─────────────────────────────────────────────
+function MacroEventsPanel({ events }) {
+  if (!events?.length) return null;
+  const typeColor = { FOMC:C.violet, CPI:C.amber, NFP:C.cold };
+  const typeIcon  = { FOMC:"🏦", CPI:"📊", NFP:"💼" };
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:12 }}>Macro Events — Next 90 Days</div>
+      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+        {events.map((e, i) => (
+          <div key={i} style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <div style={{ width:60, fontFamily:C.mono, fontSize:10, color:typeColor[e.type]||C.sub,
+              fontWeight:700, background:`${typeColor[e.type]||C.sub}15`, borderRadius:5, padding:"2px 6px", textAlign:"center", flexShrink:0 }}>
+              {typeIcon[e.type]||"📅"} {e.type}
+            </div>
+            <div style={{ flex:1 }}>
+              <span style={{ fontSize:12, color:C.ink }}>{e.name}</span>
+              <span style={{ fontSize:10.5, color:C.faint, fontFamily:C.mono, marginLeft:8 }}>{e.date}</span>
+            </div>
+            <div style={{ fontFamily:C.mono, fontSize:11, fontWeight:700,
+              color: e.days_away <= 7 ? C.amber : C.faint }}>
+              {e.days_away === 0 ? "Today" : `${e.days_away}d`}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── OPTIONS FLOW MAP ─────────────────────────────────────────────────
+function OptionsFlowPanel({ flow }) {
+  if (!flow?.length) return null;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:12 }}>Options Flow — Your Tickers</div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(160px, 1fr))", gap:10 }}>
+        {flow.map((f, i) => {
+          const biasColor = f.bias==="bullish" ? C.up : f.bias==="bearish" ? C.down : C.faint;
+          return (
+            <div key={i} style={{ background:C.panel2, borderRadius:10, padding:"12px 14px",
+              border:`1px solid ${f.unusual ? biasColor : C.line}`, borderLeftWidth: f.unusual ? 3 : 1 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                <span style={{ fontWeight:700, fontSize:13, color:C.ink }}>{f.ticker}</span>
+                {f.unusual && <span style={{ fontSize:9, fontWeight:700, color:biasColor, background:`${biasColor}18`, borderRadius:4, padding:"1px 5px" }}>UNUSUAL</span>}
+              </div>
+              <div style={{ fontFamily:C.mono, fontSize:10.5, color:C.sub }}>P/C {f.pc_ratio} · Vol {f.rel_vol}×</div>
+              <div style={{ fontFamily:C.mono, fontSize:10, fontWeight:700, color:biasColor, marginTop:4, textTransform:"uppercase" }}>{f.bias}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── EARNINGS MAP ─────────────────────────────────────────────────────
+function EarningsMapPanel({ watchlist, cardCache, onOpen }) {
+  const upcoming = (watchlist || [])
+    .filter(t => cardCache[t]?.daysToEarn != null && cardCache[t].daysToEarn >= 0 && cardCache[t].daysToEarn <= 30)
+    .sort((a,b) => cardCache[a].daysToEarn - cardCache[b].daysToEarn);
+  if (!upcoming.length) return null;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:12 }}>Earnings Map — Next 30 Days</div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(140px, 1fr))", gap:10 }}>
+        {upcoming.map(t => {
+          const d = cardCache[t];
+          const dte = d.daysToEarn;
+          const urgency = dte <= 3 ? C.down : dte <= 7 ? C.amber : C.violet;
+          const expectedMove = d.iv ? `±${(d.iv * Math.sqrt(dte / 365) * 100).toFixed(1)}%` : null;
+          return (
+            <div key={t} onClick={()=>onOpen(t)} style={{ background:C.panel2, borderRadius:10, padding:"12px 14px",
+              border:`1px solid ${urgency}`, borderLeftWidth:3, cursor:"pointer" }}
+              onMouseEnter={e=>e.currentTarget.style.background=C.line}
+              onMouseLeave={e=>e.currentTarget.style.background=C.panel2}>
+              <div style={{ fontWeight:700, fontSize:14, color:C.ink }}>{t}</div>
+              <div style={{ fontFamily:C.mono, fontSize:11, color:urgency, fontWeight:700, marginTop:3 }}>
+                {dte === 0 ? "Today" : `${dte}d`}
+              </div>
+              {expectedMove && (
+                <div style={{ fontSize:9.5, color:C.faint, fontFamily:C.mono, marginTop:2 }}>exp move {expectedMove}</div>
+              )}
+              {d.fundamentals?.nextEarnings && (
+                <div style={{ fontSize:9, color:C.faint, marginTop:2 }}>{d.fundamentals.nextEarnings}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── MARKET PULSE (Nicholas Crown) ────────────────────────────────────
+function MarketPulsePanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(()=>{
+    fetchYtInsights().then(x=>{ setData(x); setLoading(false); }).catch(()=>setLoading(false));
+  },[]);
+  if (loading) return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:8 }}>Market Pulse</div>
+      <div style={{ color:C.faint, fontSize:12, display:"flex", alignItems:"center", gap:6 }}><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Loading macro insights…</div>
+    </div>
+  );
+  if (!data || data.error || !data.insights?.length) return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:6 }}>Market Pulse</div>
+      <div style={{ fontSize:11.5, color:C.faint }}>
+        {data?.error || "YouTube insights unavailable."}
+        {data?.error?.includes("YT_NICHOLAS_CROWN") && <span style={{ color:C.amber }}> Set <code>YT_NICHOLAS_CROWN_CHANNEL_ID</code> in backend .env to enable.</span>}
+      </div>
+    </div>
+  );
+  const sentColor = s => s==="bullish" ? C.up : s==="bearish" ? C.down : C.faint;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:C.ink }}>Market Pulse · Nicholas Crown</div>
+        <span style={{ fontSize:10, color:C.faint }}>YouTube macro digest</span>
+      </div>
+      {data.insights.map((v, i) => (
+        <div key={i} style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none", paddingTop: i > 0 ? 12 : 0, marginTop: i > 0 ? 12 : 0 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:6 }}>
+            <a href={v.link} target="_blank" rel="noopener noreferrer"
+              style={{ fontSize:12.5, fontWeight:700, color:C.cold, textDecoration:"none", flex:1, marginRight:8, lineHeight:1.3 }}
+              onClick={e=>e.stopPropagation()}>
+              {v.title}
+            </a>
+            <span style={{ fontSize:9, fontWeight:700, color:sentColor(v.sentiment), background:`${sentColor(v.sentiment)}18`,
+              borderRadius:4, padding:"1px 6px", flexShrink:0, textTransform:"uppercase" }}>{v.sentiment}</span>
+          </div>
+          {v.summary && <div style={{ fontSize:11.5, color:C.sub, marginBottom:6, lineHeight:1.45 }}>{v.summary}</div>}
+          {v.takeaways?.length > 0 && (
+            <ul style={{ margin:0, paddingLeft:16, color:C.faint, fontSize:11 }}>
+              {v.takeaways.map((t,j) => <li key={j} style={{ marginBottom:2 }}>{t}</li>)}
+            </ul>
+          )}
+          <div style={{ fontSize:10, color:C.faint, fontFamily:C.mono, marginTop:6 }}>{v.published}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SectorMap({ watchlist=[], cardCache={}, onOpen }) {
   const [d, setD]             = useState(null);
   const [rotation, setRotation] = useState(null);
+  const [mapData, setMapData] = useState(null);
   const [err, setErr]         = useState(null);
   const [updated, setUpdated] = useState(null);
   const [sel, setSel]         = useState(null);
@@ -1777,7 +1956,8 @@ function SectorMap() {
     setErr(null); setD(null);
     fetchSectors().then(x=>{ x.error?setErr(x.error):setD(x); setUpdated(new Date()); }).catch(e=>setErr(e.message));
     fetchSectorRotation().then(x=>{ if(!x.error) setRotation(x); }).catch(()=>{});
-  },[]);
+    fetchMapData(watchlist).then(x=>{ if(!x.error) setMapData(x); }).catch(()=>{});
+  },[watchlist]);
   useEffect(()=>{ load(); },[load]);
 
   if (err) return <div style={{ padding:40, textAlign:"center", color:C.down }}>Sector map unavailable: {err}<br/><span style={{ color:C.faint, fontSize:12 }}>Is the backend running on {API}?</span></div>;
@@ -1788,10 +1968,10 @@ function SectorMap() {
 
   return (
     <div>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:16 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:16, flexWrap:"wrap", gap:8 }}>
         <div>
-          <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Sector Map</div>
-          <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>Hot &amp; cold across the market · click a sector for drivers &amp; forecast</div>
+          <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Market Map</div>
+          <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>Sectors · Earnings · Macro Events · Options Flow</div>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:12 }}>
           <span style={{ fontSize:11, color:C.faint, fontFamily:C.mono }}>updated {updated?.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span>
@@ -1799,6 +1979,20 @@ function SectorMap() {
         </div>
       </div>
 
+      {/* Earnings Map */}
+      <EarningsMapPanel watchlist={watchlist} cardCache={cardCache} onOpen={onOpen}/>
+
+      {/* Macro Events Timeline */}
+      <MacroEventsPanel events={mapData?.macro_events}/>
+
+      {/* Options Flow Map */}
+      <OptionsFlowPanel flow={mapData?.options_flow}/>
+
+      {/* Market Pulse — Nicholas Crown */}
+      <MarketPulsePanel/>
+
+      {/* Sector Heatmap */}
+      <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>Sector Heatmap</div>
       {/* Heatmap grid */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(180px, 1fr))", gap:12, marginBottom:18 }}>
         {sectors.map((s,i)=>{
@@ -2293,14 +2487,14 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.ink, fontFamily:"'Inter',system-ui,sans-serif", overflowX:"hidden" }}>
       {/* ── Sticky top nav — always visible ─────────────────── */}
-      <div style={{ borderBottom:`1px solid ${C.line}`, padding:"14px 26px", position:"sticky", top:0, background:C.bg, zIndex:20 }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:20, maxWidth:1180, margin:"0 auto" }}>
+      <div style={{ borderBottom:`1px solid ${C.line}`, padding:"10px 14px", position:"sticky", top:0, background:C.bg, zIndex:20 }}>
+        <div style={{ display:"flex", flexWrap:"wrap", justifyContent:"space-between", alignItems:"center", gap:8, maxWidth:1180, margin:"0 auto" }}>
           <div onClick={()=>{ setDetail(null); setTab("watchlist"); }} title="Go to Watchlist" style={{ fontWeight:800, fontSize:17, letterSpacing:"-0.02em", flexShrink:0, cursor:"pointer" }}>AlphaDesk <span style={{ color:C.hot }}>·</span></div>
-          <div style={{ flex:1, maxWidth:420, position:"relative" }}>
+          <div style={{ flex:"1 1 180px", maxWidth:420, position:"relative" }}>
             <Search size={15} color={C.faint} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)" }}/>
             <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&runSearch()}
               placeholder="Research any ticker — e.g. NVDA, TSLA, COIN"
-              style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"9px 12px 9px 36px", color:C.ink, fontSize:13, outline:"none", fontFamily:"inherit" }}
+              style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 12px 8px 36px", color:C.ink, fontSize:13, outline:"none", fontFamily:"inherit" }}
               onFocus={e=>e.target.style.borderColor=C.cold} onBlur={e=>e.target.style.borderColor=C.line}/>
             {query && <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={14}/></button>}
           </div>
@@ -2318,7 +2512,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               <span style={{ fontSize:10.5, color:C.cold, fontWeight:700 }}>
                 {({conservative:"🛡️",moderate:"⚖️",aggressive:"⚡",degen:"🔥"}[profile.riskTolerance]||"👤")}
               </span>
-              <span style={{ fontSize:10.5, color:C.sub, whiteSpace:"nowrap" }}>
+              <span style={{ fontSize:10.5, color:C.sub, whiteSpace:"nowrap", display:"none", minWidth:0 }} className="profile-label">
                 {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"?")} · {({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day"}[profile.style]||"?")}
               </span>
             </div>
@@ -2333,7 +2527,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       {detail ? (
         <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
       ) : (
-        <div style={{ maxWidth:1180, margin:"0 auto", padding:"22px 26px 60px" }}>
+        <div style={{ maxWidth:1180, margin:"0 auto", padding:"16px 14px 60px" }}>
           {tab==="watchlist" && (
             <div>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
@@ -2368,7 +2562,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               {watchlist.length===0 ? (
                 <div style={{ textAlign:"center", padding:"50px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Empty — search or add a ticker to start.</div>
               ) : (
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:14 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:12 }}>
                   {watchlist.map((t,i)=>(
                     <div key={t} draggable
                       onDragStart={()=>setWlDrag(i)}
@@ -2385,7 +2579,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           )}
           {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
           {tab==="brief" && <BriefingRoom/>}
-          {tab==="map" && <SectorMap/>}
+          {tab==="map" && <SectorMap watchlist={watchlist} cardCache={cardCache} onOpen={setDetail}/>}
         </div>
       )}
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>

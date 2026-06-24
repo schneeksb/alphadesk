@@ -190,16 +190,21 @@ def ai_analysis_and_news(ticker, tech, profile: str = ""):
     profile_block = _profile_ctx(profile)
     profile_intro = f"\n{profile_block}\n" if profile_block else ""
 
-    prompt = f"""You are an elite technical-fundamental analyst reading the PRICE ACTION STORY of {ticker} ({tech['name']}) as of {datetime.date.today()}.
+    prompt = f"""You are a panel of elite investors analyzing {ticker} ({tech['name']}) as of {datetime.date.today()}.
 
-Combine three lenses:
-• Chart reading — where is this stock in its current cycle? What is price saying?
-• Fundamentals — does the business support or undermine the technical setup?
-• Options intelligence — what is smart money positioning telling us right now?
+Think like: Stan Druckenmiller (macro/liquidity cycles), Phil Fisher (business quality), Howard Marks (cycle awareness), a seasoned options trader (Greeks/timing).
+
+Analyze through FOUR LENSES in this priority order:
+1. MACRO CYCLE — where are we in the rate/liquidity cycle? Does the macro environment favor or hurt this sector and stock right now?
+2. SECTOR ROTATION — is institutional money flowing into or out of {tech['sector']}? Is relative strength vs. SPY improving or deteriorating?
+3. COMPANY QUALITY — is the business getting stronger (accelerating earnings/margins) or weaker? What does the fundamental trajectory say?
+4. OPTIONS TIMING — what is IV {tech.get('iv','?')}% + P/C {pc} revealing about smart money positioning? Is the options market pricing too much or too little risk?
+
+Weight macro and sector factors FIRST. Technicals signal entry/exit timing, not the primary thesis.
 
 MARKET DATA:
 Price: ${spot} ({tech['chg']:+.1f}% today) | RSI {tech['rsi']} | {w52_ctx}
-Options: IV {tech['iv']}% | {pc_ctx} | Rel Vol {tech.get('relVol','?')}×
+Options: IV {tech.get('iv','?')}% | {pc_ctx} | Rel Vol {tech.get('relVol','?')}×
 Fundamentals: P/E {tech['fundamentals']['pe']} | Rev Growth {tech['fundamentals']['revGrowth']} | Margin {tech['fundamentals']['grossMargin']} | Sector: {tech['sector']}
 Earnings: {earn_ctx}{analyst_ctx}
 {profile_intro}
@@ -287,8 +292,15 @@ def _profile_ctx(profile: str) -> str:
         f"  Primary Goal: {goal_map.get(goal, goal)}",
         f"  Trading Style: {style_map.get(style, style)}",
         f"  Experience: {level_map.get(level, level)}",
+        f"",
+        f"ANALYSIS FRAMEWORK — evaluate through these four lenses in strict priority order:",
+        f"  1. MACRO CYCLE (Druckenmiller lens): Where are we in the liquidity and rate cycle? Which sectors and factor styles benefit right now? Is this a risk-on or risk-off environment?",
+        f"  2. SECTOR ROTATION (institutional money flow): Where is smart money flowing in vs. out? Is this stock's sector gaining or losing relative strength vs. SPY over the last 5–20 days?",
+        f"  3. COMPANY QUALITY (Fisher lens): Is the business compounding or deteriorating? Are earnings, margins, and revenue growth accelerating or decelerating?",
+        f"  4. OPTIONS TIMING (derivatives lens): What is IV rank saying? Is smart money positioned bullishly or bearishly via options? Is the P/C ratio showing unusual flow?",
+        f"  PRIORITY: Macro and sector tide come FIRST. Technicals serve as entry timing, not as the primary thesis. This trader times entries based on macro tides, not chart patterns alone.",
+        f"  ANALYST PANEL MINDSET: Think like Stan Druckenmiller on macro/liquidity, Phil Fisher on business quality, Howard Marks on cycle awareness, and a seasoned options trader on Greeks and timing.",
     ]
-    # Style-specific guidance
     if risk in ("aggressive","degen"):
         lines.append("  → Prefer higher risk/reward setups, shorter DTE, further OTM strikes, concentrated bets.")
     if risk == "conservative":
@@ -519,32 +531,154 @@ try:
         return _cached(f"research:{t}:{ai}:{profile}", lambda: research(t, ai=bool(ai), profile=profile))
 
     @app.get("/chart")
-    def chart_endpoint(ticker: str, range: str = "5y"):
-        """Extended price history: 1D (intraday 5m) or 5Y (weekly). Daily ranges use /research."""
+    def chart_endpoint(ticker: str, range: str = "3m"):
+        """Price history for any timeframe with correct yfinance params per range."""
         t = ticker.upper().strip()
-        if range not in ("1d", "5y"):
-            return {"error": "range must be '1d' or '5y'"}
+        # (period, interval, date_format, cache_ttl_s, stale_ttl_s)
+        RANGE_MAP = {
+            "1d":  ("1d",  "5m",  "%H:%M",       300,   900),
+            "1w":  ("5d",  "1h",  "%m/%d %H:%M", 900,  3600),
+            "1m":  ("1mo", "1d",  "%Y-%m-%d",    600,  7200),
+            "3m":  ("3mo", "1d",  "%Y-%m-%d",    600,  7200),
+            "6m":  ("6mo", "1d",  "%Y-%m-%d",    600,  7200),
+            "ytd": ("ytd", "1d",  "%Y-%m-%d",    600,  7200),
+            "1y":  ("1y",  "1d",  "%Y-%m-%d",   3600, 86400),
+            "2y":  ("2y",  "1wk", "%Y-%m-%d",   3600, 86400),
+            "5y":  ("5y",  "1wk", "%Y-%m-%d",   3600, 86400),
+        }
+        if range not in RANGE_MAP:
+            return {"error": f"range must be one of: {', '.join(RANGE_MAP)}"}
+        period, interval, date_fmt, ttl, stale = RANGE_MAP[range]
         def produce():
             try:
                 tk = yf.Ticker(t)
-                if range == "1d":
-                    h = tk.history(period="1d", interval="5m")
-                    date_fmt = "%H:%M"
-                else:
-                    h = tk.history(period="5y", interval="1wk")
-                    date_fmt = "%Y-%m-%d"
+                h = tk.history(period=period, interval=interval)
                 if h.empty:
                     return {"error": "no data"}
                 c = h["Close"].dropna()
                 return _json_safe({
-                    "history":      [round(float(x), 2) for x in c.tolist()],
+                    "history":       [round(float(x), 2) for x in c.tolist()],
                     "history_dates": [d.strftime(date_fmt) for d in c.index],
                 })
             except Exception as e:
                 return {"error": str(e)}
-        ttl   = 300   if range == "1d" else 3600
-        stale = 900   if range == "1d" else 86400
         return _cached_swr(f"chart:{t}:{range}", produce, ttl=ttl, stale_ttl=stale)
+
+    @app.get("/map-data")
+    def map_data_endpoint(tickers: str = ""):
+        """Macro events calendar + options flow for comma-separated tickers."""
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()][:12]
+        def produce():
+            today = datetime.date.today()
+            # Upcoming FOMC, CPI, NFP dates for 2026 (sorted ascending)
+            raw_events = [
+                ("2026-07-03",  "NFP",  "Jobs Report (NFP)",      "high"),
+                ("2026-07-15",  "CPI",  "CPI Inflation Report",   "high"),
+                ("2026-07-29",  "FOMC", "Fed Rate Decision",       "high"),
+                ("2026-08-07",  "NFP",  "Jobs Report (NFP)",      "high"),
+                ("2026-08-12",  "CPI",  "CPI Inflation Report",   "high"),
+                ("2026-09-04",  "NFP",  "Jobs Report (NFP)",      "high"),
+                ("2026-09-10",  "CPI",  "CPI Inflation Report",   "high"),
+                ("2026-09-16",  "FOMC", "Fed Rate Decision",       "high"),
+                ("2026-10-02",  "NFP",  "Jobs Report (NFP)",      "high"),
+                ("2026-10-14",  "CPI",  "CPI Inflation Report",   "high"),
+                ("2026-10-28",  "FOMC", "Fed Rate Decision",       "high"),
+                ("2026-11-06",  "NFP",  "Jobs Report (NFP)",      "high"),
+                ("2026-11-12",  "CPI",  "CPI Inflation Report",   "high"),
+                ("2026-12-04",  "NFP",  "Jobs Report (NFP)",      "high"),
+                ("2026-12-09",  "FOMC", "Fed Rate Decision",       "high"),
+                ("2026-12-10",  "CPI",  "CPI Inflation Report",   "high"),
+            ]
+            upcoming = []
+            for date_str, ev_type, name, impact in raw_events:
+                ev_date = datetime.date.fromisoformat(date_str)
+                days_away = (ev_date - today).days
+                if 0 <= days_away <= 90:
+                    upcoming.append({"date": date_str, "type": ev_type, "name": name,
+                                     "impact": impact, "days_away": days_away})
+
+            # Options flow for provided tickers
+            options_flow = []
+            for t in ticker_list:
+                try:
+                    tk = yf.Ticker(t)
+                    h = tk.history(period="1d")
+                    if h.empty: continue
+                    spot = float(h["Close"].dropna().iloc[-1])
+                    info = tk.fast_info or {}
+                    expiries = tk.options
+                    if not expiries: continue
+                    chain = tk.option_chain(expiries[0])
+                    calls_vol = float(chain.calls["volume"].fillna(0).sum())
+                    puts_vol  = float(chain.puts["volume"].fillna(0).sum())
+                    pc_ratio  = round(puts_vol / calls_vol, 2) if calls_vol > 0 else 1.0
+                    avg_vol   = getattr(info, "three_month_average_volume", None) or 1
+                    curr_vol  = getattr(info, "last_volume", None) or 0
+                    rel_vol   = round(curr_vol / avg_vol, 1) if avg_vol else 1.0
+                    unusual   = rel_vol > 2.0 or (calls_vol + puts_vol) > 50000
+                    bias = "bearish" if pc_ratio > 1.5 else ("bullish" if pc_ratio < 0.7 else "neutral")
+                    options_flow.append({"ticker": t, "spot": round(spot, 2),
+                        "calls_vol": int(calls_vol), "puts_vol": int(puts_vol),
+                        "pc_ratio": pc_ratio, "rel_vol": rel_vol,
+                        "unusual": unusual, "bias": bias})
+                except Exception:
+                    pass
+
+            return _json_safe({"macro_events": upcoming, "options_flow": options_flow})
+
+        cache_key = f"map-data:{','.join(sorted(ticker_list))}"
+        return _cached_swr(cache_key, produce, ttl=600, stale_ttl=3600)
+
+    @app.get("/yt-insights")
+    def yt_insights_endpoint():
+        """Fetch and summarize Nicholas Crown's latest YouTube videos for macro insights."""
+        def produce():
+            try:
+                import feedparser
+                from youtube_transcript_api import YouTubeTranscriptApi
+                # Set YT_NICHOLAS_CROWN_CHANNEL_ID in env — find it on his YouTube channel About page
+                channel_id = os.getenv("YT_NICHOLAS_CROWN_CHANNEL_ID", "")
+                if not channel_id:
+                    return {"error": "Set YT_NICHOLAS_CROWN_CHANNEL_ID env var to enable", "insights": []}
+                feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
+                if not feed.entries:
+                    return {"error": "Could not fetch YouTube feed", "insights": []}
+                insights = []
+                for entry in feed.entries[:3]:
+                    video_id = entry.get("yt_videoid", "")
+                    title    = entry.get("title", "")
+                    link     = entry.get("link", f"https://youtube.com/watch?v={video_id}")
+                    published = entry.get("published", "")[:10]
+                    if not video_id:
+                        continue
+                    try:
+                        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                        text = " ".join(item["text"] for item in transcript)[:5000]
+                    except Exception:
+                        text = None
+                    if not text:
+                        insights.append({"title": title, "link": link, "published": published,
+                                         "summary": "Transcript unavailable.", "takeaways": [], "sentiment": "neutral"})
+                        continue
+                    try:
+                        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                        r = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=350,
+                            messages=[{"role": "user", "content":
+                                f'Summarize for a macro trader. Title: "{title}"\nTranscript: {text}\n\n'
+                                f'JSON only: {{"summary":"1-sentence macro thesis","takeaways":["...","...","..."],'
+                                f'"sectors":["..."],"sentiment":"bullish"|"bearish"|"neutral"}}'}])
+                        import json as _json
+                        data = _json.loads(r.content[0].text.strip())
+                        insights.append({"title": title, "link": link, "published": published, **data})
+                    except Exception:
+                        insights.append({"title": title, "link": link, "published": published,
+                                         "summary": "Summary unavailable.", "takeaways": [], "sentiment": "neutral"})
+                return _json_safe({"insights": insights})
+            except ImportError:
+                return {"error": "pip install feedparser youtube-transcript-api", "insights": []}
+            except Exception as e:
+                return {"error": str(e), "insights": []}
+        return _cached_swr("yt-insights", produce, ttl=3600, stale_ttl=86400)
 
     @app.get("/sectors")
     def sectors_endpoint():

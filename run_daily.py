@@ -120,10 +120,12 @@ def layer1_data_valuation(portfolio=None):
             spot = float(c.iloc[-1])
             cb   = float(pos.get("cost_basis") or 0)
 
-            if pos["type"] == "SHARES":
+            if pos["type"] in ("SHARES", "CRYPTO"):
+                # Crypto (e.g. BTC-USD) values exactly like shares: spot × units.
                 cv  = spot * pos["qty"]
                 pnl = cv - cb
-                print(f"  [SHR] {pos['ticker']} spot=${spot:.2f} cv=${cv:.2f} pnl=${pnl:+.2f}")
+                tag = "CRY" if pos["type"] == "CRYPTO" else "SHR"
+                print(f"  [{tag}] {pos['ticker']} spot=${spot:.2f} cv=${cv:.2f} pnl=${pnl:+.2f}")
                 return {**pos, "spot": round(spot,2), "current_val": round(cv,2),
                         "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
                         "delta": 1.0, "theta": 0, "vega": 0, "iv": None, "dte": None,
@@ -170,20 +172,25 @@ def layer2_portfolio_analytics(positions):
     total_val   = sum(p["current_val"] for p in positions)
     total_cost  = sum(p["cost_basis"]  for p in positions)
     total_pnl   = total_val - total_cost
-    total_theta = sum((p.get("theta") or 0)*p["qty"]*(1 if p["type"]=="SHARES" else 100) for p in positions)
-    total_delta = sum((p.get("delta") or 0)*p["qty"]*(1 if p["type"]=="SHARES" else 100) for p in positions)
+    # Shares and crypto carry a 1x multiplier; options are ×100 per contract.
+    _mult = lambda p: 1 if p["type"] in ("SHARES", "CRYPTO") else 100
+    total_theta = sum((p.get("theta") or 0)*p["qty"]*_mult(p) for p in positions)
+    total_delta = sum((p.get("delta") or 0)*p["qty"]*_mult(p) for p in positions)
     sector_alloc = {}
     # Only do live lookups for small portfolios to avoid excessive API calls.
     do_live_lookup = len(positions) < 20
     for p in positions:
         ticker = p["ticker"]
-        if ticker not in sector_map and do_live_lookup:
-            try:
-                fetched = yf.Ticker(ticker).info.get("sector", "Other") or "Other"
-                sector_map[ticker] = fetched  # cache so duplicate tickers don't re-fetch
-            except Exception:
-                sector_map[ticker] = "Other"
-        s = sector_map.get(ticker, "Other")
+        if p.get("type") == "CRYPTO" or ticker.endswith("-USD"):
+            s = "Crypto"                       # crypto has no equity sector — bucket it together
+        else:
+            if ticker not in sector_map and do_live_lookup:
+                try:
+                    fetched = yf.Ticker(ticker).info.get("sector", "Other") or "Other"
+                    sector_map[ticker] = fetched  # cache so duplicate tickers don't re-fetch
+                except Exception:
+                    sector_map[ticker] = "Other"
+            s = sector_map.get(ticker, "Other")
         sector_alloc[s] = sector_alloc.get(s, 0) + p["current_val"]
     return {"total_value": round(total_val,2), "total_cost": round(total_cost,2),
             "total_pnl": round(total_pnl,2),

@@ -172,9 +172,10 @@ def technicals(ticker):
     except Exception:
         pass
 
+    is_crypto = ticker.upper().endswith("-USD")
     return {
         "name":       info.get("longName") or info.get("shortName") or ticker,
-        "sector":     info.get("sector", "—"),
+        "sector":     "Crypto" if is_crypto else info.get("sector", "—"),
         "mktCap":     mc_str,
         "spot":       round(spot, 2),
         "chg":        round(chg, 2),

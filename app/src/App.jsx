@@ -80,6 +80,24 @@ const loadAccountCollapsed = () => { try { return JSON.parse(localStorage.getIte
 const saveAccountCollapsed = (m) => { try { localStorage.setItem(ACCT_COLLAPSE_KEY, JSON.stringify(m)); } catch {} };
 const UNASSIGNED = "__unassigned__";
 
+// ── CRYPTO SUPPORT ────────────────────────────────────────────────────
+// yfinance quotes crypto as "<SYMBOL>-USD". We let users type a bare symbol
+// (BTC, ETH, …) and resolve common ones to the pair automatically.
+const CRYPTO_SYMBOLS = new Set(["BTC","ETH","SOL","XRP","DOGE","ADA","AVAX","LINK","DOT","MATIC",
+  "LTC","BCH","SHIB","TRX","UNI","ATOM","XLM","ETC","FIL","APT","ARB","OP","NEAR","INJ","SUI",
+  "PEPE","TON","ICP","HBAR","VET","AAVE","MKR","RNDR","IMX","GRT","ALGO","FTM","SAND","MANA","AXS",
+  "CRO","QNT","STX","TIA","RUNE","FLOW","EGLD","XTZ","CHZ","ENJ","BTT","USDT","USDC","BNB","TRUMP"]);
+const isCrypto = (t="") => /-USD$/i.test(t);
+// Normalize user input to a yfinance symbol: a bare known-crypto symbol → "<SYM>-USD".
+const normalizeTicker = (input="") => {
+  const T = (input||"").toUpperCase().trim();
+  if (!T) return "";
+  if (T.includes("-")) return T;                 // already a pair / hyphenated symbol
+  return CRYPTO_SYMBOLS.has(T) ? `${T}-USD` : T;
+};
+// Display form: strip the -USD suffix so the UI shows "BTC" instead of "BTC-USD".
+const displaySym = (t="") => isCrypto(t) ? t.replace(/-USD$/i, "") : t;
+
 // ── AI INSIGHTS TOGGLE PERSISTENCE ───────────────────────────────────
 const AI_KEY  = "alphadesk:ai";
 const loadAI  = () => { try { return localStorage.getItem(AI_KEY) === "true"; } catch { return false; } };
@@ -407,7 +425,7 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
 
   if (err) return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 17px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-      <div><span style={{ fontWeight:700, color:C.ink }}>{ticker}</span>
+      <div><span style={{ fontWeight:700, color:C.ink }}>{displaySym(ticker)}</span>
         <div style={{ fontSize:10.5, color:C.down, marginTop:3, display:"flex", alignItems:"center", gap:4 }}><AlertCircle size={11}/> couldn't load</div></div>
       <button onClick={()=>onRemove(ticker)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={15}/></button>
     </div>
@@ -424,7 +442,7 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
         <div>
           <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span style={{ fontWeight:700, fontSize:16, color:C.ink }}>{ticker}</span>
+            <span style={{ fontWeight:700, fontSize:16, color:C.ink }}>{displaySym(ticker)}</span>
             {d.signal==="hot" && <Flame size={13} color={C.hot}/>}
             {d.signal==="cold" && <Snowflake size={13} color={C.cold}/>}
           </div>
@@ -591,7 +609,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:22 }}>
         <div>
           <div style={{ display:"flex", alignItems:"center", gap:11 }}>
-            <span style={{ fontSize:28, fontWeight:800, color:C.ink, letterSpacing:"-0.02em" }}>{ticker}</span>
+            <span style={{ fontSize:28, fontWeight:800, color:C.ink, letterSpacing:"-0.02em" }}>{displaySym(ticker)}</span>
             {aiOk && d.signal==="hot"  && <Flame     size={20} color={C.hot}/>}
             {aiOk && d.signal==="cold" && <Snowflake size={20} color={C.cold}/>}
           </div>
@@ -1279,10 +1297,12 @@ function PositionForm({ initial, onSubmit, onClose, accounts=[] }) {
   const [stop, setStop]     = useState(initial?.stop != null ? String(initial.stop) : "");
   const [account, setAccount] = useState(initial?.account || UNASSIGNED);
   const [error, setError]   = useState("");
-  const isOpt = type !== "SHARES";
+  const isOpt    = type === "CALL" || type === "PUT";
+  const isCryptoT = type === "CRYPTO";
 
   const submit = () => {
-    const T = ticker.toUpperCase().trim();
+    let T = ticker.toUpperCase().trim();
+    if (isCryptoT) T = T.includes("-") ? T : `${T}-USD`;   // force the yfinance pair
     const q = parseFloat(qty), cb = parseFloat(cost);
     if (!T) return setError("Ticker is required");
     if (!(q > 0)) return setError("Quantity must be greater than 0");
@@ -1309,13 +1329,13 @@ function PositionForm({ initial, onSubmit, onClose, accounts=[] }) {
         <button onClick={onClose} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={16}/></button>
       </div>
       <div style={{ display:"flex", gap:3, background:C.panel2, borderRadius:9, padding:3, border:`1px solid ${C.line}`, marginBottom:12, width:"fit-content" }}>
-        {["SHARES","CALL","PUT"].map(t=>(
-          <button key={t} onClick={()=>setType(t)} style={{ padding:"6px 16px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:type===t?C.line:"transparent", color:type===t?C.ink:C.sub }}>{t}</button>
+        {["SHARES","CRYPTO","CALL","PUT"].map(t=>(
+          <button key={t} onClick={()=>setType(t)} style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:type===t?C.line:"transparent", color:type===t?C.ink:C.sub }}>{t}</button>
         ))}
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))", gap:10, marginBottom:12 }}>
-        <div><label style={lbl}>TICKER</label><input value={ticker} onChange={e=>setTicker(e.target.value)} placeholder="NVDA" style={{ ...inp, textTransform:"uppercase" }}/></div>
-        <div><label style={lbl}>QUANTITY</label><input value={qty} onChange={e=>setQty(e.target.value)} type="number" placeholder={isOpt?"contracts":"shares"} style={inp}/></div>
+        <div><label style={lbl}>TICKER{isCryptoT && <span style={{ color:C.cold, marginLeft:4 }}>BTC → BTC-USD</span>}</label><input value={ticker} onChange={e=>setTicker(e.target.value)} placeholder={isCryptoT?"BTC":"NVDA"} style={{ ...inp, textTransform:"uppercase" }}/></div>
+        <div><label style={lbl}>QUANTITY</label><input value={qty} onChange={e=>setQty(e.target.value)} type="number" step="any" placeholder={isOpt?"contracts":isCryptoT?"units (fractional ok)":"shares"} style={inp}/></div>
         <div>
           <label style={lbl}>COST BASIS ($){isOpt && <span style={{ color:C.amber, marginLeft:4 }}>= contracts × premium × 100</span>}</label>
           <input value={cost} onChange={e=>setCost(e.target.value)} type="number"
@@ -1475,8 +1495,9 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: p.id, data:{ type:"position", account: groupId } });
   const [tip, setTip] = useState(false);
-  const isOpt = p.type !== "SHARES";
-  const label = isOpt ? `${p.ticker} $${p.strike}${(p.type||"")[0]}` : `${p.ticker}`;
+  const isOpt = p.type === "CALL" || p.type === "PUT";
+  const isCry = p.type === "CRYPTO" || isCrypto(p.ticker);
+  const label = isOpt ? `${displaySym(p.ticker)} $${p.strike}${(p.type||"")[0]}` : displaySym(p.ticker);
   return (
     <div ref={setNodeRef} className="pos-row"
       onClick={()=>onOpen&&onOpen(p.ticker)}
@@ -1491,7 +1512,7 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff }) {
         </span>
         <div style={{ display:"flex", flexDirection:"column", gap:2, minWidth:0 }}>
           <span style={{ fontWeight:700, fontFamily:"inherit" }}>{label}</span>
-          <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>{isOpt ? `${p.qty}x · exp ${p.expiry}` : `${p.qty} shares`}</span>
+          <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>{isOpt ? `${p.qty}x · exp ${p.expiry}` : isCry ? `${p.qty} units` : `${p.qty} shares`}</span>
         </div>
       </div>
       <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }}>${fmtNum(p.spot)}</div>
@@ -1846,7 +1867,7 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                 ) : activeDrag ? (
                   <div style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:10, padding:"10px 14px", boxShadow:"0 10px 30px rgba(0,0,0,0.35)", display:"flex", alignItems:"center", gap:10, fontFamily:C.mono }}>
                     <GripVertical size={14} color={C.cold}/>
-                    <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{activeDrag.type!=="SHARES" ? `${activeDrag.ticker} $${activeDrag.strike}${(activeDrag.type||"")[0]}` : activeDrag.ticker}</span>
+                    <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{(activeDrag.type==="CALL"||activeDrag.type==="PUT") ? `${displaySym(activeDrag.ticker)} $${activeDrag.strike}${(activeDrag.type||"")[0]}` : displaySym(activeDrag.ticker)}</span>
                     <span style={{ fontSize:12, color:(activeDrag.pnl||0)>=0?C.up:C.down }}>{(activeDrag.pnl||0)>=0?"+":""}{(activeDrag.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}</span>
                   </div>
                 ) : null}
@@ -2840,10 +2861,10 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Reorder the account folders themselves.
   const onReorderAccounts = (nextAccounts) => setAccounts(nextAccounts);
 
-  const addTicker    = (t)=>{ const T=t.toUpperCase().trim(); if(T) setWatchlist(w=>w.includes(T)?w:[...w,T]); };
+  const addTicker    = (t)=>{ const T=normalizeTicker(t); if(T) setWatchlist(w=>w.includes(T)?w:[...w,T]); };
   const removeTicker = (t)=> setWatchlist(w=>w.filter(x=>x!==t));
-  const toggleWatch  = (t)=> setWatchlist(w=>w.includes(t)?w.filter(x=>x!==t):[...w,t]);
-  const runSearch    = ()=>{ const T=query.toUpperCase().trim(); if(T) setDetail(T); };
+  const toggleWatch  = (t)=>{ const T=normalizeTicker(t); setWatchlist(w=>w.includes(T)?w.filter(x=>x!==T):[...w,T]); };
+  const runSearch    = ()=>{ const T=normalizeTicker(query); if(T) setDetail(T); };
   const onAlertNavigate = (link) => {
     if (!link) return;
     if (link.startsWith("ticker:")) { setDetail(link.slice(7)); }
@@ -2869,7 +2890,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           <div style={{ flex:"1 1 180px", maxWidth:420, position:"relative" }}>
             <Search size={15} color={C.faint} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)" }}/>
             <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&runSearch()}
-              placeholder="Research any ticker — e.g. NVDA, TSLA, COIN"
+              placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"
               style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 12px 8px 36px", color:C.ink, fontSize:13, outline:"none", fontFamily:"inherit" }}
               onFocus={e=>e.target.style.borderColor=C.cold} onBlur={e=>e.target.style.borderColor=C.line}/>
             {query && <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={14}/></button>}
@@ -2927,7 +2948,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                       <div key={t} onClick={()=>setDetail(t)} style={{ cursor:"pointer", display:"flex", alignItems:"center", gap:7, background:C.panel2, borderRadius:7, padding:"5px 12px" }}
                         onMouseEnter={e=>e.currentTarget.style.background=C.line}
                         onMouseLeave={e=>e.currentTarget.style.background=C.panel2}>
-                        <span style={{ fontWeight:700, fontSize:12.5, color:C.ink }}>{t}</span>
+                        <span style={{ fontWeight:700, fontSize:12.5, color:C.ink }}>{displaySym(t)}</span>
                         <span style={{ fontFamily:C.mono, fontSize:11, color:C.violet }}>in {cardCache[t].daysToEarn}d</span>
                       </div>
                     ))}
@@ -2965,12 +2986,12 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
 function AddInline({ onAdd }) {
   const [open,setOpen]=useState(false); const [val,setVal]=useState("");
-  if(!open) return <button onClick={()=>setOpen(true)} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 13px", color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12.5 }}><Plus size={14}/> Add stock</button>;
+  if(!open) return <button onClick={()=>setOpen(true)} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 13px", color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12.5 }}><Plus size={14}/> Add stock / crypto</button>;
   return (
     <div style={{ display:"flex", gap:6 }}>
       <input autoFocus value={val} onChange={e=>setVal(e.target.value)}
         onKeyDown={e=>{ if(e.key==="Enter"){onAdd(val);setVal("");setOpen(false);} if(e.key==="Escape")setOpen(false); }}
-        placeholder="Ticker…" style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:9, padding:"8px 11px", color:C.ink, fontSize:12.5, outline:"none", width:110, fontFamily:"inherit", textTransform:"uppercase" }}/>
+        placeholder="NVDA or BTC…" title="Stock ticker or crypto symbol (BTC, ETH, SOL…)" style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:9, padding:"8px 11px", color:C.ink, fontSize:12.5, outline:"none", width:120, fontFamily:"inherit", textTransform:"uppercase" }}/>
       <button onClick={()=>{onAdd(val);setVal("");setOpen(false);}} style={{ background:C.up, border:"none", borderRadius:9, padding:"8px 13px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:600 }}>Add</button>
       <button onClick={()=>setOpen(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 11px", color:C.faint, cursor:"pointer" }}><X size={14}/></button>
     </div>

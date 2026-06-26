@@ -1266,7 +1266,7 @@ function AlertsBell({ alertHistory = [], setAlertHistory, onNavigate }) {
 }
 
 // ── ADD-POSITION FORM ─────────────────────────────────────────────────
-function PositionForm({ initial, onSubmit, onClose }) {
+function PositionForm({ initial, onSubmit, onClose, accounts=[] }) {
   const editing = !!initial;
   const [type, setType]     = useState(initial?.type || "SHARES");
   const [ticker, setTicker] = useState(initial?.ticker || "");
@@ -1275,6 +1275,7 @@ function PositionForm({ initial, onSubmit, onClose }) {
   const [strike, setStrike] = useState(initial?.strike != null ? String(initial.strike) : "");
   const [expiry, setExpiry] = useState(initial?.expiry || "");
   const [stop, setStop]     = useState(initial?.stop != null ? String(initial.stop) : "");
+  const [account, setAccount] = useState(initial?.account || UNASSIGNED);
   const [error, setError]   = useState("");
   const isOpt = type !== "SHARES";
 
@@ -1284,7 +1285,8 @@ function PositionForm({ initial, onSubmit, onClose }) {
     if (!T) return setError("Ticker is required");
     if (!(q > 0)) return setError("Quantity must be greater than 0");
     if (cost === "" || isNaN(cb) || cb < 0) return setError("Cost basis (total $ paid) is required");
-    const pos = { ticker: T, type, qty: q, cost_basis: cb };
+    const pos = { ticker: T, type, qty: q, cost_basis: cb,
+                  account: account===UNASSIGNED ? null : account };
     if (isOpt) {
       const k = parseFloat(strike);
       if (!(k > 0)) return setError("Strike is required for options");
@@ -1326,6 +1328,13 @@ function PositionForm({ initial, onSubmit, onClose }) {
         {isOpt && <div><label style={lbl}>STRIKE</label><input value={strike} onChange={e=>setStrike(e.target.value)} type="number" placeholder="210" style={inp}/></div>}
         {isOpt && <div><label style={lbl}>EXPIRY</label><input value={expiry} onChange={e=>setExpiry(e.target.value)} type="date" style={inp}/></div>}
         <div><label style={lbl}>STOP LOSS ($)</label><input value={stop} onChange={e=>setStop(e.target.value)} type="number" placeholder="optional · underlying" style={inp}/></div>
+        <div>
+          <label style={lbl}>ACCOUNT</label>
+          <select value={account} onChange={e=>setAccount(e.target.value)} style={{ ...inp, cursor:"pointer" }}>
+            <option value={UNASSIGNED}>Unassigned</option>
+            {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
+          </select>
+        </div>
       </div>
       {error && <div style={{ color:C.down, fontSize:11.5, marginBottom:10, display:"flex", alignItems:"center", gap:5 }}><AlertCircle size={12}/> {error}</div>}
       <div style={{ display:"flex", gap:8 }}>
@@ -1525,14 +1534,22 @@ function PositionRow({ p, onOpen, onEdit, onRemove, onPayoff }) {
 // A collapsible account folder that is also a drag drop-target. Header shows a
 // color dot, name, position count, total value and total P&L. `dropId` is the
 // account id (or UNASSIGNED) used to route a dropped position.
-function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRename, onDelete, rowProps }) {
+function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRename, onDelete, rowProps,
+  cash=0, margin=0, marginRate=0, onSetFunds }) {
   const { setNodeRef, isOver } = useDroppable({ id: dropId });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft]     = useState(name);
+  const [fundsEdit, setFundsEdit] = useState(false);
+  const [cDraft, setCDraft]   = useState(String(cash||0));
+  const [mDraft, setMDraft]   = useState(String(margin||0));
+  const [rDraft, setRDraft]   = useState(String(marginRate||0));
   const count = items.length;
   const value = items.reduce((s,p)=>s+(p.current_val||0),0);
   const pnl   = items.reduce((s,p)=>s+(p.pnl||0),0);
   const removable = Boolean(onDelete);
+  const openFunds = (e)=>{ e.stopPropagation(); setCDraft(String(cash||0)); setMDraft(String(margin||0)); setRDraft(String(marginRate||0)); setFundsEdit(true); };
+  const saveFunds = ()=>{ onSetFunds && onSetFunds(dropId, { cash:parseFloat(cDraft)||0, margin:parseFloat(mDraft)||0, marginRate:parseFloat(rDraft)||0 }); setFundsEdit(false); };
+  const fi = { width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 7px", color:C.ink, fontSize:12.5, outline:"none", fontFamily:C.mono };
   return (
     <div ref={setNodeRef}
       style={{ background:C.panel, border:`1px solid ${isOver?color:C.line}`, borderRadius:12, marginBottom:12,
@@ -1571,6 +1588,27 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
       {/* Body */}
       {!collapsed && (
         <div style={{ borderTop:`1px solid ${C.line}` }}>
+          {/* Per-account cash & margin */}
+          {onSetFunds && (
+            <div style={{ padding:"9px 16px", borderBottom:`1px solid ${C.panel2}`, background:C.panel2+"55" }}>
+              {fundsEdit ? (
+                <div style={{ display:"flex", flexWrap:"wrap", gap:8, alignItems:"flex-end" }}>
+                  <div style={{ flex:"1 1 90px" }}><div style={{ fontSize:8, color:C.faint, marginBottom:2 }}>CASH $</div><input autoFocus value={cDraft} onChange={e=>setCDraft(e.target.value)} type="number" style={fi}/></div>
+                  <div style={{ flex:"1 1 90px" }}><div style={{ fontSize:8, color:C.faint, marginBottom:2 }}>MARGIN $</div><input value={mDraft} onChange={e=>setMDraft(e.target.value)} type="number" style={fi}/></div>
+                  <div style={{ flex:"0 1 70px" }}><div style={{ fontSize:8, color:C.faint, marginBottom:2 }}>RATE %</div><input value={rDraft} onChange={e=>setRDraft(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") saveFunds(); if(e.key==="Escape") setFundsEdit(false); }} type="number" style={fi}/></div>
+                  <button onClick={saveFunds} style={{ background:C.up, border:"none", borderRadius:6, padding:"6px 11px", color:"#06080d", fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Save</button>
+                  <button onClick={()=>setFundsEdit(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:6, padding:"6px 9px", color:C.sub, fontSize:11.5, cursor:"pointer" }}>Cancel</button>
+                </div>
+              ) : (
+                <div onClick={openFunds} title="Set cash & margin for this account"
+                  style={{ display:"flex", alignItems:"center", gap:14, cursor:"pointer", fontSize:11.5, color:C.sub, flexWrap:"wrap" }}>
+                  <span>💵 Cash <b style={{ color:(cash||0)>0?C.cold:C.faint, fontFamily:C.mono }}>${(Number(cash)||0).toLocaleString()}</b></span>
+                  <span>📉 Margin <b style={{ color:(margin||0)>0?C.amber:C.faint, fontFamily:C.mono }}>${(Number(margin)||0).toLocaleString()}</b>{(margin||0)>0 && <span style={{ color:C.faint }}> @ {marginRate||0}%</span>}</span>
+                  <Pencil size={11} color={C.faint}/>
+                </div>
+              )}
+            </div>
+          )}
           {count===0 ? (
             <div style={{ padding:"16px", fontSize:11.5, color:C.faint, textAlign:"center" }}>
               {isOver ? "Drop to add to this account" : "Drag positions here"}
@@ -1591,8 +1629,9 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
 }
 
 // ── PORTFOLIO (manual positions, Greeks, P&L; expired in an envelope) ───
-function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
-  accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onAssign }) {
+function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash,
+  totalCash=0, totalMargin=0, blendedRate=0, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
+  accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onAssign, onSetFunds }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
@@ -1641,62 +1680,6 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
     </div>
   );
 
-  const CashCard = () => {
-    const [edit, setEdit] = useState(false);
-    const [c, setC] = useState(String(cash||0));
-    const ip = { width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 7px", color:C.ink, fontSize:13, outline:"none", fontFamily:C.mono };
-    const totalWithCash = (a.total_value||0) + (cash||0);
-    if (edit) return (
-      <div style={{ flex:"1 1 200px", background:C.panel, border:`1px solid ${C.cold}66`, borderRadius:12, padding:"13px 16px" }}>
-        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:8 }}>CASH</div>
-        <div style={{ marginBottom:8 }}>
-          <div style={{ fontSize:8.5, color:C.faint, marginBottom:2 }}>BALANCE $</div>
-          <input value={c} onChange={e=>setC(e.target.value)} type="number" min="0" style={ip}/>
-        </div>
-        <div style={{ display:"flex", gap:6 }}>
-          <button onClick={()=>{ onCash(parseFloat(c)||0); setEdit(false); }} style={{ background:C.up, border:"none", borderRadius:7, padding:"6px 12px", color:"#06080d", fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Save</button>
-          <button onClick={()=>setEdit(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:7, padding:"6px 10px", color:C.sub, fontSize:11.5, cursor:"pointer" }}>Cancel</button>
-        </div>
-      </div>
-    );
-    return (
-      <div onClick={()=>{ setC(String(cash||0)); setEdit(true); }} title="Click to set cash balance"
-        style={{ flex:"1 1 180px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 18px", cursor:"pointer" }}>
-        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", display:"flex", justifyContent:"space-between", alignItems:"center" }}>CASH <Pencil size={11} color={C.faint}/></div>
-        <div style={{ fontFamily:C.mono, fontSize:24, fontWeight:700, color:(cash||0)>0?C.cold:C.ink, marginTop:4 }}>${(cash||0).toLocaleString()}</div>
-        <div style={{ fontSize:11, color:C.sub, marginTop:2 }}>{(cash||0)>0 ? `$${totalWithCash.toLocaleString()} total with portfolio` : "click to add cash"}</div>
-      </div>
-    );
-  };
-
-  const MarginCard = () => {
-    const [edit, setEdit] = useState(false);
-    const [m, setM] = useState(String(margin||0));
-    const [r, setR] = useState(String(marginRate||0));
-    const ip = { width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 7px", color:C.ink, fontSize:13, outline:"none", fontFamily:C.mono };
-    if (edit) return (
-      <div style={{ flex:"1 1 200px", background:C.panel, border:`1px solid ${C.amber}66`, borderRadius:12, padding:"13px 16px" }}>
-        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:8 }}>MARGIN</div>
-        <div style={{ display:"flex", gap:8, marginBottom:8 }}>
-          <div style={{ flex:1 }}><div style={{ fontSize:8.5, color:C.faint, marginBottom:2 }}>BALANCE $</div><input value={m} onChange={e=>setM(e.target.value)} type="number" style={ip}/></div>
-          <div style={{ flex:1 }}><div style={{ fontSize:8.5, color:C.faint, marginBottom:2 }}>RATE %</div><input value={r} onChange={e=>setR(e.target.value)} type="number" style={ip}/></div>
-        </div>
-        <div style={{ display:"flex", gap:6 }}>
-          <button onClick={()=>{ onMargin(parseFloat(m)||0, parseFloat(r)||0); setEdit(false); }} style={{ background:C.up, border:"none", borderRadius:7, padding:"6px 12px", color:"#06080d", fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Save</button>
-          <button onClick={()=>setEdit(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:7, padding:"6px 10px", color:C.sub, fontSize:11.5, cursor:"pointer" }}>Cancel</button>
-        </div>
-      </div>
-    );
-    return (
-      <div onClick={()=>{ setM(String(margin||0)); setR(String(marginRate||0)); setEdit(true); }} title="Click to set margin balance & rate"
-        style={{ flex:"1 1 180px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 18px", cursor:"pointer" }}>
-        <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", display:"flex", justifyContent:"space-between", alignItems:"center" }}>MARGIN <Pencil size={11} color={C.faint}/></div>
-        <div style={{ fontFamily:C.mono, fontSize:24, fontWeight:700, color:(margin||0)>0?C.amber:C.ink, marginTop:4 }}>${(margin||0).toLocaleString()}</div>
-        <div style={{ fontSize:11, color:C.sub, marginTop:2 }}>{margin>0 ? `${marginRate||0}% · $${num(a.margin_interest_daily,2)}/day` : "click to add margin"}</div>
-      </div>
-    );
-  };
-
   return (
     <div>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:16 }}>
@@ -1715,6 +1698,7 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         <PositionForm
           key={editing?.id || "new"}
           initial={editing}
+          accounts={accounts}
           onSubmit={(pos)=>{ if (editing) onUpdate(editing.id, pos); else onAdd(pos); }}
           onClose={()=>{ setEditing(null); setShowForm(false); }}
         />
@@ -1733,14 +1717,16 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
           <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:16 }}>
             <Stat label="TOTAL VALUE"  value={`$${(a.total_value||0).toLocaleString()}`} sub={`cost $${(a.total_cost||0).toLocaleString()}`}/>
             <Stat label="TOTAL P&L"    value={`${(a.total_pnl||0)>=0?"+":""}$${Math.abs(a.total_pnl||0).toLocaleString()}`} sub={`${((a.total_pnl_pct||0)*100).toFixed(1)}%`} col={pnlCol}/>
-            <Stat label="NET VALUE"    value={`$${(a.net_value ?? a.total_value ?? 0).toLocaleString()}`} sub={margin>0?"equity after margin":"= total value"}/>
+            <Stat label="NET VALUE"    value={`$${(a.net_value ?? a.total_value ?? 0).toLocaleString()}`} sub={totalMargin>0?"equity after margin":"= total value"}/>
             <Stat label="NET DELTA"    value={num(a.net_delta,0)} sub="share-equivalent exposure"/>
             <Stat label="DAILY THETA"  value={`$${num(a.daily_theta,0)}`} sub="time decay per day" col={(a.daily_theta||0)<0?C.down:C.sub}/>
-            <CashCard/>
-            <MarginCard/>
+            <Stat label="CASH"   value={`$${totalCash.toLocaleString()}`} col={totalCash>0?C.cold:C.ink}
+              sub={accounts.length ? "across all accounts" : "edit in account below"}/>
+            <Stat label="MARGIN" value={`$${totalMargin.toLocaleString()}`} col={totalMargin>0?C.amber:C.ink}
+              sub={totalMargin>0 ? `${blendedRate.toFixed(2)}% blended · $${num(a.margin_interest_daily,2)}/day` : "edit in account below"}/>
           </div>
 
-          <PortfolioAnalysis data={data} aiEnabled={aiEnabled} cash={cash} profile={profile}/>
+          <PortfolioAnalysis data={data} aiEnabled={aiEnabled} cash={totalCash} profile={profile}/>
 
           {/* Accounts — drag positions between collapsible buckets */}
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, flexWrap:"wrap", gap:8 }}>
@@ -1764,12 +1750,14 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
             <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onDragStart} onDragEnd={onDragEnd}>
               <AccountFolder dropId={UNASSIGNED} name="Unassigned" color={C.faint}
                 items={groups[UNASSIGNED]} collapsed={!!accountCollapsed[UNASSIGNED]}
-                onToggle={onToggleAccountCollapse} rowProps={rowProps}/>
+                onToggle={onToggleAccountCollapse} rowProps={rowProps}
+                cash={cash} margin={margin} marginRate={marginRate} onSetFunds={onSetFunds}/>
               {accounts.map(acc => (
                 <AccountFolder key={acc.id} dropId={acc.id} name={acc.name} color={acc.color}
                   items={groups[acc.id] || []} collapsed={!!accountCollapsed[acc.id]}
                   onToggle={onToggleAccountCollapse} onRename={onRenameAccount} onDelete={onDeleteAccount}
-                  rowProps={rowProps}/>
+                  rowProps={rowProps}
+                  cash={acc.cash} margin={acc.margin} marginRate={acc.marginRate} onSetFunds={onSetFunds}/>
               ))}
               <DragOverlay dropAnimation={{ duration:180 }}>
                 {activeDrag ? (
@@ -2657,15 +2645,25 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); if(!userId) saveSettingsServer({ margin:m, margin_rate:r }); };
   const onCash   = (c)=>{ setCash(c); };
 
+  // ── Combined cash & margin across all accounts (Unassigned uses the global
+  // cash/margin/marginRate; named accounts carry their own). These roll up to
+  // the top-of-page totals and drive a single blended-rate valuation call.
+  const totalCash   = (Number(cash)||0)   + accounts.reduce((s,a)=>s+(Number(a.cash)||0),0);
+  const totalMargin = (Number(margin)||0) + accounts.reduce((s,a)=>s+(Number(a.margin)||0),0);
+  const blendedRate = totalMargin>0
+    ? ((Number(margin)||0)*(Number(marginRate)||0)
+        + accounts.reduce((s,a)=>s+(Number(a.margin)||0)*(Number(a.marginRate)||0),0)) / totalMargin
+    : 0;
+
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
   const valuePortfolio = useCallback((list, m=0, r=0)=>{
     setPfErr(null); setPfLoading(true);
     fetchValue(list, m, r).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
   },[]);
-  // Re-value when positions' CONTENTS or the margin inputs change — not when merely reordered.
+  // Re-value when positions' CONTENTS or the combined margin/rate change — not when merely reordered.
   const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis,p.stop].join("|")).sort().join(",");
-  useEffect(()=>{ valuePortfolio(positionsRef.current, margin, marginRate); },[valSig, margin, marginRate, valuePortfolio]);
+  useEffect(()=>{ valuePortfolio(positionsRef.current, totalMargin, blendedRate); },[valSig, totalMargin, blendedRate, valuePortfolio]);
 
   // Merge portfolio + stop-hit alerts into persistent history whenever valuation updates
   useEffect(()=>{
@@ -2720,6 +2718,27 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       errored:(pf.errored||[]).map(p=>p.account===id?{...p,account:null}:p) } : pf);
   };
   const toggleAccountCollapse = (id) => setAccountCollapsed(m => ({ ...m, [id]: !m[id] }));
+  // Set cash / margin / marginRate for one account. UNASSIGNED maps to the global
+  // cash/margin/marginRate state (preserves pre-accounts data); named accounts store
+  // their own. All roll up into the combined totals + blended-rate valuation.
+  const setAccountFunds = (id, patch) => {
+    if (id===UNASSIGNED) {
+      if (patch.cash       != null) setCash(Number(patch.cash)||0);
+      const m = patch.margin     != null ? Number(patch.margin)||0     : margin;
+      const r = patch.marginRate != null ? Number(patch.marginRate)||0 : marginRate;
+      if (patch.margin != null || patch.marginRate != null) {
+        setMargin(m); setMarginRate(r);
+        if (!userId) saveSettingsServer({ margin:m, margin_rate:r });
+      }
+    } else {
+      setAccounts(a => a.map(x => x.id===id ? {
+        ...x,
+        ...(patch.cash       != null ? { cash:Number(patch.cash)||0 } : {}),
+        ...(patch.margin     != null ? { margin:Number(patch.margin)||0 } : {}),
+        ...(patch.marginRate != null ? { marginRate:Number(patch.marginRate)||0 } : {}),
+      } : x));
+    }
+  };
   // Move a position into an account (null/UNASSIGNED → Unassigned). Patches the
   // already-valued rows so the regroup is instant — no re-valuation needed.
   const assignPosition = (posId, accountId) => {
@@ -2843,7 +2862,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onAssign={assignPosition}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onAssign={assignPosition} onSetFunds={setAccountFunds}/>}
           {tab==="brief" && <BriefingRoom/>}
           {tab==="map" && <SectorMap watchlist={watchlist} cardCache={cardCache} onOpen={setDetail}/>}
         </div>

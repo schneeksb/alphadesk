@@ -1500,6 +1500,10 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
 
 // Shared grid + number formatter for the portfolio position rows / folders.
 const POS_GRID = "minmax(140px,2fr) minmax(60px,1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
+// Sum of the grid's min column widths. Rows carry this as minWidth and the folder
+// body scrolls horizontally below it — so on a phone the full P&L/Signal/actions
+// columns stay reachable by swiping instead of being clipped off-screen.
+const POS_MINW = 644;
 const fmtNum = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
 const POS_COLS = [
   {label:"Position", align:"left"},  {label:"Spot", align:"right"}, {label:"P&L", align:"right"},
@@ -1519,7 +1523,7 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff }) {
   return (
     <div ref={setNodeRef} className="pos-row"
       onClick={()=>onOpen&&onOpen(p.ticker)}
-      style={{ display:"grid", gridTemplateColumns:POS_GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity:isDragging?0.4:1, cursor:"pointer", background:"transparent",
+      style={{ display:"grid", gridTemplateColumns:POS_GRID, minWidth:POS_MINW, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity:isDragging?0.4:1, cursor:"pointer", background:"transparent",
         transform: CSS.Transform.toString(transform), transition }}
       onMouseEnter={e=>e.currentTarget.style.background=C.panel2} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
       <div style={{ display:"flex", alignItems:"center", gap:7, minWidth:0 }}>
@@ -1671,15 +1675,17 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
               {isOver ? "Drop to add to this account" : "Drag positions here"}
             </div>
           ) : (
-            <>
-              <div style={{ display:"grid", gridTemplateColumns:POS_GRID, padding:"8px 16px", fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>
+            // Horizontal scroll on narrow screens so the wide position table
+            // (P&L / Signal / actions) stays reachable instead of being clipped.
+            <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+              <div style={{ display:"grid", gridTemplateColumns:POS_GRID, minWidth:POS_MINW, padding:"8px 16px", fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>
                 {POS_COLS.map((c,i)=>(<div key={i} style={{ textAlign:c.align }}>{c.label}</div>))}
                 <div/>
               </div>
               <SortableContext items={items.map(p=>p.id)} strategy={verticalListSortingStrategy}>
                 {items.map(p => <PositionRow key={p.id} p={p} groupId={dropId} {...rowProps}/>)}
               </SortableContext>
-            </>
+            </div>
           )}
         </div>
       )}

@@ -11,9 +11,12 @@ button { touch-action: manipulation; }
 .pos-row:hover .pos-drag-handle { opacity: 1; }
 .acct-action { opacity: 0.45; transition: opacity .12s; }
 .acct-action:hover { opacity: 1; }
+.acct-drag-handle { opacity: 0.35; transition: opacity .12s; }
+.acct-drag-handle:hover { opacity: 1; }
 @media (hover: none), (pointer: coarse) {
   .pos-drag-handle { opacity: 0.85; }
   .acct-action { opacity: 0.85; }
+  .acct-drag-handle { opacity: 0.85; }
 }
 
 /* Show profile label on larger screens */

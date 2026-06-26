@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap, FolderPlus, Check } from "lucide-react";
-import { DndContext, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDraggable, useDroppable, closestCorners } from "@dnd-kit/core";
+import { DndContext, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDroppable, closestCorners } from "@dnd-kit/core";
+import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { authEnabled, supabase } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
 
@@ -1469,15 +1471,17 @@ const POS_COLS = [
 
 // A single draggable position row. The drag handle (six-dots) is the only grab
 // point, so clicking elsewhere on the row still opens the ticker detail.
-function PositionRow({ p, onOpen, onEdit, onRemove, onPayoff }) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: p.id, data:{ account: p.account ?? null } });
+function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: p.id, data:{ type:"position", account: groupId } });
   const [tip, setTip] = useState(false);
   const isOpt = p.type !== "SHARES";
   const label = isOpt ? `${p.ticker} $${p.strike}${(p.type||"")[0]}` : `${p.ticker}`;
   return (
     <div ref={setNodeRef} className="pos-row"
       onClick={()=>onOpen&&onOpen(p.ticker)}
-      style={{ display:"grid", gridTemplateColumns:POS_GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity:isDragging?0.4:1, cursor:"pointer", background:"transparent" }}
+      style={{ display:"grid", gridTemplateColumns:POS_GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity:isDragging?0.4:1, cursor:"pointer", background:"transparent",
+        transform: CSS.Transform.toString(transform), transition }}
       onMouseEnter={e=>e.currentTarget.style.background=C.panel2} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
       <div style={{ display:"flex", alignItems:"center", gap:7, minWidth:0 }}>
         <span className="pos-drag-handle" {...attributes} {...listeners}
@@ -1536,7 +1540,11 @@ function PositionRow({ p, onOpen, onEdit, onRemove, onPayoff }) {
 // account id (or UNASSIGNED) used to route a dropped position.
 function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRename, onDelete, rowProps,
   cash=0, margin=0, marginRate=0, onSetFunds }) {
-  const { setNodeRef, isOver } = useDroppable({ id: dropId });
+  const isUnassigned = dropId===UNASSIGNED;
+  // Outer node = sortable for reordering the account itself (Unassigned is pinned).
+  const sortable = useSortable({ id:`acct:${dropId}`, data:{ type:"account", accountId:dropId }, disabled:isUnassigned });
+  // Inner node = droppable target for positions dragged into this account.
+  const { setNodeRef:setDropRef, isOver } = useDroppable({ id: dropId });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft]     = useState(name);
   const [fundsEdit, setFundsEdit] = useState(false);
@@ -1551,12 +1559,22 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
   const saveFunds = ()=>{ onSetFunds && onSetFunds(dropId, { cash:parseFloat(cDraft)||0, margin:parseFloat(mDraft)||0, marginRate:parseFloat(rDraft)||0 }); setFundsEdit(false); };
   const fi = { width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 7px", color:C.ink, fontSize:12.5, outline:"none", fontFamily:C.mono };
   return (
-    <div ref={setNodeRef}
-      style={{ background:C.panel, border:`1px solid ${isOver?color:C.line}`, borderRadius:12, marginBottom:12,
-        boxShadow:isOver?`0 0 0 2px ${color}55 inset`:"none", transition:"box-shadow .12s, border-color .12s" }}>
+    <div ref={sortable.setNodeRef}
+      style={{ marginBottom:12, transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition,
+        opacity: sortable.isDragging ? 0.5 : 1 }}>
+      <div ref={setDropRef}
+        style={{ background:C.panel, border:`1px solid ${isOver?color:C.line}`, borderRadius:12,
+          boxShadow:isOver?`0 0 0 2px ${color}55 inset`:"none", transition:"box-shadow .12s, border-color .12s" }}>
       {/* Header */}
       <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 16px", cursor:"pointer" }}
         onClick={()=>!editing && onToggle(dropId)}>
+        {!isUnassigned && (
+          <span className="acct-drag-handle" {...sortable.attributes} {...sortable.listeners}
+            title="Drag to reorder accounts" onClick={e=>e.stopPropagation()}
+            style={{ display:"flex", alignItems:"center", cursor:"grab", touchAction:"none", flexShrink:0 }}>
+            <GripVertical size={13} color={C.faint}/>
+          </span>
+        )}
         <ChevronDown size={16} color={C.faint} style={{ transform: collapsed?"rotate(-90deg)":"none", transition:"transform .15s", flexShrink:0 }}/>
         <span style={{ width:10, height:10, borderRadius:"50%", background:color, flexShrink:0 }}/>
         {editing ? (
@@ -1619,11 +1637,14 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
                 {POS_COLS.map((c,i)=>(<div key={i} style={{ textAlign:c.align }}>{c.label}</div>))}
                 <div/>
               </div>
-              {items.map(p => <PositionRow key={p.id} p={p} {...rowProps}/>)}
+              <SortableContext items={items.map(p=>p.id)} strategy={verticalListSortingStrategy}>
+                {items.map(p => <PositionRow key={p.id} p={p} groupId={dropId} {...rowProps}/>)}
+              </SortableContext>
             </>
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -1631,7 +1652,7 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
 // ── PORTFOLIO (manual positions, Greeks, P&L; expired in an envelope) ───
 function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash,
   totalCash=0, totalMargin=0, blendedRate=0, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
-  accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onAssign, onSetFunds }) {
+  accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onReorderPositions, onReorderAccounts, onSetFunds }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
@@ -1661,14 +1682,68 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
     active.forEach(p => { const k = (p.account && map[p.account]) ? p.account : UNASSIGNED; map[k].push(p); });
     return map;
   },[active, accounts]);
-  const onDragStart = (e)=> setActiveDrag(active.find(p=>p.id===e.active.id) || null);
+  const onDragStart = (e)=>{
+    const t = e.active.data.current?.type;
+    if (t==="account") {
+      const acc = accounts.find(x=>`acct:${x.id}`===e.active.id);
+      setActiveDrag(acc ? { type:"account", name:acc.name, color:acc.color } : null);
+    } else {
+      const p = active.find(x=>x.id===e.active.id);
+      setActiveDrag(p ? { type:"position", ...p } : null);
+    }
+  };
+
+  // Reorder the named accounts when an account folder is dragged onto another.
+  const handleAccountReorder = (activeAcctId, overRaw) => {
+    let overAcct = null;
+    const o = String(overRaw);
+    if (o.startsWith("acct:")) overAcct = o.slice(5);
+    else if (o===UNASSIGNED || accounts.some(x=>x.id===o)) overAcct = o;
+    else { const op = active.find(p=>p.id===o); if (op) overAcct = op.account ?? UNASSIGNED; }
+    if (!overAcct || overAcct===UNASSIGNED) return;          // can't reorder relative to Unassigned
+    const from = accounts.findIndex(x=>x.id===activeAcctId);
+    const to   = accounts.findIndex(x=>x.id===overAcct);
+    if (from<0 || to<0 || from===to) return;
+    onReorderAccounts(arrayMove(accounts, from, to));
+  };
+
+  // Move a position: handles both reorder-within-account and move-across-accounts.
+  // Rebuilds the raw positions array (preserving expired/errored) and updates assignment.
+  const movePosition = (activeId, overRaw) => {
+    const arr = positions.map(p=>({ ...p }));
+    const from = arr.findIndex(p=>p.id===activeId);
+    if (from<0) return;
+    let over = String(overRaw);
+    if (over.startsWith("acct:")) over = over.slice(5);       // folder drop via outer sortable node
+    let targetAccount, anchorId = null;
+    if (over===UNASSIGNED || accounts.some(x=>x.id===over)) {
+      targetAccount = over===UNASSIGNED ? null : over;         // dropped on a folder (possibly empty)
+    } else {
+      const overPos = arr.find(p=>p.id===over);
+      if (!overPos) return;
+      targetAccount = overPos.account ?? null;                 // dropped on a row → that row's account
+      anchorId = over;
+    }
+    const moved = arr[from]; moved.account = targetAccount;
+    arr.splice(from, 1);
+    let insertAt;
+    if (anchorId) {
+      insertAt = arr.findIndex(p=>p.id===anchorId);
+      if (insertAt<0) insertAt = arr.length;
+    } else {
+      let last = -1; arr.forEach((p,i)=>{ if ((p.account ?? null)===targetAccount) last = i; });
+      insertAt = last>=0 ? last+1 : arr.length;
+    }
+    arr.splice(insertAt, 0, moved);
+    onReorderPositions(arr);
+  };
+
   const onDragEnd = (e)=>{
     setActiveDrag(null);
-    const overId = e.over?.id;
-    if (!overId) return;
-    const cur = e.active.data.current?.account ?? null;
-    const target = overId===UNASSIGNED ? null : overId;
-    if ((cur||null) !== (target||null)) onAssign(e.active.id, overId);
+    const { active:act, over } = e;
+    if (!over) return;
+    if (act.data.current?.type==="account") handleAccountReorder(act.data.current.accountId, over.id);
+    else movePosition(act.id, over.id);
   };
   const rowProps = { onOpen, onEdit:(p)=>{ setEditing(p); setShowForm(false); }, onRemove, onPayoff:setPayoff };
 
@@ -1748,19 +1823,27 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
             <div style={{ padding:"20px 16px", fontSize:12, color:C.faint, textAlign:"center", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, marginBottom:16 }}>All positions expired — see the envelope below.</div>
           ) : (
             <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onDragStart} onDragEnd={onDragEnd}>
-              <AccountFolder dropId={UNASSIGNED} name="Unassigned" color={C.faint}
-                items={groups[UNASSIGNED]} collapsed={!!accountCollapsed[UNASSIGNED]}
-                onToggle={onToggleAccountCollapse} rowProps={rowProps}
-                cash={cash} margin={margin} marginRate={marginRate} onSetFunds={onSetFunds}/>
-              {accounts.map(acc => (
-                <AccountFolder key={acc.id} dropId={acc.id} name={acc.name} color={acc.color}
-                  items={groups[acc.id] || []} collapsed={!!accountCollapsed[acc.id]}
-                  onToggle={onToggleAccountCollapse} onRename={onRenameAccount} onDelete={onDeleteAccount}
-                  rowProps={rowProps}
-                  cash={acc.cash} margin={acc.margin} marginRate={acc.marginRate} onSetFunds={onSetFunds}/>
-              ))}
+              <SortableContext items={[`acct:${UNASSIGNED}`, ...accounts.map(acc=>`acct:${acc.id}`)]} strategy={verticalListSortingStrategy}>
+                <AccountFolder dropId={UNASSIGNED} name="Unassigned" color={C.faint}
+                  items={groups[UNASSIGNED]} collapsed={!!accountCollapsed[UNASSIGNED]}
+                  onToggle={onToggleAccountCollapse} rowProps={rowProps}
+                  cash={cash} margin={margin} marginRate={marginRate} onSetFunds={onSetFunds}/>
+                {accounts.map(acc => (
+                  <AccountFolder key={acc.id} dropId={acc.id} name={acc.name} color={acc.color}
+                    items={groups[acc.id] || []} collapsed={!!accountCollapsed[acc.id]}
+                    onToggle={onToggleAccountCollapse} onRename={onRenameAccount} onDelete={onDeleteAccount}
+                    rowProps={rowProps}
+                    cash={acc.cash} margin={acc.margin} marginRate={acc.marginRate} onSetFunds={onSetFunds}/>
+                ))}
+              </SortableContext>
               <DragOverlay dropAnimation={{ duration:180 }}>
-                {activeDrag ? (
+                {activeDrag?.type==="account" ? (
+                  <div style={{ background:C.panel, border:`1px solid ${activeDrag.color||C.cold}`, borderRadius:10, padding:"12px 16px", boxShadow:"0 10px 30px rgba(0,0,0,0.35)", display:"flex", alignItems:"center", gap:10 }}>
+                    <GripVertical size={14} color={activeDrag.color||C.cold}/>
+                    <span style={{ width:10, height:10, borderRadius:"50%", background:activeDrag.color||C.cold }}/>
+                    <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>{activeDrag.name}</span>
+                  </div>
+                ) : activeDrag ? (
                   <div style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:10, padding:"10px 14px", boxShadow:"0 10px 30px rgba(0,0,0,0.35)", display:"flex", alignItems:"center", gap:10, fontFamily:C.mono }}>
                     <GripVertical size={14} color={C.cold}/>
                     <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{activeDrag.type!=="SHARES" ? `${activeDrag.ticker} $${activeDrag.strike}${(activeDrag.type||"")[0]}` : activeDrag.ticker}</span>
@@ -2739,15 +2822,23 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       } : x));
     }
   };
-  // Move a position into an account (null/UNASSIGNED → Unassigned). Patches the
-  // already-valued rows so the regroup is instant — no re-valuation needed.
-  const assignPosition = (posId, accountId) => {
-    const acct = (!accountId || accountId===UNASSIGNED) ? null : accountId;
-    const next = positions.map(p => p.id===posId ? { ...p, account:acct } : p);
-    setPositions(next); syncServer(next);
-    const patch = list => (list||[]).map(p => p.id===posId ? { ...p, account:acct } : p);
-    setPortfolio(pf => pf ? { ...pf, positions:patch(pf.positions), expired:patch(pf.expired), errored:patch(pf.errored) } : pf);
+  // Reorder/move positions: takes the fully-rebuilt raw positions array (new order +
+  // any changed account assignments) and mirrors that order + assignment onto the
+  // already-valued rows so the UI updates instantly without a re-valuation.
+  const onReorderPositions = (nextRaw) => {
+    setPositions(nextRaw); syncServer(nextRaw);
+    setPortfolio(pf => {
+      if (!pf) return pf;
+      const order = new Map(nextRaw.map((p,i)=>[p.id,i]));
+      const acct  = new Map(nextRaw.map(p=>[p.id, p.account ?? null]));
+      const fix = list => [...(list||[])]
+        .map(p => ({ ...p, account: acct.has(p.id) ? acct.get(p.id) : (p.account ?? null) }))
+        .sort((x,y)=>(order.get(x.id)??1e9)-(order.get(y.id)??1e9));
+      return { ...pf, positions:fix(pf.positions), expired:fix(pf.expired), errored:fix(pf.errored) };
+    });
   };
+  // Reorder the account folders themselves.
+  const onReorderAccounts = (nextAccounts) => setAccounts(nextAccounts);
 
   const addTicker    = (t)=>{ const T=t.toUpperCase().trim(); if(T) setWatchlist(w=>w.includes(T)?w:[...w,T]); };
   const removeTicker = (t)=> setWatchlist(w=>w.filter(x=>x!==t));
@@ -2862,7 +2953,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onAssign={assignPosition} onSetFunds={setAccountFunds}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds}/>}
           {tab==="brief" && <BriefingRoom/>}
           {tab==="map" && <SectorMap watchlist={watchlist} cardCache={cardCache} onOpen={setDetail}/>}
         </div>

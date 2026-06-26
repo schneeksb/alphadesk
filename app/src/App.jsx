@@ -2648,6 +2648,12 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
     return ()=>clearTimeout(sbTimer.current);
   },[positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, userId]);
 
+  // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
+  // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
+  // data lives only in their private, RLS-protected Supabase row. Only the anonymous/local
+  // single-user path (no userId) may use the server files.
+  const syncServer = (next)=>{ if(!userId) savePositionsServer(next); };
+
   const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); if(!userId) saveSettingsServer({ margin:m, margin_rate:r }); };
   const onCash   = (c)=>{ setCash(c); };
 
@@ -2673,8 +2679,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
     setAlertHistory(prev => mergeAlerts(prev, fresh));
   },[portfolio]);
 
-  // Every change updates state AND persists to the server so other browsers stay in sync.
-  const commit         = (next)=>{ setPositions(next); savePositionsServer(next); };
+  // Every change updates state AND (anonymous mode only) persists to the server.
+  const commit         = (next)=>{ setPositions(next); syncServer(next); };
   const addPosition    = (p)=> commit([...positions, { id:newId(), ...p }]);
   const updatePosition = (id, patch)=> commit(positions.map(p=> p.id===id ? { ...p, ...patch, id } : p));
   const removePosition = (id)=> commit(positions.filter(p=>p.id!==id));
@@ -2688,7 +2694,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const reorderPosition = (dragId, dropId) => {
     const next = reorderById(positions, dragId, dropId);
     if (!next) return;
-    setPositions(next); savePositionsServer(next);
+    setPositions(next); syncServer(next);
     setPortfolio(pf=>{ if(!pf) return pf; const np=reorderById(pf.positions||[], dragId, dropId); return np ? { ...pf, positions:np } : pf; });
   };
 
@@ -2707,7 +2713,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
     setAccounts(a => a.filter(x => x.id!==id));
     setAccountCollapsed(m => { const n={...m}; delete n[id]; return n; });
     const next = positions.map(p => p.account===id ? { ...p, account:null } : p);
-    setPositions(next); savePositionsServer(next);
+    setPositions(next); syncServer(next);
     setPortfolio(pf => pf ? { ...pf,
       positions:(pf.positions||[]).map(p=>p.account===id?{...p,account:null}:p),
       expired:(pf.expired||[]).map(p=>p.account===id?{...p,account:null}:p),
@@ -2719,7 +2725,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const assignPosition = (posId, accountId) => {
     const acct = (!accountId || accountId===UNASSIGNED) ? null : accountId;
     const next = positions.map(p => p.id===posId ? { ...p, account:acct } : p);
-    setPositions(next); savePositionsServer(next);
+    setPositions(next); syncServer(next);
     const patch = list => (list||[]).map(p => p.id===posId ? { ...p, account:acct } : p);
     setPortfolio(pf => pf ? { ...pf, positions:patch(pf.positions), expired:patch(pf.expired), errored:patch(pf.errored) } : pf);
   };

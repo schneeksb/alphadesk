@@ -37,7 +37,33 @@ VITE_SUPABASE_ANON_KEY=eyJ...your-anon-key...
 
 ## 5. Done
 With the vars set, the app shows a **Sign in with Google** screen; after login each user gets
-their own watchlist/portfolio/settings. Without the vars, the app runs exactly as before (no login).
+their own watchlist/portfolio/settings/accounts, synced across devices. Without the vars, the app
+runs exactly as before (no login, local-only).
 
-> Note: per-user data wiring (loading/saving each user's portfolio to their Supabase row) is the
-> follow-up step — ping me once Google login works and I'll connect it and we'll test together.
+## 6. ⚠️ Verify your data is actually private (do this once)
+
+Each user's financial data lives in one row of the `portfolios` table, keyed by their `user_id`.
+The frontend talks to Supabase with the **anon public** key. The ONLY thing stopping one user
+from reading another user's row is **Row-Level Security (RLS)**. `supabase/schema.sql` enables it,
+but you must confirm it's active:
+
+1. Supabase → **Authentication → Policies** (or **Database → Tables → portfolios → RLS**).
+2. Confirm **RLS is enabled** on `public.portfolios` and you see three policies:
+   `own portfolio select / insert / update`, each `auth.uid() = user_id`.
+3. If RLS shows **disabled** or there are no policies, re-run `supabase/schema.sql` in the SQL Editor.
+
+> If RLS is off, the anon key can read every row — anyone could see everyone's holdings.
+> This single setting is what enforces "only I can see my information." Treat it as required.
+
+Quick self-test: sign in as two different Google accounts (e.g. a second browser/incognito),
+add a position in each, and confirm neither sees the other's positions.
+
+## Security model (how isolation is enforced)
+- **Logged-in users:** all holdings/watchlist/accounts/cash/margin persist ONLY to that user's
+  private, RLS-protected Supabase row. The app never writes a logged-in user's data to the
+  backend's shared `positions.json` / `settings.json`.
+- **Anonymous / local mode** (no Supabase env vars): single-user, data in `localStorage` + the
+  backend's local `positions.json`. Intended for running AlphaDesk locally for yourself only —
+  do **not** expose that backend publicly with real holdings, since those files are unauthenticated.
+- **Never** put the Supabase `service_role` key in the frontend or any env var prefixed `VITE_`.
+  Only the `anon` public key belongs in the browser.

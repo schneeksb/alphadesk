@@ -5,6 +5,17 @@ body { background: #ffffff; font-family: 'Inter', system-ui, -apple-system, sans
 /* Mobile touch targets */
 button { touch-action: manipulation; }
 
+/* Portfolio drag handle: subtle until row hover on desktop; always visible on touch.
+   Account header rename/delete actions reveal on hover. */
+.pos-drag-handle { opacity: 0.28; transition: opacity .12s; }
+.pos-row:hover .pos-drag-handle { opacity: 1; }
+.acct-action { opacity: 0.45; transition: opacity .12s; }
+.acct-action:hover { opacity: 1; }
+@media (hover: none), (pointer: coarse) {
+  .pos-drag-handle { opacity: 0.85; }
+  .acct-action { opacity: 0.85; }
+}
+
 /* Show profile label on larger screens */
 @media (min-width: 500px) {
   .profile-label { display: inline !important; }

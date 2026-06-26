@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap } from "lucide-react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap, FolderPlus, Check } from "lucide-react";
+import { DndContext, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDraggable, useDroppable, closestCorners } from "@dnd-kit/core";
 import { authEnabled, supabase } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
 
@@ -63,6 +64,19 @@ const POS_KEY = "alphadesk:positions";
 const loadPositions = () => { try { return JSON.parse(localStorage.getItem(POS_KEY)) || []; } catch { return []; } };
 const savePositions = (l) => { try { localStorage.setItem(POS_KEY, JSON.stringify(l)); } catch {} };
 const newId = () => (typeof crypto!=="undefined" && crypto.randomUUID) ? crypto.randomUUID() : `p_${Math.random().toString(36).slice(2)}`;
+
+// ── ACCOUNT BUCKETS (drag-and-drop portfolio organization) ────────────
+// Each account = { id, name, color }. A position's `account` field (the
+// account id) records its assignment and rides along with the position in
+// every persistence layer. Accounts + collapsed state persist on their own.
+const ACCT_KEY = "alphadesk:accounts";
+const ACCT_COLLAPSE_KEY = "alphadesk:accountsCollapsed";
+const ACCOUNT_COLORS = ["#1c7ed6","#0ca678","#e8590c","#6741d9","#e03131","#e08a00","#0c8599","#ae3ec9","#2f9e44","#f03e3e"];
+const loadAccounts = () => { try { return JSON.parse(localStorage.getItem(ACCT_KEY)) || []; } catch { return []; } };
+const saveAccounts = (l) => { try { localStorage.setItem(ACCT_KEY, JSON.stringify(l)); } catch {} };
+const loadAccountCollapsed = () => { try { return JSON.parse(localStorage.getItem(ACCT_COLLAPSE_KEY)) || {}; } catch { return {}; } };
+const saveAccountCollapsed = (m) => { try { localStorage.setItem(ACCT_COLLAPSE_KEY, JSON.stringify(m)); } catch {} };
+const UNASSIGNED = "__unassigned__";
 
 // ── AI INSIGHTS TOGGLE PERSISTENCE ───────────────────────────────────
 const AI_KEY  = "alphadesk:ai";
@@ -1435,15 +1449,157 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
   );
 }
 
+// Shared grid + number formatter for the portfolio position rows / folders.
+const POS_GRID = "minmax(140px,2fr) minmax(60px,1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
+const fmtNum = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
+const POS_COLS = [
+  {label:"Position", align:"left"},  {label:"Spot", align:"right"}, {label:"P&L", align:"right"},
+  {label:"P&L %", align:"right"},    {label:"DTE", align:"right"},  {label:"Stop", align:"right"},
+  {label:"Signal", align:"right"},
+];
+
+// A single draggable position row. The drag handle (six-dots) is the only grab
+// point, so clicking elsewhere on the row still opens the ticker detail.
+function PositionRow({ p, onOpen, onEdit, onRemove, onPayoff }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: p.id, data:{ account: p.account ?? null } });
+  const [tip, setTip] = useState(false);
+  const isOpt = p.type !== "SHARES";
+  const label = isOpt ? `${p.ticker} $${p.strike}${(p.type||"")[0]}` : `${p.ticker}`;
+  return (
+    <div ref={setNodeRef} className="pos-row"
+      onClick={()=>onOpen&&onOpen(p.ticker)}
+      style={{ display:"grid", gridTemplateColumns:POS_GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity:isDragging?0.4:1, cursor:"pointer", background:"transparent" }}
+      onMouseEnter={e=>e.currentTarget.style.background=C.panel2} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+      <div style={{ display:"flex", alignItems:"center", gap:7, minWidth:0 }}>
+        <span className="pos-drag-handle" {...attributes} {...listeners}
+          title="Drag into an account" onClick={e=>e.stopPropagation()}
+          style={{ flexShrink:0, cursor:"grab", touchAction:"none", display:"flex", alignItems:"center" }}>
+          <GripVertical size={14} color={C.faint}/>
+        </span>
+        <div style={{ display:"flex", flexDirection:"column", gap:2, minWidth:0 }}>
+          <span style={{ fontWeight:700, fontFamily:"inherit" }}>{label}</span>
+          <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>{isOpt ? `${p.qty}x · exp ${p.expiry}` : `${p.qty} shares`}</span>
+        </div>
+      </div>
+      <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }}>${fmtNum(p.spot)}</div>
+      <div style={{ textAlign:"right", color:(p.pnl||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{(p.pnl||0)>=0?"+":""}{(p.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+      <div style={{ textAlign:"right", color:(p.pnl_pct||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{((p.pnl_pct||0)*100).toFixed(1)}%</div>
+      <div style={{ textAlign:"right", color:C.sub, fontFamily:C.mono, fontSize:12 }}>{p.dte??"—"}</div>
+      <div style={{ textAlign:"right" }}>
+        {p.stop!=null ? (
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end" }}>
+            <span style={{ color: p.stop_hit?C.down:C.ink }}>${p.stop}</span>
+            <span style={{ fontSize:8.5, fontWeight:700, color: p.stop_hit?C.down:C.up }}>{p.stop_hit?"HIT":`+${((p.stop_dist||0)*100).toFixed(0)}%`}</span>
+          </div>
+        ) : (
+          <span style={{ color:C.faint, fontSize:10 }} title="recommended stop">rec ${p.stop_rec ?? "—"}</span>
+        )}
+      </div>
+      <div style={{ position:"relative" }} onMouseEnter={()=>setTip(true)} onMouseLeave={()=>setTip(false)}>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:2, cursor:"default" }}>
+          <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.06em", color:recColor(p.rec||convictionToRec(p.conviction)) }}>{p.rec||convictionToRec(p.conviction)||"—"}</span>
+          {p.stage && <span style={{ fontSize:9, color:stageColor(p.stage), lineHeight:1.3, textAlign:"right" }}>{stageEmoji(p.stage)} {p.stage}</span>}
+          {p.conviction && <span style={{ fontSize:8.5, fontWeight:600, color:convictionColor(p.conviction), textTransform:"uppercase", letterSpacing:"0.03em" }}>{p.conviction}</span>}
+        </div>
+        {tip && (
+          <div style={{ position:"absolute", right:0, bottom:"100%", zIndex:100, background:C.panel2, border:`1px solid ${C.line}`, borderRadius:10, padding:"12px 14px", width:240, boxShadow:"0 8px 24px rgba(0,0,0,0.3)", pointerEvents:"none" }}>
+            {p.reason && <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.5, marginBottom:8, fontStyle:"italic" }}>{p.reason}</div>}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+              {p.trade_levels?.entry  && <div><div style={{ fontSize:8.5, color:C.faint }}>ENTRY</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.ink }}>${p.trade_levels.entry}</div></div>}
+              {p.trade_levels?.target && <div><div style={{ fontSize:8.5, color:C.faint }}>TARGET</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.up }}>${p.trade_levels.target}</div></div>}
+              {(p.stop||p.stop_rec) && <div><div style={{ fontSize:8.5, color:C.faint }}>STOP</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.down }}>${p.stop||p.stop_rec}</div></div>}
+              {p.trade_levels?.risk_reward && <div><div style={{ fontSize:8.5, color:C.faint }}>R:R</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.amber }}>{p.trade_levels.risk_reward}</div></div>}
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ display:"flex", gap:9, justifyContent:"flex-end", alignItems:"center" }}>
+        {isOpt && <button onClick={(e)=>{e.stopPropagation();onPayoff(p);}} title="Payoff diagram" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><LineChart size={13}/></button>}
+        <button onClick={(e)=>{e.stopPropagation();onEdit(p);}} title="Edit" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Pencil size={12}/></button>
+        <button onClick={(e)=>{e.stopPropagation();onRemove(p.id);}} title="Remove" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Trash2 size={13}/></button>
+      </div>
+    </div>
+  );
+}
+
+// A collapsible account folder that is also a drag drop-target. Header shows a
+// color dot, name, position count, total value and total P&L. `dropId` is the
+// account id (or UNASSIGNED) used to route a dropped position.
+function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRename, onDelete, rowProps }) {
+  const { setNodeRef, isOver } = useDroppable({ id: dropId });
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft]     = useState(name);
+  const count = items.length;
+  const value = items.reduce((s,p)=>s+(p.current_val||0),0);
+  const pnl   = items.reduce((s,p)=>s+(p.pnl||0),0);
+  const removable = Boolean(onDelete);
+  return (
+    <div ref={setNodeRef}
+      style={{ background:C.panel, border:`1px solid ${isOver?color:C.line}`, borderRadius:12, marginBottom:12,
+        boxShadow:isOver?`0 0 0 2px ${color}55 inset`:"none", transition:"box-shadow .12s, border-color .12s" }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 16px", cursor:"pointer" }}
+        onClick={()=>!editing && onToggle(dropId)}>
+        <ChevronDown size={16} color={C.faint} style={{ transform: collapsed?"rotate(-90deg)":"none", transition:"transform .15s", flexShrink:0 }}/>
+        <span style={{ width:10, height:10, borderRadius:"50%", background:color, flexShrink:0 }}/>
+        {editing ? (
+          <input autoFocus value={draft} onChange={e=>setDraft(e.target.value)} onClick={e=>e.stopPropagation()}
+            onKeyDown={e=>{ if(e.key==="Enter"){ onRename(dropId, draft); setEditing(false); } if(e.key==="Escape"){ setDraft(name); setEditing(false); } }}
+            style={{ background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"3px 8px", color:C.ink, fontSize:13.5, fontWeight:700, outline:"none", minWidth:0, flex:"0 1 220px" }}/>
+        ) : (
+          <span style={{ fontSize:13.5, fontWeight:700, color:C.ink, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{name}</span>
+        )}
+        <span style={{ fontSize:10.5, color:C.faint, background:C.panel2, borderRadius:20, padding:"1px 9px", flexShrink:0 }}>{count}</span>
+        <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:16, flexShrink:0 }}>
+          {editing ? (
+            <button onClick={e=>{ e.stopPropagation(); onRename(dropId, draft); setEditing(false); }} title="Save name"
+              style={{ background:"none", border:"none", color:C.up, cursor:"pointer", padding:0, display:"flex" }}><Check size={15}/></button>
+          ) : (
+            <>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:C.ink }}>${value.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+                <div style={{ fontFamily:C.mono, fontSize:10.5, fontWeight:700, color:pnl>=0?C.up:C.down }}>{pnl>=0?"+":""}${Math.abs(pnl).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+              </div>
+              {onRename && <button className="acct-action" onClick={e=>{ e.stopPropagation(); setDraft(name); setEditing(true); }} title="Rename account"
+                style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0, display:"flex" }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Pencil size={13}/></button>}
+              {removable && <button className="acct-action" onClick={e=>{ e.stopPropagation(); onDelete(dropId); }} title="Delete account (positions return to Unassigned)"
+                style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0, display:"flex" }} onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Trash2 size={13}/></button>}
+            </>
+          )}
+        </div>
+      </div>
+      {/* Body */}
+      {!collapsed && (
+        <div style={{ borderTop:`1px solid ${C.line}` }}>
+          {count===0 ? (
+            <div style={{ padding:"16px", fontSize:11.5, color:C.faint, textAlign:"center" }}>
+              {isOver ? "Drop to add to this account" : "Drag positions here"}
+            </div>
+          ) : (
+            <>
+              <div style={{ display:"grid", gridTemplateColumns:POS_GRID, padding:"8px 16px", fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>
+                {POS_COLS.map((c,i)=>(<div key={i} style={{ textAlign:c.align }}>{c.label}</div>))}
+                <div/>
+              </div>
+              {items.map(p => <PositionRow key={p.id} p={p} {...rowProps}/>)}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── PORTFOLIO (manual positions, Greeks, P&L; expired in an envelope) ───
-function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen }) {
+function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
+  accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onAssign }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
   const [payoff, setPayoff]           = useState(null);
-  const [sort, setSort]               = useState({ key:null, dir:null });
-  const [dragId, setDragId]           = useState(null);
-  const [tooltip, setTooltip]         = useState(null);
+  const [adding, setAdding]           = useState(false);   // "+ Add Account" inline input open
+  const [newName, setNewName]         = useState("");
+  const [activeDrag, setActiveDrag]   = useState(null);    // currently-dragged position (for overlay)
 
   const a       = data?.analytics || {};
   const active  = data?.positions || [];
@@ -1453,24 +1609,29 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
   const num = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
   const sectors = Object.entries(a.sector_alloc||{}).sort((x,y)=>y[1]-x[1]);
   const totalAlloc = sectors.reduce((s,[,v])=>s+v,0) || 1;
-  const GRID = "minmax(140px,2fr) minmax(60px,1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
-  const COLS = [
-    {key:"ticker",      label:"Position",  align:"left"},
-    {key:"spot",        label:"Spot",      align:"right"},
-    {key:"pnl",         label:"P&L",       align:"right"},
-    {key:"pnl_pct",     label:"P&L %",     align:"right"},
-    {key:"dte",         label:"DTE",       align:"right"},
-    {key:"stop",        label:"Stop",      align:"right"},
-    {key:"score",       label:"Signal",    align:"right"},
-  ];
-  const toggleSort = (key)=> setSort(s=> s.key!==key ? {key,dir:"desc"} : s.dir==="desc" ? {key,dir:"asc"} : {key:null,dir:null});
-  const sortVal = (p,key)=> key==="ticker" ? (p.ticker||"") : (p[key] ?? -Infinity);
-  const displayed = sort.key
-    ? [...active].sort((x,y)=>{ const xv=sortVal(x,sort.key), yv=sortVal(y,sort.key);
-        if (typeof xv==="string") return sort.dir==="asc" ? xv.localeCompare(yv) : yv.localeCompare(xv);
-        return sort.dir==="asc" ? xv-yv : yv-xv; })
-    : active;
-  const scoreColr  = (s)=> s==null?C.faint : s>=67?C.up : s>=40?C.amber : C.down;
+
+  // Drag-and-drop: pointer (desktop) + touch with long-press (mobile).
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint:{ distance:6 } }),
+    useSensor(TouchSensor,   { activationConstraint:{ delay:250, tolerance:8 } }),
+  );
+  // Group the valued active positions by account assignment (Unassigned first).
+  const groups = useMemo(()=>{
+    const map = { [UNASSIGNED]: [] };
+    accounts.forEach(acc => { map[acc.id] = []; });
+    active.forEach(p => { const k = (p.account && map[p.account]) ? p.account : UNASSIGNED; map[k].push(p); });
+    return map;
+  },[active, accounts]);
+  const onDragStart = (e)=> setActiveDrag(active.find(p=>p.id===e.active.id) || null);
+  const onDragEnd = (e)=>{
+    setActiveDrag(null);
+    const overId = e.over?.id;
+    if (!overId) return;
+    const cur = e.active.data.current?.account ?? null;
+    const target = overId===UNASSIGNED ? null : overId;
+    if ((cur||null) !== (target||null)) onAssign(e.active.id, overId);
+  };
+  const rowProps = { onOpen, onEdit:(p)=>{ setEditing(p); setShowForm(false); }, onRemove, onPayoff:setPayoff };
 
   const Stat = ({ label, value, sub, col }) => (
     <div style={{ flex:"1 1 180px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 18px" }}>
@@ -1581,93 +1742,58 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
 
           <PortfolioAnalysis data={data} aiEnabled={aiEnabled} cash={cash} profile={profile}/>
 
-          {/* Active positions */}
-          <div style={{ fontSize:11, color:C.faint, marginBottom:7 }}>{sort.key ? "Sorted — clear the sort (click the header again) to drag-reorder" : "Click a column to sort · drag the handle to reorder"}</div>
-          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, marginBottom:16 }}>
-           <div>
-            <div style={{ display:"grid", gridTemplateColumns:GRID, padding:"10px 16px", borderBottom:`1px solid ${C.line}`, fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>
-              {COLS.map((c)=>(
-                <div key={c.key} onClick={()=>toggleSort(c.key)} title="Sort"
-                  style={{ textAlign:c.align, cursor:"pointer", display:"flex", gap:3, alignItems:"center", justifyContent:c.align==="left"?"flex-start":"flex-end", color: sort.key===c.key?C.ink:C.faint, userSelect:"none" }}>
-                  {c.label}{sort.key===c.key && (sort.dir==="asc"?<ArrowUp size={10}/>:<ArrowDown size={10}/>)}
+          {/* Accounts — drag positions between collapsible buckets */}
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, flexWrap:"wrap", gap:8 }}>
+            <div style={{ fontSize:11, color:C.faint }}>Drag the handle (⋮⋮) to move a position into an account · on phone, long-press then drag</div>
+            {adding ? (
+              <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                <input autoFocus value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Account name"
+                  onKeyDown={e=>{ if(e.key==="Enter"){ onAddAccount(newName); setNewName(""); setAdding(false); } if(e.key==="Escape"){ setNewName(""); setAdding(false); } }}
+                  style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:8, padding:"6px 10px", color:C.ink, fontSize:12.5, outline:"none", width:170 }}/>
+                <button onClick={()=>{ onAddAccount(newName); setNewName(""); setAdding(false); }} style={{ background:C.up, border:"none", borderRadius:8, padding:"6px 11px", color:"#06080d", cursor:"pointer", fontSize:12, fontWeight:700 }}>Add</button>
+                <button onClick={()=>{ setNewName(""); setAdding(false); }} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:8, padding:"6px 9px", color:C.sub, cursor:"pointer", fontSize:12 }}>Cancel</button>
+              </div>
+            ) : (
+              <button onClick={()=>setAdding(true)} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"7px 12px", color:C.cold, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12.5, fontWeight:600 }}><FolderPlus size={14}/> Add Account</button>
+            )}
+          </div>
+
+          {active.length===0 && errored.length===0 ? (
+            <div style={{ padding:"20px 16px", fontSize:12, color:C.faint, textAlign:"center", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, marginBottom:16 }}>All positions expired — see the envelope below.</div>
+          ) : (
+            <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onDragStart} onDragEnd={onDragEnd}>
+              <AccountFolder dropId={UNASSIGNED} name="Unassigned" color={C.faint}
+                items={groups[UNASSIGNED]} collapsed={!!accountCollapsed[UNASSIGNED]}
+                onToggle={onToggleAccountCollapse} rowProps={rowProps}/>
+              {accounts.map(acc => (
+                <AccountFolder key={acc.id} dropId={acc.id} name={acc.name} color={acc.color}
+                  items={groups[acc.id] || []} collapsed={!!accountCollapsed[acc.id]}
+                  onToggle={onToggleAccountCollapse} onRename={onRenameAccount} onDelete={onDeleteAccount}
+                  rowProps={rowProps}/>
+              ))}
+              <DragOverlay dropAnimation={{ duration:180 }}>
+                {activeDrag ? (
+                  <div style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:10, padding:"10px 14px", boxShadow:"0 10px 30px rgba(0,0,0,0.35)", display:"flex", alignItems:"center", gap:10, fontFamily:C.mono }}>
+                    <GripVertical size={14} color={C.cold}/>
+                    <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{activeDrag.type!=="SHARES" ? `${activeDrag.ticker} $${activeDrag.strike}${(activeDrag.type||"")[0]}` : activeDrag.ticker}</span>
+                    <span style={{ fontSize:12, color:(activeDrag.pnl||0)>=0?C.up:C.down }}>{(activeDrag.pnl||0)>=0?"+":""}{(activeDrag.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}</span>
+                  </div>
+                ) : null}
+              </DragOverlay>
+            </DndContext>
+          )}
+
+          {/* Errored positions (couldn't be valued) */}
+          {errored.length>0 && (
+            <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, marginBottom:16, overflow:"hidden" }}>
+              {errored.map((p)=>(
+                <div key={p.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.down }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6 }}><AlertCircle size={12}/> {p.ticker} — couldn't load ({p.error})</div>
+                  <button onClick={()=>onRemove(p.id)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }}><Trash2 size={13}/></button>
                 </div>
               ))}
-              <div/>
             </div>
-            {active.length===0 && errored.length===0 && (
-              <div style={{ padding:"20px 16px", fontSize:12, color:C.faint, textAlign:"center" }}>All positions expired — see the envelope below.</div>
-            )}
-            {displayed.map((p)=>{
-              const isOpt = p.type !== "SHARES";
-              const label = isOpt ? `${p.ticker} $${p.strike}${(p.type||"")[0]}` : `${p.ticker}`;
-              const canDrag = !sort.key;
-              return (
-                <div key={p.id}
-                  draggable={canDrag}
-                  onDragStart={canDrag?(()=>setDragId(p.id)):undefined}
-                  onDragOver={canDrag?(e=>e.preventDefault()):undefined}
-                  onDrop={canDrag?(e=>{ e.preventDefault(); if(dragId && dragId!==p.id) onReorder(dragId,p.id); setDragId(null); }):undefined}
-                  onDragEnd={canDrag?(()=>setDragId(null)):undefined}
-                  onClick={()=>onOpen&&onOpen(p.ticker)}
-                  style={{ display:"grid", gridTemplateColumns:GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.ink, alignItems:"center", opacity: dragId===p.id?0.4:1, cursor:"pointer" }}
-                  onMouseEnter={e=>e.currentTarget.style.background=C.panel2} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                  <div style={{ display:"flex", alignItems:"center", gap:7, minWidth:0 }} onClick={()=>onOpen&&onOpen(p.ticker)}>
-                    {canDrag && <GripVertical size={13} color={C.faint} style={{ flexShrink:0, cursor:"grab" }}/>}
-                    <div style={{ display:"flex", flexDirection:"column", gap:2, minWidth:0, cursor:"pointer" }}>
-                      <span style={{ fontWeight:700, fontFamily:"inherit" }}>{label}</span>
-                      <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>{isOpt ? `${p.qty}x · exp ${p.expiry}` : `${p.qty} shares`}</span>
-                    </div>
-                  </div>
-                  <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }}>${num(p.spot)}</div>
-                  <div style={{ textAlign:"right", color:(p.pnl||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{(p.pnl||0)>=0?"+":""}{(p.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-                  <div style={{ textAlign:"right", color:(p.pnl_pct||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{((p.pnl_pct||0)*100).toFixed(1)}%</div>
-                  <div style={{ textAlign:"right", color:C.sub, fontFamily:C.mono, fontSize:12 }}>{p.dte??"—"}</div>
-                  <div style={{ textAlign:"right" }}>
-                    {p.stop!=null ? (
-                      <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end" }}>
-                        <span style={{ color: p.stop_hit?C.down:C.ink }}>${p.stop}</span>
-                        <span style={{ fontSize:8.5, fontWeight:700, color: p.stop_hit?C.down:C.up }}>{p.stop_hit?"HIT":`+${((p.stop_dist||0)*100).toFixed(0)}%`}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color:C.faint, fontSize:10 }} title="recommended stop">rec ${p.stop_rec ?? "—"}</span>
-                    )}
-                  </div>
-                  <div style={{ position:"relative" }}
-                    onMouseEnter={()=>setTooltip(p.id)}
-                    onMouseLeave={()=>setTooltip(null)}>
-                    <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:2, cursor:"default" }}>
-                      <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.06em", color:recColor(p.rec||convictionToRec(p.conviction)) }}>{p.rec||convictionToRec(p.conviction)||"—"}</span>
-                      {p.stage && <span style={{ fontSize:9, color:stageColor(p.stage), lineHeight:1.3, textAlign:"right" }}>{stageEmoji(p.stage)} {p.stage}</span>}
-                      {p.conviction && <span style={{ fontSize:8.5, fontWeight:600, color:convictionColor(p.conviction), textTransform:"uppercase", letterSpacing:"0.03em" }}>{p.conviction}</span>}
-                    </div>
-                    {tooltip===p.id && (
-                      <div style={{ position:"absolute", right:0, bottom:"100%", zIndex:100, background:C.panel2, border:`1px solid ${C.line}`, borderRadius:10, padding:"12px 14px", width:240, boxShadow:"0 8px 24px rgba(0,0,0,0.3)", pointerEvents:"none" }}>
-                        {p.reason && <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.5, marginBottom:8, fontStyle:"italic" }}>{p.reason}</div>}
-                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
-                          {p.trade_levels?.entry  && <div><div style={{ fontSize:8.5, color:C.faint }}>ENTRY</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.ink }}>${p.trade_levels.entry}</div></div>}
-                          {p.trade_levels?.target && <div><div style={{ fontSize:8.5, color:C.faint }}>TARGET</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.up }}>${p.trade_levels.target}</div></div>}
-                          {(p.stop||p.stop_rec) && <div><div style={{ fontSize:8.5, color:C.faint }}>STOP</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.down }}>${p.stop||p.stop_rec}</div></div>}
-                          {p.trade_levels?.risk_reward && <div><div style={{ fontSize:8.5, color:C.faint }}>R:R</div><div style={{ fontFamily:C.mono, fontSize:11.5, color:C.amber }}>{p.trade_levels.risk_reward}</div></div>}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ display:"flex", gap:9, justifyContent:"flex-end", alignItems:"center" }}>
-                    {isOpt && <button onClick={(e)=>{e.stopPropagation();setPayoff(p);}} title="Payoff diagram" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><LineChart size={13}/></button>}
-                    <button onClick={(e)=>{e.stopPropagation();setEditing(p);setShowForm(false);}} title="Edit" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Pencil size={12}/></button>
-                    <button onClick={(e)=>{e.stopPropagation();onRemove(p.id);}} title="Remove" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Trash2 size={13}/></button>
-                  </div>
-                </div>
-              );
-            })}
-            {errored.map((p)=>(
-              <div key={p.id} style={{ display:"grid", gridTemplateColumns:GRID, padding:"12px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, color:C.down, alignItems:"center" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:6, gridColumn:"1 / -2" }}><AlertCircle size={12}/> {p.ticker} — couldn't load ({p.error})</div>
-                <div style={{ display:"flex", justifyContent:"flex-end" }}><button onClick={()=>onRemove(p.id)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }}><Trash2 size={13}/></button></div>
-              </div>
-            ))}
-           </div>
-          </div>
+          )}
 
           {/* Expired envelope (closed by default) */}
           {expired.length>0 && (
@@ -2459,6 +2585,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [theme, setTheme]         = useState(loadTheme);
   const [aiEnabled, setAiEnabled]       = useState(loadAI);
   const [alertHistory, setAlertHistory] = useState(loadAlerts);
+  const [accounts, setAccounts]         = useState(loadAccounts);
+  const [accountCollapsed, setAccountCollapsed] = useState(loadAccountCollapsed);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
 
@@ -2468,6 +2596,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveAlerts(alertHistory); },[alertHistory]);
   useEffect(()=>{ saveAI(aiEnabled); },[aiEnabled]);
   useEffect(()=>{ if (profile) saveProfile(profile); },[profile]);
+  useEffect(()=>{ saveAccounts(accounts); },[accounts]);
+  useEffect(()=>{ saveAccountCollapsed(accountCollapsed); },[accountCollapsed]);
 
   // Keep-alive: ping the backend every 8 min so Render never cold-starts mid-session
   useEffect(()=>{
@@ -2484,7 +2614,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       sbLoad(userId).then(data=>{
         if (!data) {
           // New user row — push up whatever we have locally
-          sbSave(userId, { positions, watchlist, margin, marginRate, theme, aiEnabled });
+          sbSave(userId, { positions, watchlist, margin, marginRate, theme, aiEnabled, accounts, accountCollapsed });
           return;
         }
         if (data.positions?.length)  setPositions(data.positions);
@@ -2496,6 +2626,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.theme)              { setTheme(data.theme); applyTheme(data.theme); }
         if (data.aiEnabled != null)    setAiEnabled(data.aiEnabled);
         if (data.alertHistory?.length) setAlertHistory(data.alertHistory);
+        if (data.accounts)             setAccounts(data.accounts);
+        if (data.accountCollapsed)     setAccountCollapsed(data.accountCollapsed);
       }).catch(()=>{});
     } else {
       // Anonymous path: fall back to server positions.json + settings.json
@@ -2508,13 +2640,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory };
+  sbState.current = { positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, userId]);
+  },[positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, userId]);
 
   const onMargin = (m, r)=>{ setMargin(m); setMarginRate(r); if(!userId) saveSettingsServer({ margin:m, margin_rate:r }); };
   const onCash   = (c)=>{ setCash(c); };
@@ -2558,6 +2690,38 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
     if (!next) return;
     setPositions(next); savePositionsServer(next);
     setPortfolio(pf=>{ if(!pf) return pf; const np=reorderById(pf.positions||[], dragId, dropId); return np ? { ...pf, positions:np } : pf; });
+  };
+
+  // ── Account buckets ──────────────────────────────────────────────────
+  const addAccount = (name) => {
+    const nm = (name||"").trim(); if (!nm) return;
+    const color = ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length];
+    setAccounts(a => [...a, { id:newId(), name:nm, color }]);
+  };
+  const renameAccount = (id, name) => {
+    const nm = (name||"").trim(); if (!nm) return;
+    setAccounts(a => a.map(x => x.id===id ? { ...x, name:nm } : x));
+  };
+  const deleteAccount = (id) => {
+    // Drop the bucket and return its positions to Unassigned.
+    setAccounts(a => a.filter(x => x.id!==id));
+    setAccountCollapsed(m => { const n={...m}; delete n[id]; return n; });
+    const next = positions.map(p => p.account===id ? { ...p, account:null } : p);
+    setPositions(next); savePositionsServer(next);
+    setPortfolio(pf => pf ? { ...pf,
+      positions:(pf.positions||[]).map(p=>p.account===id?{...p,account:null}:p),
+      expired:(pf.expired||[]).map(p=>p.account===id?{...p,account:null}:p),
+      errored:(pf.errored||[]).map(p=>p.account===id?{...p,account:null}:p) } : pf);
+  };
+  const toggleAccountCollapse = (id) => setAccountCollapsed(m => ({ ...m, [id]: !m[id] }));
+  // Move a position into an account (null/UNASSIGNED → Unassigned). Patches the
+  // already-valued rows so the regroup is instant — no re-valuation needed.
+  const assignPosition = (posId, accountId) => {
+    const acct = (!accountId || accountId===UNASSIGNED) ? null : accountId;
+    const next = positions.map(p => p.id===posId ? { ...p, account:acct } : p);
+    setPositions(next); savePositionsServer(next);
+    const patch = list => (list||[]).map(p => p.id===posId ? { ...p, account:acct } : p);
+    setPortfolio(pf => pf ? { ...pf, positions:patch(pf.positions), expired:patch(pf.expired), errored:patch(pf.errored) } : pf);
   };
 
   const addTicker    = (t)=>{ const T=t.toUpperCase().trim(); if(T) setWatchlist(w=>w.includes(T)?w:[...w,T]); };
@@ -2673,7 +2837,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, margin, marginRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onAssign={assignPosition}/>}
           {tab==="brief" && <BriefingRoom/>}
           {tab==="map" && <SectorMap watchlist={watchlist} cardCache={cardCache} onOpen={setDetail}/>}
         </div>

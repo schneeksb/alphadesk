@@ -163,6 +163,14 @@ def layer1_data_valuation(portfolio=None):
     return results
 
 
+# Precious-metals tickers — ETFs + futures. Bucketed as one sector in analytics.
+_METAL_TICKERS = {
+    "GLD","IAU","SGOL","GLDM","BAR","OUNZ","AAAU","SLV","SIVR","PSLV","PPLT","PALL",
+    "GLTR","DBP","GDX","GDXJ","SIL","SILJ","RING","NUGT",
+    "GC=F","MGC=F","SI=F","SIL=F","PL=F","PA=F","HG=F",
+}
+
+
 def layer2_portfolio_analytics(positions):
     print("\n[L2] Portfolio analytics...")
     # Fast-path cache: well-known tickers skip an API call.
@@ -183,6 +191,8 @@ def layer2_portfolio_analytics(positions):
         ticker = p["ticker"]
         if p.get("type") == "CRYPTO" or ticker.endswith("-USD"):
             s = "Crypto"                       # crypto has no equity sector — bucket it together
+        elif ticker.upper() in _METAL_TICKERS:
+            s = "Precious Metals"              # gold/silver/platinum/palladium ETFs & futures
         else:
             if ticker not in sector_map and do_live_lookup:
                 try:

@@ -88,15 +88,33 @@ const CRYPTO_SYMBOLS = new Set(["BTC","ETH","SOL","XRP","DOGE","ADA","AVAX","LIN
   "PEPE","TON","ICP","HBAR","VET","AAVE","MKR","RNDR","IMX","GRT","ALGO","FTM","SAND","MANA","AXS",
   "CRO","QNT","STX","TIA","RUNE","FLOW","EGLD","XTZ","CHZ","ENJ","BTT","USDT","USDC","BNB","TRUMP"]);
 const isCrypto = (t="") => /-USD$/i.test(t);
-// Normalize user input to a yfinance symbol: a bare known-crypto symbol → "<SYM>-USD".
+
+// ── PRECIOUS METALS ───────────────────────────────────────────────────
+// Metal ETFs trade like stocks; futures ("<SYM>=F") approximate spot price.
+const METAL_ETFS = new Set(["GLD","IAU","SGOL","GLDM","BAR","OUNZ","AAAU","SLV","SIVR",
+  "PSLV","PPLT","PALL","GLTR","DBP","GDX","GDXJ","SIL","SILJ","RING","NUGT"]);
+const METAL_FUTURES = { "GC=F":"GOLD","MGC=F":"GOLD","SI=F":"SILVER","SIL=F":"SILVER",
+  "PL=F":"PLATINUM","PA=F":"PALLADIUM","HG=F":"COPPER" };
+// Friendly spot aliases → the yfinance futures symbol (avoids hijacking real
+// stock tickers like Barrick's "GOLD", so only explicit *SPOT/XAU forms resolve).
+const METAL_ALIASES = { GOLDSPOT:"GC=F", XAU:"GC=F", XAUUSD:"GC=F", SILVERSPOT:"SI=F",
+  XAG:"SI=F", XAGUSD:"SI=F", PLATINUMSPOT:"PL=F", PALLADIUMSPOT:"PA=F", COPPERSPOT:"HG=F" };
+const isMetal = (t="") => { const T=(t||"").toUpperCase(); return METAL_ETFS.has(T) || (T in METAL_FUTURES); };
+
+// Normalize user input to a yfinance symbol: bare known-crypto → "<SYM>-USD";
+// metal spot aliases → futures symbol; crypto pairs / futures pass through.
 const normalizeTicker = (input="") => {
   const T = (input||"").toUpperCase().trim();
   if (!T) return "";
-  if (T.includes("-")) return T;                 // already a pair / hyphenated symbol
+  if (METAL_ALIASES[T]) return METAL_ALIASES[T];   // GOLDSPOT -> GC=F
+  if (T.includes("-") || T.includes("=")) return T;// crypto pair / futures contract
   return CRYPTO_SYMBOLS.has(T) ? `${T}-USD` : T;
 };
-// Display form: strip the -USD suffix so the UI shows "BTC" instead of "BTC-USD".
-const displaySym = (t="") => isCrypto(t) ? t.replace(/-USD$/i, "") : t;
+// Display form: "BTC-USD"→"BTC", "GC=F"→"GOLD"; otherwise the ticker as-is.
+const displaySym = (t="") => {
+  if (isCrypto(t)) return t.replace(/-USD$/i, "");
+  return METAL_FUTURES[(t||"").toUpperCase()] || t;
+};
 
 // ── AI INSIGHTS TOGGLE PERSISTENCE ───────────────────────────────────
 const AI_KEY  = "alphadesk:ai";
@@ -1301,7 +1319,7 @@ function PositionForm({ initial, onSubmit, onClose, accounts=[] }) {
   const isCryptoT = type === "CRYPTO";
 
   const submit = () => {
-    let T = ticker.toUpperCase().trim();
+    let T = normalizeTicker(ticker);                        // resolve crypto / metal-spot aliases
     if (isCryptoT) T = T.includes("-") ? T : `${T}-USD`;   // force the yfinance pair
     const q = parseFloat(qty), cb = parseFloat(cost);
     if (!T) return setError("Ticker is required");
@@ -1334,7 +1352,7 @@ function PositionForm({ initial, onSubmit, onClose, accounts=[] }) {
         ))}
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))", gap:10, marginBottom:12 }}>
-        <div><label style={lbl}>TICKER{isCryptoT && <span style={{ color:C.cold, marginLeft:4 }}>BTC → BTC-USD</span>}</label><input value={ticker} onChange={e=>setTicker(e.target.value)} placeholder={isCryptoT?"BTC":"NVDA"} style={{ ...inp, textTransform:"uppercase" }}/></div>
+        <div><label style={lbl}>TICKER{isCryptoT && <span style={{ color:C.cold, marginLeft:4 }}>BTC → BTC-USD</span>}</label><input value={ticker} onChange={e=>setTicker(e.target.value)} placeholder={isCryptoT?"BTC":"NVDA, GLD, GC=F"} title={isCryptoT?"":"Stock, ETF (GLD/SLV), or metal spot (GC=F, or type GOLDSPOT)"} style={{ ...inp, textTransform:"uppercase" }}/></div>
         <div><label style={lbl}>QUANTITY</label><input value={qty} onChange={e=>setQty(e.target.value)} type="number" step="any" placeholder={isOpt?"contracts":isCryptoT?"units (fractional ok)":"shares"} style={inp}/></div>
         <div>
           <label style={lbl}>COST BASIS ($){isOpt && <span style={{ color:C.amber, marginLeft:4 }}>= contracts × premium × 100</span>}</label>
@@ -2986,12 +3004,12 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
 function AddInline({ onAdd }) {
   const [open,setOpen]=useState(false); const [val,setVal]=useState("");
-  if(!open) return <button onClick={()=>setOpen(true)} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 13px", color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12.5 }}><Plus size={14}/> Add stock / crypto</button>;
+  if(!open) return <button onClick={()=>setOpen(true)} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 13px", color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12.5 }}><Plus size={14}/> Add stock / crypto / metal</button>;
   return (
     <div style={{ display:"flex", gap:6 }}>
       <input autoFocus value={val} onChange={e=>setVal(e.target.value)}
         onKeyDown={e=>{ if(e.key==="Enter"){onAdd(val);setVal("");setOpen(false);} if(e.key==="Escape")setOpen(false); }}
-        placeholder="NVDA or BTC…" title="Stock ticker or crypto symbol (BTC, ETH, SOL…)" style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:9, padding:"8px 11px", color:C.ink, fontSize:12.5, outline:"none", width:120, fontFamily:"inherit", textTransform:"uppercase" }}/>
+        placeholder="NVDA, BTC, GLD…" title="Stock/ETF ticker, crypto (BTC, ETH…), or metal (GLD, GC=F, GOLDSPOT)" style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:9, padding:"8px 11px", color:C.ink, fontSize:12.5, outline:"none", width:130, fontFamily:"inherit", textTransform:"uppercase" }}/>
       <button onClick={()=>{onAdd(val);setVal("");setOpen(false);}} style={{ background:C.up, border:"none", borderRadius:9, padding:"8px 13px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:600 }}>Add</button>
       <button onClick={()=>setOpen(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 11px", color:C.faint, cursor:"pointer" }}><X size={14}/></button>
     </div>

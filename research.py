@@ -172,10 +172,19 @@ def technicals(ticker):
     except Exception:
         pass
 
-    is_crypto = ticker.upper().endswith("-USD")
+    _T = ticker.upper().strip()
+    is_crypto = _T.endswith("-USD")
+    _METAL_TICKERS = {
+        "GLD","IAU","SGOL","GLDM","BAR","OUNZ","AAAU","SLV","SIVR","PSLV","PPLT","PALL",
+        "GLTR","DBP","GDX","GDXJ","SIL","SILJ","RING","NUGT",
+        "GC=F","MGC=F","SI=F","SIL=F","PL=F","PA=F","HG=F",
+    }
+    sector = ("Crypto" if is_crypto else
+              "Precious Metals" if _T in _METAL_TICKERS else
+              info.get("sector", "—"))
     return {
         "name":       info.get("longName") or info.get("shortName") or ticker,
-        "sector":     "Crypto" if is_crypto else info.get("sector", "—"),
+        "sector":     sector,
         "mktCap":     mc_str,
         "spot":       round(spot, 2),
         "chg":        round(chg, 2),

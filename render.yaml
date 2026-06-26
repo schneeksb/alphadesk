@@ -12,7 +12,9 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false          # set this in the Render dashboard (do NOT commit your key)
-      - key: YT_API_KEY
-        sync: false          # YouTube Data API v3 key — set in Render dashboard (Market Pulse)
+      - key: SUPABASE_URL
+        sync: false          # https://<project>.supabase.co — Market Pulse reads market_pulse from here
+      - key: SUPABASE_ANON_KEY
+        sync: false          # anon PUBLIC key only (read-only via RLS) — NEVER the service_role key
       - key: PYTHON_VERSION
         value: "3.11.9"

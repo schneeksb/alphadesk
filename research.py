@@ -673,193 +673,76 @@ try:
 
     @app.get("/yt-insights")
     def yt_insights_endpoint():
-        """Market Pulse: RSS for recent video IDs/titles + YouTube Data API v3 for
-        description/tags, then Claude expands the thesis implied by the title.
-        Transcripts are NOT used — YouTube blocks timedtext from datacenter IPs."""
+        """Market Pulse: serve pre-processed insights from the Supabase
+        `market_pulse` table. YouTube blocks transcript fetching from datacenter
+        IPs (Render), so the heavy lifting runs locally via fetch_transcripts.py
+        on a residential IP; this endpoint just reads the cached results in
+        trust-weight order."""
+        import json as _json, urllib.request, datetime as _dt
+
+        SB_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+        SB_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
+        STALE_MSG = "Run fetch_transcripts.py to populate Market Pulse."
+
         def produce():
-            import json as _json, re as _re, urllib.request, urllib.parse
-            import xml.etree.ElementTree as _ET
-            from concurrent.futures import ThreadPoolExecutor, wait as _wait
+            if not SB_URL or not SB_KEY:
+                return {"analysts": [], "message": STALE_MSG,
+                        "error": "Supabase not configured on the backend (set SUPABASE_URL + SUPABASE_ANON_KEY)."}
 
-            # YouTube blocks transcript fetching (timedtext) from datacenter IPs like
-            # Render, but the Data API v3 and RSS feeds are NOT blocked. Approach:
-            #   RSS  -> recent video IDs + titles (free, no quota)
-            #   Data API videos.list -> full description + tags (1 unit/call, batched)
-            #   Claude -> expand the thesis implied by the title using market knowledge
-            YT_API_KEY = os.getenv("YT_API_KEY", "").strip()
+            url = f"{SB_URL}/rest/v1/market_pulse?select=*&order=weight.asc"
+            req = urllib.request.Request(url, headers={
+                "apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}", "Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    rows = _json.loads(r.read())
+            except Exception as e:
+                return {"analysts": [], "message": STALE_MSG, "error": f"market_pulse read failed: {e}"}
 
-            _YT_NS = {
-                "atom":  "http://www.w3.org/2005/Atom",
-                "yt":    "http://www.youtube.com/xml/schemas/2015",
-                "media": "http://search.yahoo.com/mrss/",
-            }
-            def _fetch_rss(channel_id):
-                url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=5) as r:   # tight 5s socket timeout
-                    return _ET.fromstring(r.read())
+            if not rows:                                   # table empty
+                return {"analysts": [], "message": STALE_MSG, "stale": True}
 
-            def _parse_entries(root):
-                entries = []
-                for entry in root.findall("atom:entry", _YT_NS)[:10]:
-                    vid   = entry.findtext("yt:videoId",  namespaces=_YT_NS) or ""
-                    title = entry.findtext("atom:title",  namespaces=_YT_NS) or ""
-                    pub   = (entry.findtext("atom:published", namespaces=_YT_NS) or "")[:10]
-                    link_el = entry.find("atom:link[@rel='alternate']", _YT_NS)
-                    link  = link_el.get("href") if link_el is not None else f"https://youtube.com/watch?v={vid}"
-                    raw   = entry.findtext("media:group/media:description", namespaces=_YT_NS) or ""
-                    desc  = _re.sub(r"<[^>]+>", "", raw).strip()
-                    combo = (title + " " + desc + " " + link).lower()
-                    is_short = "#short" in combo or "/shorts/" in link
-                    entries.append({"vid": vid, "title": title, "link": link,
-                                    "pub": pub, "desc": desc, "is_short": is_short})
-                return entries
-
-            def _fetch_video_meta(vids):
-                """Batch-fetch description + tags from YouTube Data API v3 (videos.list).
-                Costs 1 quota unit per call regardless of how many IDs (up to 50).
-                Returns {vid: {"description": str, "tags": [..]}}. {} if no key/error."""
-                vids = [v for v in vids if v]
-                if not YT_API_KEY or not vids:
-                    return {}
-                params = urllib.parse.urlencode({
-                    "part": "snippet",
-                    "id": ",".join(vids[:50]),
-                    "key": YT_API_KEY,
-                })
-                url = f"https://www.googleapis.com/youtube/v3/videos?{params}"
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            # Staleness: is the newest fetched_at older than 24h?
+            def _parse(ts):
                 try:
-                    with urllib.request.urlopen(req, timeout=6) as r:
-                        payload = _json.loads(r.read())
+                    return _dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
                 except Exception:
-                    return {}
-                out = {}
-                for item in payload.get("items", []):
-                    sn = item.get("snippet", {}) or {}
-                    out[item.get("id", "")] = {
-                        "description": (sn.get("description") or "").strip(),
-                        "tags": sn.get("tags") or [],
-                    }
-                return out
+                    return None
+            stamps = [s for s in (_parse(r.get("fetched_at")) for r in rows) if s]
+            newest = max(stamps) if stamps else None
+            now    = _dt.datetime.now(_dt.timezone.utc)
+            stale  = (newest is None) or ((now - newest).total_seconds() > 24 * 3600)
 
-            ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            by_id = {}
+            for row in rows:
+                by_id.setdefault(row.get("analyst_id"), []).append(row)
 
-            def _expand_thesis(analyst, v):
-                """Claude reads the title + tags + description (NO transcript — blocked on
-                Render) and expands the implied thesis using its market knowledge."""
-                tags = ", ".join(v.get("tags", [])[:15])
-                desc = (v.get("desc") or "")[:600]
-                prompt = (
-                    f"You are a market strategist interpreting a finance YouTube video for a "
-                    f"stock investor. You are given the video's title, tags, and description — "
-                    f"NOT a transcript. For this analyst the TITLE typically states the actual "
-                    f"thesis (e.g. 'Bonds are telling you where stocks rotate next' IS the call).\n\n"
-                    f"Analyst: {analyst['name']} — focus: {analyst['focus']}\n"
-                    f"Video title: {v['title']}\n"
-                    f"Tags: {tags or '(none)'}\n"
-                    f"Description (often mostly promo — ignore links, codes, and CTAs): {desc or '(none)'}\n\n"
-                    f"TASK: Infer the thesis the analyst is making and EXPAND it using your own "
-                    f"knowledge of current markets. Produce 2-3 concrete, actionable insights for "
-                    f"an investor — name the specific stocks, sectors, asset classes, rates, or "
-                    f"macro forces implied. Frame as: given the analyst said X, here is what that "
-                    f"means for investors. Be specific; do not restate the title verbatim.\n\n"
-                    f"Respond with JSON only, no markdown:\n"
-                    f'{{"insights": ["insight 1", "insight 2", "insight 3"], '
-                    f'"takeaway": "one sentence — the single most important implication for an investor", '
-                    f'"sentiment": "bullish" | "bearish" | "neutral"}}'
-                )
-                try:
-                    rsp = ai_client.messages.create(
-                        model="claude-haiku-4-5-20251001", max_tokens=450,
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-                    raw = rsp.content[0].text.strip()
-                    if raw.startswith("```"):
-                        raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
-                    data = _json.loads(raw)
-                except Exception:
-                    data = {}
-
-                points = [str(p).strip() for p in (data.get("insights") or []) if str(p).strip()]
-                if not points:
-                    points = [v["title"]]   # title alone is the thesis — never drop the video
-                sent = str(data.get("sentiment", "neutral")).lower()
-                if sent not in ("bullish", "bearish", "neutral"):
-                    sent = "neutral"
-                takeaway = str(data.get("takeaway", "")).strip() or points[0]
+            def _to_insight(row):
+                pts = [p.strip() for p in (row.get("insight_summary") or "").split("\n") if p.strip()]
                 return {
-                    "title": v["title"], "link": v["link"], "published": v["pub"],
-                    "source": "data-api",
-                    "points": points[:3],
-                    "summary": points[0],          # back-compat for older frontend
-                    "takeaway": takeaway,
-                    "sentiment": sent,
+                    "title":     row.get("video_title") or "",
+                    "link":      row.get("video_link") or "",
+                    "published": row.get("published_date") or "",
+                    "source":    "transcript",
+                    "points":    pts,
+                    "summary":   pts[0] if pts else (row.get("insight_summary") or ""),
+                    "takeaway":  row.get("key_takeaway") or "",
+                    "sentiment": row.get("sentiment") or "neutral",
                 }
 
-            # Per analyst: take the 2 most relevant recent uploads (Shorts first for
-            # analysts who post them), enrich with Data API metadata, expand each thesis.
-            TARGET = 2
+            analysts_out = [{
+                "id": a["id"], "name": a["name"], "label": a["label"], "weight": a["weight"],
+                "insights": [_to_insight(r) for r in by_id.get(a["id"], [])],
+            } for a in ANALYSTS]
 
-            def _process_analyst(analyst):
-                try:
-                    root = _fetch_rss(analyst["channel_id"])
-                except Exception as e:
-                    return {"id": analyst["id"], "name": analyst["name"],
-                            "label": analyst["label"], "weight": analyst["weight"],
-                            "error": f"RSS: {e}", "insights": []}
+            out = {"analysts": analysts_out,
+                   "fetched_at": newest.isoformat() if newest else None,
+                   "stale": stale}
+            if stale:
+                out["message"] = STALE_MSG
+            return _json_safe(out)
 
-                candidates = _parse_entries(root)
-                if analyst.get("shorts_first"):
-                    shorts = [c for c in candidates if c["is_short"]]
-                    others = [c for c in candidates if not c["is_short"]]
-                    candidates = shorts + others  # prioritize Shorts, keep rest as fallback
-
-                target = candidates[:TARGET]
-                if not target:
-                    return {"id": analyst["id"], "name": analyst["name"],
-                            "label": analyst["label"], "weight": analyst["weight"],
-                            "insights": []}
-
-                # One batched Data API call enriches all target videos with tags + full desc
-                meta = _fetch_video_meta([v["vid"] for v in target])
-                insights = []
-                for v in target:
-                    m = meta.get(v["vid"])
-                    if m:
-                        if m.get("description"):
-                            v["desc"] = m["description"]   # Data API desc is fuller than RSS
-                        v["tags"] = m.get("tags", [])
-                    insights.append(_expand_thesis(analyst, v))
-
-                return {"id": analyst["id"], "name": analyst["name"],
-                        "label": analyst["label"], "weight": analyst["weight"],
-                        "insights": insights}
-
-            # Run all 9 analysts in parallel but cap total wall-clock at 22s
-            # (leaves 8s buffer before Render's 30s request timeout)
-            results_map = {}
-            deadline = 22  # seconds
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                futures = {pool.submit(_process_analyst, a): a["id"] for a in ANALYSTS}
-                done, pending = _wait(list(futures), timeout=deadline)
-                for fut in pending:
-                    fut.cancel()
-                    aid = futures[fut]
-                    results_map[aid] = {"id": aid, "error": "timeout", "insights": []}
-                for fut in done:
-                    aid = futures[fut]
-                    try:
-                        results_map[aid] = fut.result()
-                    except Exception as e:
-                        results_map[aid] = {"id": aid, "error": str(e), "insights": []}
-
-            analysts_out = [results_map.get(a["id"], {"id": a["id"], "name": a["name"],
-                "label": a["label"], "weight": a["weight"], "insights": []}) for a in ANALYSTS]
-            return _json_safe({"analysts": analysts_out, "data_api": bool(YT_API_KEY)})
-
-        # Data API metadata + Claude thesis expansion is expensive — cache 6h, serve stale up to 24h.
-        return _cached_swr("yt-insights", produce, ttl=21600, stale_ttl=86400)
+        # Light cache so repeated UI hits don't re-query Supabase on every request.
+        return _cached_swr("yt-insights", produce, ttl=300, stale_ttl=86400)
 
     @app.get("/sectors")
     def sectors_endpoint():

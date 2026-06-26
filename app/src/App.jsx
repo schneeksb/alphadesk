@@ -2223,15 +2223,22 @@ function MarketPulsePanel({ refreshTick=0 }) {
           ))}
         </div>
       ) : !data?.analysts?.length ? (
-        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:"14px 18px", color:C.faint, fontSize:12 }}>
-          {data?.error || "Market Pulse unavailable — check backend logs."}
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:"14px 18px", color:C.sub, fontSize:12.5 }}>
+          {data?.message || data?.error || "Market Pulse unavailable — check backend logs."}
         </div>
       ) : (
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:12 }}>
-          {data.analysts.map((a, i) => (
-            <AnalystCard key={a.id || i} analyst={a} rank={i+1}/>
-          ))}
-        </div>
+        <>
+          {(data?.stale || data?.message) && (
+            <div style={{ background:`${C.amber}12`, border:`1px solid ${C.amber}44`, borderRadius:9, padding:"9px 13px", color:C.amber, fontSize:11.5, marginBottom:12, display:"flex", alignItems:"center", gap:7 }}>
+              <AlertCircle size={13}/> {data.message || "Insights are over 24h old."} {data.fetched_at && <span style={{ color:C.faint }}>· last updated {new Date(data.fetched_at).toLocaleString()}</span>}
+            </div>
+          )}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:12 }}>
+            {data.analysts.map((a, i) => (
+              <AnalystCard key={a.id || i} analyst={a} rank={i+1}/>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

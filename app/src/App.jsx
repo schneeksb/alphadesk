@@ -51,7 +51,9 @@ const applyTheme = (t) => {
   }
 };
 
-const DEFAULT_WATCHLIST = ["NVDA","MSFT","PLTR","GOOGL","AMD"];
+// First-time default watchlist: the Magnificent 7, the S&P 500 (SPY), and the
+// Mag 7 composite ETF (MAGS). New users start here before customizing.
+const DEFAULT_WATCHLIST = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","SPY","MAGS"];
 const WL_KEY = "alphadesk:watchlist";
 
 // ── PERSISTENCE (localStorage works in a real local app) ──────────────
@@ -313,6 +315,31 @@ function Sparkline({ data, w=120, h=32, color }) {
     </svg>
   );
 }
+// RSI zone color — consistent with the app: oversold = green (potential buy),
+// overbought = red, neutral = amber.
+const rsiColor = (v) => v==null ? C.faint : v < 30 ? C.up : v > 70 ? C.down : C.amber;
+const rsiLabel = (v) => v==null ? "" : v < 30 ? "oversold" : v > 70 ? "overbought" : "neutral";
+
+// Compact RSI(14) graph on a fixed 0–100 scale with 30/70 reference bands.
+// Falls back to nothing if there's no series (caller shows a colored number then).
+function RsiMini({ data, w=120, h=26 }) {
+  if (!Array.isArray(data) || data.length < 2) return null;
+  const last = data[data.length-1];
+  const col  = rsiColor(last);
+  const x = (i) => (i/(data.length-1)) * w;
+  const y = (v) => h - (Math.max(0,Math.min(100,v))/100) * h;
+  const line = data.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display:"block", width:"100%" }}>
+      {/* 70 / 30 reference bands */}
+      <rect x={0} y={0} width={w} height={y(70)} fill={C.down} opacity={0.05}/>
+      <rect x={0} y={y(30)} width={w} height={h-y(30)} fill={C.up} opacity={0.05}/>
+      <line x1={0} y1={y(70)} x2={w} y2={y(70)} stroke={C.down} strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
+      <line x1={0} y1={y(30)} x2={w} y2={y(30)} stroke={C.up}   strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
+      <polyline points={line} fill="none" stroke={col} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round"/>
+    </svg>
+  );
+}
 const RANGES = [
   { key:"1d",  label:"1D",  days:null },   // /chart 1d/5m
   { key:"1w",  label:"1W",  days:null },   // /chart 5d/1h (hourly bars)
@@ -430,10 +457,13 @@ function InteractiveChart({ data, dates, color, h=130 }) {
 
 
 // ── WATCHLIST CARD (fetches its own data) ─────────────────────────────
-function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
+function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range="1m" }) {
   const [d, setD]       = useState(null);
   const [err, setErr]   = useState(false);
-  const [sparkRange, setSparkRange] = useState("1m");
+  // Sparkline timeframe is driven by the shared watchlist control (range prop)
+  // but can still be overridden per-card; resyncs whenever the master changes.
+  const [sparkRange, setSparkRange] = useState(range);
+  useEffect(()=>{ setSparkRange(range); },[range]);
   useEffect(()=>{
     let alive = true;
     setD(null); setErr(false);
@@ -481,7 +511,7 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
         <div style={{ textAlign:"right" }}>
           {/* Always-visible signal: AI conviction when available, RSI-based fallback otherwise */}
           {aiEnabled && d.ai_error && d.ai_error !== "ai_disabled" ? (
-            <span style={{ fontSize:10, color:C.amber, fontWeight:600 }}>API error</span>
+            <span title={String(d.ai_error)} style={{ fontSize:10, color:C.amber, fontWeight:600, cursor:"help" }}>API error ⓘ</span>
           ) : d.stage ? (
             <>
               <div style={{ fontFamily:C.mono, fontSize:12, fontWeight:800, letterSpacing:"0.07em", color:recColor(convictionToRec(d.conviction)), marginBottom:2 }}>{convictionToRec(d.conviction)}</div>
@@ -489,9 +519,8 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
               {d.conviction && <div style={{ fontSize:9.5, color:convictionColor(d.conviction), marginTop:2, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.04em" }}>{d.conviction}</div>}
             </>
           ) : !aiEnabled && d.rsi ? (
-            <div style={{ fontFamily:C.mono, fontSize:12, fontWeight:800, letterSpacing:"0.07em",
-              color: d.rsi < 35 ? C.up : d.rsi > 70 ? C.down : C.amber }}>
-              {d.rsi < 35 ? "OVERSOLD" : d.rsi > 70 ? "OVERBOUGHT" : "HOLD"}
+            <div style={{ fontFamily:C.mono, fontSize:12, fontWeight:800, letterSpacing:"0.07em", color: rsiColor(d.rsi) }}>
+              {d.rsi < 30 ? "OVERSOLD" : d.rsi > 70 ? "OVERBOUGHT" : "HOLD"}
             </div>
           ) : aiEnabled ? (
             <span style={{ fontSize:10, color:C.faint }}>Analyzing…</span>
@@ -506,9 +535,14 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
           )}
         </div>
       </div>
-      {d.history && (
+      {d.history && (() => {
+        const slice = d.history.slice(-(SPARK_RANGES.find(r=>r.key===sparkRange)?.days||21));
+        // % change over the selected timeframe (first→last close in the slice)
+        const tfChg = slice.length>1 && slice[0] ? (slice[slice.length-1]/slice[0]-1)*100 : null;
+        const tfCol = tfChg==null ? C.faint : tfChg>=0 ? C.up : C.down;
+        return (
         <div style={{ marginTop:10 }} onClick={e => e.stopPropagation()}>
-          <div style={{ display:"flex", gap:1, marginBottom:4 }}>
+          <div style={{ display:"flex", gap:1, marginBottom:4, alignItems:"center" }}>
             {SPARK_RANGES.map(r => (
               <button key={r.key} onClick={()=>setSparkRange(r.key)}
                 style={{ background:sparkRange===r.key?C.line:"transparent", border:"none", borderRadius:4,
@@ -517,10 +551,16 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
                 {r.key.toUpperCase()}
               </button>
             ))}
+            {tfChg!=null && (
+              <span style={{ marginLeft:"auto", fontFamily:C.mono, fontSize:10.5, fontWeight:700, color:tfCol }}>
+                {tfChg>=0?"+":""}{tfChg.toFixed(1)}% <span style={{ color:C.faint, fontWeight:500 }}>{sparkRange.toUpperCase()}</span>
+              </span>
+            )}
           </div>
-          <Sparkline data={d.history.slice(-(SPARK_RANGES.find(r=>r.key===sparkRange)?.days||21))} h={30} color={d.chg>=0?C.up:C.down}/>
+          <Sparkline data={slice} h={30} color={tfCol}/>
         </div>
-      )}
+        );
+      })()}
 
       {/* 52-week range bar */}
       {d.week52High && d.week52Low && (
@@ -537,9 +577,30 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile }) {
         </div>
       )}
 
+      {/* RSI(14) — mini graph with 30/70 bands when history is available,
+          otherwise a readable colored 0–100 gauge. */}
+      {d.rsi != null && (
+        <div style={{ marginTop:9 }} title={`RSI ${d.rsi} · ${rsiLabel(d.rsi)}`}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
+            <span style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>RSI 14</span>
+            <span style={{ fontFamily:C.mono, fontSize:12.5, fontWeight:800, color:rsiColor(d.rsi) }}>
+              {d.rsi} <span style={{ fontSize:9, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.03em" }}>{rsiLabel(d.rsi)}</span>
+            </span>
+          </div>
+          {Array.isArray(d.rsi_history) && d.rsi_history.length > 1 ? (
+            <RsiMini data={d.rsi_history} h={24}/>
+          ) : (
+            <div style={{ height:6, background:C.line, borderRadius:3, position:"relative" }}>
+              <div style={{ position:"absolute", left:"30%", top:0, bottom:0, width:1, background:`${C.up}66` }}/>
+              <div style={{ position:"absolute", left:"70%", top:0, bottom:0, width:1, background:`${C.down}66` }}/>
+              <div style={{ position:"absolute", left:`calc(${Math.min(100,Math.max(0,d.rsi))}% - 1px)`, top:-2, width:3, height:10, borderRadius:2, background:rsiColor(d.rsi) }}/>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Chips */}
       <div style={{ display:"flex", gap:6, marginTop:9, flexWrap:"wrap" }}>
-        <span style={{ fontFamily:C.mono, fontSize:10, color:C.sub, background:C.panel2, padding:"2px 7px", borderRadius:4 }}>RSI {d.rsi}</span>
         {d.iv   && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber,  background:`${C.amber}14`,  padding:"2px 7px", borderRadius:4 }}>IV {d.iv}%</span>}
         {d.relVol >= 1.5 && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber, background:`${C.amber}14`, padding:"2px 7px", borderRadius:4 }}>{d.relVol}× vol</span>}
         {d.daysToEarn != null && d.daysToEarn <= 45 && <span style={{ fontFamily:C.mono, fontSize:10, color:C.violet, background:`${C.violet}14`, padding:"2px 7px", borderRadius:4 }}>Earn {d.daysToEarn}d</span>}
@@ -1499,16 +1560,16 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
 }
 
 // Shared grid + number formatter for the portfolio position rows / folders.
-const POS_GRID = "minmax(140px,2fr) minmax(60px,1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
+const POS_GRID = "minmax(140px,2fr) minmax(60px,1fr) minmax(76px,1.1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
 // Sum of the grid's min column widths. Rows carry this as minWidth and the folder
 // body scrolls horizontally below it — so on a phone the full P&L/Signal/actions
 // columns stay reachable by swiping instead of being clipped off-screen.
-const POS_MINW = 644;
+const POS_MINW = 720;
 const fmtNum = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
 const POS_COLS = [
-  {label:"Position", align:"left"},  {label:"Spot", align:"right"}, {label:"P&L", align:"right"},
-  {label:"P&L %", align:"right"},    {label:"DTE", align:"right"},  {label:"Stop", align:"right"},
-  {label:"Signal", align:"right"},
+  {label:"Position", align:"left"},  {label:"Spot", align:"right"}, {label:"Today", align:"right"},
+  {label:"P&L", align:"right"},      {label:"P&L %", align:"right"},{label:"DTE", align:"right"},
+  {label:"Stop", align:"right"},     {label:"Signal", align:"right"},
 ];
 
 // A single draggable position row. The drag handle (six-dots) is the only grab
@@ -1538,6 +1599,14 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff }) {
         </div>
       </div>
       <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }}>${fmtNum(p.spot)}</div>
+      <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }} title="Today's change">
+        {p.day_change==null ? <span style={{ color:C.faint }}>—</span> : (
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", lineHeight:1.25 }}>
+            <span style={{ color:(p.day_change||0)>=0?C.up:C.down }}>{(p.day_change||0)>=0?"+":"−"}${Math.abs(p.day_change||0).toLocaleString(undefined,{maximumFractionDigits:0})}</span>
+            <span style={{ fontSize:9, color:(p.day_change||0)>=0?C.up:C.down }}>{((p.day_change_pct||0)*100)>=0?"+":""}{((p.day_change_pct||0)*100).toFixed(1)}%</span>
+          </div>
+        )}
+      </div>
       <div style={{ textAlign:"right", color:(p.pnl||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{(p.pnl||0)>=0?"+":""}{(p.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
       <div style={{ textAlign:"right", color:(p.pnl_pct||0)>=0?C.up:C.down, fontFamily:C.mono, fontSize:12 }}>{((p.pnl_pct||0)*100).toFixed(1)}%</div>
       <div style={{ textAlign:"right", color:C.sub, fontFamily:C.mono, fontSize:12 }}>{p.dte??"—"}</div>
@@ -1597,6 +1666,7 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
   const count = items.length;
   const value = items.reduce((s,p)=>s+(p.current_val||0),0);
   const pnl   = items.reduce((s,p)=>s+(p.pnl||0),0);
+  const dayChg = items.reduce((s,p)=>s+(p.day_change||0),0);
   const removable = Boolean(onDelete);
   const openFunds = (e)=>{ e.stopPropagation(); setCDraft(String(cash||0)); setMDraft(String(margin||0)); setRDraft(String(marginRate||0)); setFundsEdit(true); };
   const saveFunds = ()=>{ onSetFunds && onSetFunds(dropId, { cash:parseFloat(cDraft)||0, margin:parseFloat(mDraft)||0, marginRate:parseFloat(rDraft)||0 }); setFundsEdit(false); };
@@ -1636,7 +1706,10 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
             <>
               <div style={{ textAlign:"right" }}>
                 <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:C.ink }}>${value.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-                <div style={{ fontFamily:C.mono, fontSize:10.5, fontWeight:700, color:pnl>=0?C.up:C.down }}>{pnl>=0?"+":""}${Math.abs(pnl).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+                <div style={{ display:"flex", gap:8, justifyContent:"flex-end", fontFamily:C.mono, fontSize:10.5, fontWeight:700 }}>
+                  {count>0 && <span style={{ color:dayChg>=0?C.up:C.down }} title="Today's change">{dayChg>=0?"+":"−"}${Math.abs(dayChg).toLocaleString(undefined,{maximumFractionDigits:0})} today</span>}
+                  <span style={{ color:pnl>=0?C.up:C.down }} title="Total P&L">{pnl>=0?"+":""}${Math.abs(pnl).toLocaleString(undefined,{maximumFractionDigits:0})}</span>
+                </div>
               </div>
               {onRename && <button className="acct-action" onClick={e=>{ e.stopPropagation(); setDraft(name); setEditing(true); }} title="Rename account"
                 style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0, display:"flex" }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Pencil size={13}/></button>}
@@ -1836,9 +1909,12 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         <>
           <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:16 }}>
             <Stat label="TOTAL VALUE"  value={`$${(a.total_value||0).toLocaleString()}`} sub={`cost $${(a.total_cost||0).toLocaleString()}`}/>
+            <Stat label="TODAY'S CHANGE"
+              value={`${(a.daily_change||0)>=0?"+":"−"}$${Math.abs(a.daily_change||0).toLocaleString(undefined,{maximumFractionDigits:0})}`}
+              sub={`${((a.daily_change_pct||0)*100)>=0?"+":""}${((a.daily_change_pct||0)*100).toFixed(2)}% today`}
+              col={(a.daily_change||0)>=0?C.up:C.down}/>
             <Stat label="TOTAL P&L"    value={`${(a.total_pnl||0)>=0?"+":""}$${Math.abs(a.total_pnl||0).toLocaleString()}`} sub={`${((a.total_pnl_pct||0)*100).toFixed(1)}%`} col={pnlCol}/>
             <Stat label="NET VALUE"    value={`$${(a.net_value ?? a.total_value ?? 0).toLocaleString()}`} sub={totalMargin>0?"equity after margin":"= total value"}/>
-            <Stat label="NET DELTA"    value={num(a.net_delta,0)} sub="share-equivalent exposure"/>
             <Stat label="DAILY THETA"  value={`$${num(a.daily_theta,0)}`} sub="time decay per day" col={(a.daily_theta||0)<0?C.down:C.sub}/>
             <Stat label="CASH"   value={`$${totalCash.toLocaleString()}`} col={totalCash>0?C.cold:C.ink}
               sub={accounts.length ? "across all accounts" : "edit in account below"}/>
@@ -2642,14 +2718,23 @@ function TraderProfileModal({ profile, onSave, onClose }) {
 // ── SETTINGS (theme + account) ────────────────────────────────────────
 function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled, userEmail, onProfileOpen }) {
   const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState({ top: 0, right: 14 });
+  const btnRef = useRef(null);
   const email = userEmail;
+  const handleToggle = () => {
+    if (!open && btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      setDropPos({ top: r.bottom + 8, right: Math.max(14, window.innerWidth - r.right) });
+    }
+    setOpen(o => !o);
+  };
   return (
     <div style={{ position:"relative", flexShrink:0 }}>
-      <button onClick={()=>setOpen(o=>!o)} title="Settings" style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 9px", color:open?C.ink:C.sub, cursor:"pointer", display:"flex" }}><Settings size={15}/></button>
+      <button ref={btnRef} onClick={handleToggle} title="Settings" style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 9px", color:open?C.ink:C.sub, cursor:"pointer", display:"flex" }}><Settings size={15}/></button>
       {open && (
         <>
           <div onClick={()=>setOpen(false)} style={{ position:"fixed", inset:0, zIndex:40 }}/>
-          <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:240, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.4)", zIndex:50, padding:"12px 14px" }}>
+          <div style={{ position:"fixed", top:dropPos.top, right:dropPos.right, width:240, maxWidth:"calc(100vw - 28px)", maxHeight:"calc(100dvh - 120px)", overflowY:"auto", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, boxShadow:"0 14px 44px rgba(0,0,0,0.4)", zIndex:50, padding:"12px 14px" }}>
             <div style={{ marginBottom:14, paddingBottom:14, borderBottom:`1px solid ${C.line}` }}>
               <div style={{ fontSize:10, color:C.faint, letterSpacing:"0.08em", marginBottom:9 }}>TRADER PROFILE</div>
               <button onClick={()=>{ setOpen(false); onProfileOpen(); }}
@@ -2903,6 +2988,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
     else if (link === "macro")      { setDetail(null); setTab("brief"); }
   };
   const [wlDrag, setWlDrag] = useState(null);
+  const [wlRange, setWlRange] = useState("1m");   // shared sparkline timeframe for all watchlist cards
   const reorderWatch = (from, to)=> setWatchlist(w=>{ const a=[...w]; const [m]=a.splice(from,1); a.splice(to,0,m); return a; });
 
   // Collect card data as WatchCards finish loading (for the earnings strip)
@@ -2934,19 +3020,21 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                   color:      !detail && tab===id ? C.ink  : C.sub }}>{label}</button>
             ))}
           </div>
-          <AlertsBell alertHistory={alertHistory} setAlertHistory={setAlertHistory} onNavigate={onAlertNavigate}/>
-          {profile && (
-            <div onClick={()=>setShowProfile(true)} title="Edit Trader Profile" style={{ display:"flex", alignItems:"center", gap:6, background:C.panel, border:`1px solid ${C.line}`, borderRadius:8, padding:"5px 10px", cursor:"pointer", flexShrink:0 }}>
-              <span style={{ fontSize:10.5, color:C.cold, fontWeight:700 }}>
-                {({conservative:"🛡️",moderate:"⚖️",aggressive:"⚡",degen:"🔥"}[profile.riskTolerance]||"👤")}
-              </span>
-              <span style={{ fontSize:10.5, color:C.sub, whiteSpace:"nowrap", display:"none", minWidth:0 }} className="profile-label">
-                {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"?")} · {({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day"}[profile.style]||"?")}
-              </span>
-            </div>
-          )}
-          {showProfile && <TraderProfileModal profile={profile} onSave={p=>{ setProfile(p); }} onClose={()=>setShowProfile(false)}/>}
-          <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled} userEmail={userEmail} onProfileOpen={()=>setShowProfile(true)}/>
+          <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, marginLeft:"auto" }}>
+            {profile && (
+              <div onClick={()=>setShowProfile(true)} title="Edit Trader Profile" style={{ display:"flex", alignItems:"center", gap:6, background:C.panel, border:`1px solid ${C.line}`, borderRadius:8, padding:"5px 10px", cursor:"pointer" }}>
+                <span style={{ fontSize:10.5, color:C.cold, fontWeight:700 }}>
+                  {({conservative:"🛡️",moderate:"⚖️",aggressive:"⚡",degen:"🔥"}[profile.riskTolerance]||"👤")}
+                </span>
+                <span style={{ fontSize:10.5, color:C.sub, whiteSpace:"nowrap", display:"none", minWidth:0 }} className="profile-label">
+                  {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"?")} · {({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day"}[profile.style]||"?")}
+                </span>
+              </div>
+            )}
+            {showProfile && <TraderProfileModal profile={profile} onSave={p=>{ setProfile(p); }} onClose={()=>setShowProfile(false)}/>}
+            <SettingsMenu theme={theme} setTheme={setTheme} aiEnabled={aiEnabled} setAiEnabled={setAiEnabled} userEmail={userEmail} onProfileOpen={()=>setShowProfile(true)}/>
+            <AlertsBell alertHistory={alertHistory} setAlertHistory={setAlertHistory} onNavigate={onAlertNavigate}/>
+          </div>
         </div>
       </div>
       <MacroRibbon/>
@@ -2963,7 +3051,25 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                   <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>My Watchlist</div>
                   <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>{watchlist.length} stocks · live data · tap to open · drag to reorder</div>
                 </div>
-                <AddInline onAdd={addTicker}/>
+                <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+                  {/* Master timeframe — sets the sparkline range on every card at once */}
+                  {watchlist.length>0 && (
+                    <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                      <span style={{ fontSize:10, color:C.faint, letterSpacing:"0.05em" }}>CHART</span>
+                      <div style={{ display:"flex", gap:1, background:C.panel, borderRadius:8, padding:2, border:`1px solid ${C.line}` }}>
+                        {SPARK_RANGES.map(r => (
+                          <button key={r.key} onClick={()=>setWlRange(r.key)}
+                            style={{ background:wlRange===r.key?C.line:"transparent", border:"none", borderRadius:6,
+                              padding:"5px 10px", color:wlRange===r.key?C.ink:C.sub,
+                              fontSize:11, fontFamily:C.mono, fontWeight:700, cursor:"pointer" }}>
+                            {r.key.toUpperCase()}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <AddInline onAdd={addTicker}/>
+                </div>
               </div>
 
               {/* Upcoming earnings strip */}
@@ -2998,7 +3104,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                       onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
                       onDragEnd={()=>setWlDrag(null)}
                       style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
-                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
+                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData} range={wlRange} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
                     </div>
                   ))}
                 </div>

@@ -15,7 +15,7 @@ The Render backend then just reads that table (see /yt-insights in research.py).
 Run it:   python fetch_transcripts.py
 Schedule: schedule_transcripts.bat  (Windows Task Scheduler, ~7:50 AM daily)
 
-Requires (local):  pip install youtube-transcript-api anthropic python-dotenv
+Requires (local):  pip install yt-dlp anthropic python-dotenv
 Env (.env in this folder):
     ANTHROPIC_API_KEY=sk-ant-...
     SUPABASE_URL=https://<project>.supabase.co
@@ -72,17 +72,25 @@ def fetch_entries(channel_id):
     return out
 
 
-# ── Transcript fetch (handles youtube-transcript-api 0.6.x AND 1.x) ───────────
+# ── Transcript fetch (youtube-transcript-api + optional cookies.txt) ──────────
+# YouTube rate-limits (429) unauthenticated transcript requests from residential
+# IPs after a burst. Fix: export your YouTube cookies once from Edge using the
+# "Get cookies.txt LOCALLY" Edge extension, save as yt_cookies.txt next to this
+# file, then add YT_COOKIES_PATH=yt_cookies.txt to .env.
+_YT_COOKIES = os.getenv("YT_COOKIES_PATH", "").strip() or None
+
 def get_transcript(vid):
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
         raise SystemExit("Missing dependency — run:  pip install youtube-transcript-api")
     langs = ["en", "en-US", "en-GB"]
-    # 0.6.x classmethod API
+    kwargs = {}
+    if _YT_COOKIES and os.path.isfile(_YT_COOKIES):
+        kwargs["cookies"] = _YT_COOKIES
     try:
         if hasattr(YouTubeTranscriptApi, "list_transcripts"):
-            tl = YouTubeTranscriptApi.list_transcripts(vid)
+            tl = YouTubeTranscriptApi.list_transcripts(vid, **kwargs)
             try:
                 t = tl.find_manually_created_transcript(langs)
             except Exception:
@@ -92,7 +100,9 @@ def get_transcript(vid):
                     t = next(iter(tl))
             return " ".join(p["text"] for p in t.fetch())
         if hasattr(YouTubeTranscriptApi, "get_transcript"):
-            return " ".join(p["text"] for p in YouTubeTranscriptApi.get_transcript(vid, languages=langs))
+            return " ".join(
+                p["text"] for p in YouTubeTranscriptApi.get_transcript(vid, languages=langs, **kwargs)
+            )
     except Exception:
         pass
     # 1.x instance API

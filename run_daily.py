@@ -109,6 +109,7 @@ def layer1_data_valuation(portfolio=None):
     def _err(pos, msg):
         return {**pos, "spot": None, "current_val": 0, "pnl": 0, "pnl_pct": 0,
                 "delta": 0, "theta": 0, "vega": 0, "iv": None, "dte": None,
+                "prev_close": None, "day_change": 0, "day_change_pct": 0,
                 "expired": False, "error": msg}
 
     def _value_one(pos):
@@ -118,16 +119,21 @@ def layer1_data_valuation(portfolio=None):
             if c.empty:
                 return _err(pos, "No market data")
             spot = float(c.iloc[-1])
+            prev = float(c.iloc[-2]) if len(c) > 1 else spot   # prior close → today's $ move
             cb   = float(pos.get("cost_basis") or 0)
 
             if pos["type"] in ("SHARES", "CRYPTO"):
                 # Crypto (e.g. BTC-USD) values exactly like shares: spot × units.
                 cv  = spot * pos["qty"]
                 pnl = cv - cb
+                day_chg  = (spot - prev) * pos["qty"]          # today's $ change for the position
+                prior_val = cv - day_chg
                 tag = "CRY" if pos["type"] == "CRYPTO" else "SHR"
                 print(f"  [{tag}] {pos['ticker']} spot=${spot:.2f} cv=${cv:.2f} pnl=${pnl:+.2f}")
                 return {**pos, "spot": round(spot,2), "current_val": round(cv,2),
                         "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
+                        "prev_close": round(prev,2), "day_change": round(day_chg,2),
+                        "day_change_pct": round(day_chg/prior_val,4) if prior_val else 0,
                         "delta": 1.0, "theta": 0, "vega": 0, "iv": None, "dte": None,
                         "expired": False}
             else:
@@ -145,11 +151,16 @@ def layer1_data_valuation(portfolio=None):
                     cv = greeks["price"] * qty * 100
                     src = f"BS ${greeks['price']:.4f}"
                 pnl = cv - cb
+                # Option daily $ change ≈ delta × underlying's $ move × contracts × 100
+                day_chg  = (greeks.get("delta") or 0) * (spot - prev) * qty * 100
+                prior_val = cv - day_chg
                 pnl_pct_str = f"{pnl/cb*100:+.1f}%" if cb else "N/A"
                 print(f"  [OPT] {pos['ticker']} ${pos.get('strike')} {pos['type']} "
                       f"DTE={dte} IV={iv:.0%} {src} cv=${cv:.2f} pnl={pnl_pct_str}")
                 return {**pos, "spot": round(spot,2), "current_val": round(cv,2),
                         "pnl": round(pnl,2), "pnl_pct": round(pnl/cb,4) if cb else 0,
+                        "prev_close": round(prev,2), "day_change": round(day_chg,2),
+                        "day_change_pct": round(day_chg/prior_val,4) if prior_val else 0,
                         "dte": dte, "iv": round(iv,3), "expired": raw_dte < 0, **greeks}
         except Exception as e:
             return _err(pos, str(e))
@@ -184,6 +195,8 @@ def layer2_portfolio_analytics(positions):
     _mult = lambda p: 1 if p["type"] in ("SHARES", "CRYPTO") else 100
     total_theta = sum((p.get("theta") or 0)*p["qty"]*_mult(p) for p in positions)
     total_delta = sum((p.get("delta") or 0)*p["qty"]*_mult(p) for p in positions)
+    total_day_chg = sum((p.get("day_change") or 0) for p in positions)   # today's $ change across book
+    prior_total   = total_val - total_day_chg
     sector_alloc = {}
     # Only do live lookups for small portfolios to avoid excessive API calls.
     do_live_lookup = len(positions) < 20
@@ -206,6 +219,8 @@ def layer2_portfolio_analytics(positions):
             "total_pnl": round(total_pnl,2),
             "total_pnl_pct": round(total_pnl/total_cost,4) if total_cost else 0,
             "daily_theta": round(total_theta,2), "net_delta": round(total_delta,2),
+            "daily_change": round(total_day_chg,2),
+            "daily_change_pct": round(total_day_chg/prior_total,4) if prior_total else 0,
             "sector_alloc": {k: round(v,2) for k,v in sector_alloc.items()}}
 
 

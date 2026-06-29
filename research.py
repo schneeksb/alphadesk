@@ -66,11 +66,14 @@ def technicals(ticker):
     spot = float(c.iloc[-1])
     chg  = float((spot/float(c.iloc[-2]) - 1)*100) if len(c) > 1 else 0.0
 
-    # RSI(14)
+    # RSI(14) — keep the rolling series so the UI can draw a mini RSI graph,
+    # not just the latest reading.
     delta = c.diff()
     up    = delta.clip(lower=0).rolling(14).mean()
     dn    = (-delta.clip(upper=0)).rolling(14).mean()
     rsi   = float(100 - 100/(1 + up.iloc[-1]/dn.iloc[-1])) if dn.iloc[-1] else 50.0
+    rsi_series = (100 - 100/(1 + up/dn)).where(dn != 0, 50.0)
+    rsi_history = [round(float(x), 1) for x in rsi_series.tail(63).tolist() if x == x]  # last ~3M, drop NaN
 
     info = {}
     try: info = tk.info
@@ -189,6 +192,7 @@ def technicals(ticker):
         "spot":       round(spot, 2),
         "chg":        round(chg, 2),
         "rsi":        round(rsi, 1),
+        "rsi_history": rsi_history,
         "iv":         round(iv, 1)         if iv         else None,
         "pcRatio":    pc_ratio,
         "relVol":     rel_vol,

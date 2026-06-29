@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 *.key
+# YouTube session cookies (also catches the yt_cookies.txt.txt double-extension)
+yt_cookies*
+# OAuth client secrets
+OAuth client.txt
 
 # Local tooling
 .claude/

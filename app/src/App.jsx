@@ -80,6 +80,10 @@ const loadAccounts = () => { try { return JSON.parse(localStorage.getItem(ACCT_K
 const saveAccounts = (l) => { try { localStorage.setItem(ACCT_KEY, JSON.stringify(l)); } catch {} };
 const loadAccountCollapsed = () => { try { return JSON.parse(localStorage.getItem(ACCT_COLLAPSE_KEY)) || {}; } catch { return {}; } };
 const saveAccountCollapsed = (m) => { try { localStorage.setItem(ACCT_COLLAPSE_KEY, JSON.stringify(m)); } catch {} };
+// Saved screener filter combos (synced to Supabase alongside the rest of state)
+const SCREENS_KEY = "alphadesk:savedScreens";
+const loadSavedScreens = () => { try { return JSON.parse(localStorage.getItem(SCREENS_KEY)) || []; } catch { return []; } };
+const saveSavedScreens = (l) => { try { localStorage.setItem(SCREENS_KEY, JSON.stringify(l)); } catch {} };
 const UNASSIGNED = "__unassigned__";
 
 // ── CRYPTO SUPPORT ────────────────────────────────────────────────────
@@ -208,6 +212,23 @@ async function fetchMapData(tickers = []) {
 }
 async function fetchYtInsights() {
   const r = await fetch(`${API}/yt-insights`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchFundamentals(ticker) {
+  const r = await fetch(`${API}/fundamentals?ticker=${encodeURIComponent(ticker)}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchBusinessQuality(ticker, profile = "") {
+  const r = await fetch(`${API}/business-quality?ticker=${encodeURIComponent(ticker)}&profile=${encodeURIComponent(profile||"")}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchScreen(params) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k,v])=>{ if (v!==null && v!==undefined && v!=="") qs.set(k, v); });
+  const r = await fetch(`${API}/screen?${qs.toString()}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -351,9 +372,11 @@ const RANGES = [
   { key:"2y",  label:"2Y",  days:null },   // /chart 2y/1wk
   { key:"5y",  label:"5Y",  days:null },   // /chart 5y/1wk
 ];
-// Sparkline pills for WatchCard use daily slices (no extra fetch needed)
+// Sparkline pills for WatchCard use daily slices (no extra fetch needed) except
+// 1D, which needs a live intraday fetch (5-min bars via /chart) since the daily
+// research history has no sub-day resolution.
 const SPARK_RANGES = [
-  { key:"1w", days:5 }, { key:"1m", days:21 }, { key:"3m", days:63 }, { key:"6m", days:126 },
+  { key:"1d", days:null }, { key:"1w", days:5 }, { key:"1m", days:21 }, { key:"3m", days:63 }, { key:"6m", days:126 },
 ];
 
 function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="3m" }) {
@@ -457,7 +480,7 @@ function InteractiveChart({ data, dates, color, h=130 }) {
 
 
 // ── WATCHLIST CARD (fetches its own data) ─────────────────────────────
-function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range="1m" }) {
+function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range="1m", onFinancials }) {
   const [d, setD]       = useState(null);
   const [err, setErr]   = useState(false);
   // Sparkline timeframe is driven by the shared watchlist control (range prop)
@@ -470,6 +493,23 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
     fetchResearch(ticker, aiEnabled, profile).then(x=>{ if(alive){ x.error?setErr(true):(setD(x), onData?.(ticker, x)); }}).catch(()=>alive&&setErr(true));
     return ()=>{ alive=false; };
   },[ticker, aiEnabled, profile]);
+
+  // 1D has no sub-day resolution in the daily research history, so it's fetched
+  // live (5-min bars) on demand and cached per ticker for the life of the card.
+  // The in-flight lock lives in a ref (not state) — putting it in the effect's
+  // own dependency array would re-trigger the effect the instant it flips true,
+  // tearing down `alive` before the fetch resolves and stranding the spinner.
+  const [intraday, setIntraday] = useState(null);
+  const [intradayLoading, setIntradayLoading] = useState(false);
+  const intradayFetching = useRef(false);
+  useEffect(()=>{
+    if (sparkRange !== "1d" || intraday || intradayFetching.current) return;
+    let alive = true;
+    intradayFetching.current = true;
+    setIntradayLoading(true);
+    fetchChart(ticker, "1d").then(x=>{ if(alive && !x.error) setIntraday(x); }).catch(()=>{}).finally(()=>{ intradayFetching.current=false; if(alive) setIntradayLoading(false); });
+    return ()=>{ alive=false; };
+  },[sparkRange, ticker, intraday]);
 
   if (err) return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 17px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
@@ -496,8 +536,14 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
           </div>
           <div style={{ fontSize:11, color:C.faint, marginTop:2, maxWidth:150, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{d.name}</div>
         </div>
-        <button onClick={(e)=>{e.stopPropagation();onRemove(ticker);}} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2 }}
-          onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><X size={15}/></button>
+        <div style={{ display:"flex", gap:4, alignItems:"center", flexShrink:0 }}>
+          {onFinancials && (
+            <button onClick={(e)=>{e.stopPropagation();onFinancials(ticker);}} title="Financials" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}
+              onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Activity size={14}/></button>
+          )}
+          <button onClick={(e)=>{e.stopPropagation();onRemove(ticker);}} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2 }}
+            onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><X size={15}/></button>
+        </div>
       </div>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
         <div>
@@ -536,9 +582,14 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
         </div>
       </div>
       {d.history && (() => {
-        const slice = d.history.slice(-(SPARK_RANGES.find(r=>r.key===sparkRange)?.days||21));
-        // % change over the selected timeframe (first→last close in the slice)
-        const tfChg = slice.length>1 && slice[0] ? (slice[slice.length-1]/slice[0]-1)*100 : null;
+        const isIntraday = sparkRange === "1d";
+        const slice = isIntraday
+          ? (intraday?.history || [])
+          : d.history.slice(-(SPARK_RANGES.find(r=>r.key===sparkRange)?.days||21));
+        // % change over the selected timeframe. 1D uses the server's daily % change
+        // (accurate prior-close comparison) rather than first-vs-last intraday bar,
+        // since the first 5-min bar isn't necessarily yesterday's close.
+        const tfChg = isIntraday ? d.chg : (slice.length>1 && slice[0] ? (slice[slice.length-1]/slice[0]-1)*100 : null);
         const tfCol = tfChg==null ? C.faint : tfChg>=0 ? C.up : C.down;
         return (
         <div style={{ marginTop:10 }} onClick={e => e.stopPropagation()}>
@@ -557,7 +608,13 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
               </span>
             )}
           </div>
-          <Sparkline data={slice} h={30} color={tfCol}/>
+          {isIntraday && intradayLoading && !intraday ? (
+            <div style={{ height:30, display:"flex", alignItems:"center", justifyContent:"center", color:C.faint }}>
+              <Loader2 size={12} style={{ animation:"spin 1s linear infinite" }}/>
+            </div>
+          ) : (
+            <Sparkline data={slice} h={30} color={tfCol}/>
+          )}
         </div>
         );
       })()}
@@ -644,7 +701,7 @@ function NewsItem({ n }) {
 }
 
 // ── DETAIL PAGE ───────────────────────────────────────────────────────
-function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, profile }) {
+function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, profile, onFinancials }) {
   const [d, setD]   = useState(null);
   const [err, setErr] = useState(null);
   const [whyNow, setWhyNow]       = useState(null);
@@ -694,9 +751,16 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
           </div>
           <div style={{ fontSize:13, color:C.sub, marginTop:3 }}>{d.name} · {d.sector} · {d.mktCap}</div>
         </div>
-        <button onClick={()=>onToggleWatch(ticker)} style={{ background:inWatchlist?`${C.amber}18`:C.panel, border:`1px solid ${inWatchlist?C.amber:C.line}`, borderRadius:9, padding:"9px 14px", color:inWatchlist?C.amber:C.sub, cursor:"pointer", display:"flex", gap:7, alignItems:"center", fontSize:12.5, fontWeight:500 }}>
-          <Star size={14} fill={inWatchlist?C.amber:"none"}/> {inWatchlist?"Watching":"Add to Watchlist"}
-        </button>
+        <div style={{ display:"flex", gap:8, flexShrink:0, flexWrap:"wrap", justifyContent:"flex-end" }}>
+          {onFinancials && (
+            <button onClick={()=>onFinancials(ticker)} title="Fundamentals & valuation" style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"9px 14px", color:C.cold, cursor:"pointer", display:"flex", gap:7, alignItems:"center", fontSize:12.5, fontWeight:600 }}>
+              <Activity size={14}/> Financials
+            </button>
+          )}
+          <button onClick={()=>onToggleWatch(ticker)} style={{ background:inWatchlist?`${C.amber}18`:C.panel, border:`1px solid ${inWatchlist?C.amber:C.line}`, borderRadius:9, padding:"9px 14px", color:inWatchlist?C.amber:C.sub, cursor:"pointer", display:"flex", gap:7, alignItems:"center", fontSize:12.5, fontWeight:500 }}>
+            <Star size={14} fill={inWatchlist?C.amber:"none"}/> {inWatchlist?"Watching":"Add to Watchlist"}
+          </button>
+        </div>
       </div>
 
       {/* ── Price + Score row ──────────────────────────────── */}
@@ -2775,6 +2839,561 @@ function SettingsMenu({ theme, setTheme, aiEnabled, setAiEnabled, userEmail, onP
   );
 }
 
+// ── FINANCIALS PAGE (fundamentals · valuation · compare · fair value · screener) ──
+const fmtMoney = (v) => {
+  if (v==null || isNaN(v)) return "—";
+  const a=Math.abs(v), s=v<0?"-":"";
+  if (a>=1e12) return `${s}$${(a/1e12).toFixed(2)}T`;
+  if (a>=1e9)  return `${s}$${(a/1e9).toFixed(1)}B`;
+  if (a>=1e6)  return `${s}$${(a/1e6).toFixed(1)}M`;
+  return `${s}$${a.toFixed(0)}`;
+};
+const fmtPct = (v,d=1) => (v==null||isNaN(v)) ? "—" : `${(v*100).toFixed(d)}%`;
+const fmtX   = (v) => (v==null||isNaN(v)) ? "—" : `${v.toFixed(1)}x`;
+const valColorOf = (verd) => verd==="cheap"?C.up:verd==="expensive"?C.down:verd==="fair"?C.amber:C.faint;
+const SECTORS = ["Technology","Communication Services","Consumer Cyclical","Consumer Defensive","Healthcare",
+  "Financial Services","Industrials","Energy","Utilities","Real Estate","Basic Materials"];
+
+// One fundamentals metric with a small trend so you see direction, not just a number.
+function TrendStat({ label, series, fmt, invert=false }) {
+  const clean = (series||[]).filter(v=>v!=null && !isNaN(v));
+  const latest = clean.length ? clean[clean.length-1] : null;
+  const first  = clean.length ? clean[0] : null;
+  const rising = (first!=null && latest!=null) ? latest>=first : null;
+  const good   = rising==null ? null : (invert ? !rising : rising);
+  const col    = good==null ? C.faint : good ? C.up : C.down;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:11, padding:"12px 13px", minWidth:0 }}>
+      <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:4 }}>{label}</div>
+      <div style={{ fontFamily:C.mono, fontSize:17, fontWeight:700, color:C.ink }}>{fmt(latest)}</div>
+      {clean.length>1 && <div style={{ marginTop:6 }}><Sparkline data={clean} h={22} color={col}/></div>}
+    </div>
+  );
+}
+
+function ValuationRow({ label, m }) {
+  if (!m) return null;
+  const secCol = valColorOf(m.vs_sector?.verdict);
+  const ownCol = valColorOf(m.vs_own?.verdict);
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"minmax(96px,1.4fr) minmax(60px,1fr) minmax(90px,1.3fr) minmax(90px,1.3fr)", gap:8, alignItems:"center", padding:"9px 0", borderTop:`1px solid ${C.panel2}` }}>
+      <div style={{ fontSize:12, color:C.sub, fontWeight:600 }}>{label}</div>
+      <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:C.ink, textAlign:"right" }}>{fmtX(m.value)}</div>
+      <div style={{ textAlign:"right" }}>
+        {m.vs_sector ? (
+          <span style={{ fontFamily:C.mono, fontSize:10.5, fontWeight:700, color:secCol, background:`${secCol}14`, padding:"2px 7px", borderRadius:5 }}>
+            {m.vs_sector.verdict} · sec {fmtX(m.sector)}
+          </span>
+        ) : <span style={{ fontSize:10.5, color:C.faint }}>sec {fmtX(m.sector)}</span>}
+      </div>
+      <div style={{ textAlign:"right" }}>
+        {m.vs_own ? (
+          <span style={{ fontFamily:C.mono, fontSize:10.5, fontWeight:700, color:ownCol, background:`${ownCol}14`, padding:"2px 7px", borderRadius:5 }}>
+            {m.vs_own.verdict} · 5yr {fmtX(m.own_avg)}
+          </span>
+        ) : <span style={{ fontSize:10, color:C.faint }}>—</span>}
+      </div>
+    </div>
+  );
+}
+
+// Editable long-term fair-value model → bull / base / bear vs current price.
+function FairValueModel({ inp }) {
+  const seedG  = Math.max(-5, Math.min(40, Math.round((inp?.revenueGrowth ?? 0.10)*100)));
+  const seedM  = Math.max(1, Math.min(60, Math.round((inp?.netMargin ?? 0.15)*100)));
+  const seedPE = Math.max(5, Math.min(60, Math.round(inp?.exitPE ?? 20)));
+  const [g, setG]   = useState(seedG);
+  const [m, setM]   = useState(seedM);
+  const [pe, setPe] = useState(seedPE);
+  useEffect(()=>{ setG(seedG); setM(seedM); setPe(seedPE); /* reseed on ticker change */ // eslint-disable-next-line
+  },[inp]);
+  const project = (gg, mm, pp) => {
+    const rev = inp?.revenue, sh = inp?.shares, spot = inp?.spot;
+    if (!rev || !sh) return null;
+    const rev5 = rev*Math.pow(1+gg/100, 5);
+    const eps5 = (rev5*(mm/100))/sh;
+    const future = eps5*pp;
+    const fair = future/Math.pow(1.10, 5);   // 10% required return, discounted 5y
+    return { fair, upside: spot ? (fair/spot-1)*100 : null };
+  };
+  const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  const scenarios = [
+    { key:"bear", label:"Bear", col:C.down,  r:project(clamp(g*0.6,-10,60), clamp(m*0.9,1,60), clamp(pe*0.85,5,60)) },
+    { key:"base", label:"Base", col:C.cold,  r:project(g, m, pe) },
+    { key:"bull", label:"Bull", col:C.up,    r:project(clamp(g*1.25,-10,80), clamp(m*1.1,1,70), clamp(pe*1.15,5,70)) },
+  ];
+  const spot = inp?.spot;
+  const inputBox = { width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:7, padding:"6px 8px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" };
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4, flexWrap:"wrap", gap:6 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.ink }}>Fair Value Estimate</div>
+        <div style={{ fontSize:11, color:C.faint }}>current ${spot?.toFixed?.(2) ?? "—"} · 5yr model, 10% discount</div>
+      </div>
+      <div style={{ fontSize:11, color:C.faint, marginBottom:12 }}>Editable base assumptions — bull/bear scale off these.</div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px,1fr))", gap:10, marginBottom:16 }}>
+        <div><div style={{ fontSize:9.5, color:C.faint, marginBottom:3 }}>REV GROWTH % / YR</div><input type="number" value={g} onChange={e=>setG(parseFloat(e.target.value)||0)} style={inputBox}/></div>
+        <div><div style={{ fontSize:9.5, color:C.faint, marginBottom:3 }}>NET MARGIN %</div><input type="number" value={m} onChange={e=>setM(parseFloat(e.target.value)||0)} style={inputBox}/></div>
+        <div><div style={{ fontSize:9.5, color:C.faint, marginBottom:3 }}>EXIT P/E</div><input type="number" value={pe} onChange={e=>setPe(parseFloat(e.target.value)||0)} style={inputBox}/></div>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px,1fr))", gap:10 }}>
+        {scenarios.map(s=>(
+          <div key={s.key} style={{ background:C.panel2, border:`1px solid ${C.line}`, borderRadius:11, padding:"13px 14px", textAlign:"center" }}>
+            <div style={{ fontSize:10, color:s.col, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase" }}>{s.label}</div>
+            <div style={{ fontFamily:C.mono, fontSize:20, fontWeight:700, color:C.ink, marginTop:5 }}>{s.r?.fair!=null?`$${s.r.fair.toFixed(0)}`:"—"}</div>
+            {s.r?.upside!=null && (
+              <div style={{ fontFamily:C.mono, fontSize:12, fontWeight:700, color:s.r.upside>=0?C.up:C.down, marginTop:3 }}>
+                {s.r.upside>=0?"+":""}{s.r.upside.toFixed(0)}%
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const CMP_ROWS = [
+  {k:"price", label:"Price",        get:d=>d.spot,                         fmt:v=>v==null?"—":`$${v.toFixed(2)}`, best:null},
+  {k:"mcap",  label:"Market Cap",   get:d=>d.marketCap,                    fmt:fmtMoney, best:null},
+  {k:"fpe",   label:"Forward P/E",  get:d=>d.valuation?.forwardPE?.value,  fmt:fmtX, best:"low"},
+  {k:"tpe",   label:"Trailing P/E", get:d=>d.valuation?.trailingPE?.value, fmt:fmtX, best:"low"},
+  {k:"peg",   label:"PEG",          get:d=>d.valuation?.peg?.value,        fmt:v=>v==null?"—":v.toFixed(2), best:"low"},
+  {k:"ps",    label:"P/S",          get:d=>d.valuation?.ps?.value,         fmt:fmtX, best:"low"},
+  {k:"ev",    label:"EV/EBITDA",    get:d=>d.valuation?.evEbitda?.value,   fmt:fmtX, best:"low"},
+  {k:"revg",  label:"Rev Growth",   get:d=>d.ttm?.revenueGrowth,           fmt:fmtPct, best:"high"},
+  {k:"gm",    label:"Gross Margin", get:d=>d.health?.grossMargin,          fmt:fmtPct, best:"high"},
+  {k:"nm",    label:"Net Margin",   get:d=>d.health?.netMargin,            fmt:fmtPct, best:"high"},
+  {k:"roe",   label:"ROE",          get:d=>d.health?.roe,                  fmt:fmtPct, best:"high"},
+  {k:"de",    label:"Debt / Equity",get:d=>d.health?.debtToEquity,         fmt:v=>v==null?"—":v.toFixed(0), best:"low"},
+  {k:"fcf",   label:"Free Cash Flow",get:d=>d.health?.fcf,                 fmt:fmtMoney, best:"high"},
+];
+
+function CompareTable({ items, onRemove, onOpen }) {
+  // items: [{ticker, data|null, loading}]
+  const bestForRow = (row) => {
+    if (!row.best) return null;
+    const vals = items.map(it => it.data ? row.get(it.data) : null).filter(v=>v!=null && !isNaN(v) && (row.best!=="low" || v>0));
+    if (!vals.length) return null;
+    return row.best==="low" ? Math.min(...vals) : Math.max(...vals);
+  };
+  return (
+    <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch", border:`1px solid ${C.line}`, borderRadius:14, background:C.panel }}>
+      <div style={{ minWidth: 120 + items.length*130 }}>
+        {/* header */}
+        <div style={{ display:"grid", gridTemplateColumns:`minmax(110px,1.3fr) repeat(${items.length}, minmax(110px,1fr))`, borderBottom:`1px solid ${C.line}` }}>
+          <div style={{ padding:"12px 14px", fontSize:10, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>Metric</div>
+          {items.map(it=>(
+            <div key={it.ticker} style={{ padding:"10px 12px", textAlign:"right" }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", gap:6 }}>
+                <span onClick={()=>onOpen(it.ticker)} style={{ fontWeight:800, fontSize:13, color:C.ink, cursor:"pointer" }}>{displaySym(it.ticker)}</span>
+                <button onClick={()=>onRemove(it.ticker)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0, display:"flex" }}><X size={13}/></button>
+              </div>
+              {it.loading && <Loader2 size={11} style={{ animation:"spin 1s linear infinite", color:C.faint, marginTop:2 }}/>}
+              {it.data && <div style={{ fontSize:9, color:C.faint, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:110 }}>{it.data.sector}</div>}
+            </div>
+          ))}
+        </div>
+        {/* rows */}
+        {CMP_ROWS.map(row=>{
+          const best = bestForRow(row);
+          return (
+            <div key={row.k} style={{ display:"grid", gridTemplateColumns:`minmax(110px,1.3fr) repeat(${items.length}, minmax(110px,1fr))`, borderTop:`1px solid ${C.panel2}` }}>
+              <div style={{ padding:"10px 14px", fontSize:11.5, color:C.sub, fontWeight:600 }}>{row.label}</div>
+              {items.map(it=>{
+                const v = it.data ? row.get(it.data) : null;
+                const isBest = best!=null && v!=null && Math.abs(v-best)<1e-9;
+                return (
+                  <div key={it.ticker} style={{ padding:"10px 12px", textAlign:"right", fontFamily:C.mono, fontSize:12,
+                    color:isBest?C.up:C.ink, fontWeight:isBest?800:500, background:isBest?`${C.up}12`:"transparent" }}>
+                    {it.data ? row.fmt(v) : (it.loading?"…":"—")}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const PRESET_SCREENS = [
+  {name:"Undervalued Growth",  mode:"market", filters:{fpe_max:25, rev_growth_min:20, fcf_positive:true}},
+  {name:"Quality Compounders", mode:"market", filters:{roe_min:15, gross_min:50, de_max:80}},
+  {name:"Cheap vs Sector",     mode:"market", filters:{cheap_vs_sector:true}},
+];
+const SCREEN_FIELDS = [
+  {k:"fpe_max", label:"Forward P/E <"}, {k:"peg_max", label:"PEG <"}, {k:"ps_max", label:"P/S <"},
+  {k:"ev_max", label:"EV/EBITDA <"}, {k:"rev_growth_min", label:"Rev growth % >"}, {k:"eps_growth_min", label:"EPS growth % >"},
+  {k:"gross_min", label:"Gross margin % >"}, {k:"roe_min", label:"ROE % >"}, {k:"de_max", label:"Debt/Equity <"},
+  {k:"cr_min", label:"Current ratio >"}, {k:"mcap_min", label:"Mkt cap $B >"}, {k:"mcap_max", label:"Mkt cap $B <"},
+];
+const RES_COLS = [
+  {k:"ticker", label:"Ticker", get:m=>m.ticker, fmt:v=>v, num:false},
+  {k:"sector", label:"Sector", get:m=>m.sector, fmt:v=>v, num:false},
+  {k:"price", label:"Price", get:m=>m.price, fmt:v=>v==null?"—":`$${v.toFixed(2)}`, num:true},
+  {k:"forwardPE", label:"Fwd P/E", get:m=>m.forwardPE, fmt:fmtX, num:true},
+  {k:"peg", label:"PEG", get:m=>m.peg, fmt:v=>v==null?"—":v.toFixed(2), num:true},
+  {k:"revenueGrowth", label:"Rev G", get:m=>m.revenueGrowth, fmt:fmtPct, num:true},
+  {k:"roe", label:"ROE", get:m=>m.roe, fmt:fmtPct, num:true},
+  {k:"grossMargin", label:"Gross M", get:m=>m.grossMargin, fmt:fmtPct, num:true},
+  {k:"marketCap", label:"Mkt Cap", get:m=>m.marketCap, fmt:fmtMoney, num:true},
+];
+
+function ScreenerPanel({ watchlist, savedScreens, onSaveScreen, onDeleteScreen, onOpen, onFinancials }) {
+  const [mode, setMode]       = useState("watchlist");
+  const [filters, setFilters] = useState({ fcf_positive:false, cheap_vs_sector:false, sectors:[] });
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(null);   // {scanned,total}
+  const [results, setResults] = useState(null);
+  const [sortKey, setSortKey] = useState("forwardPE");
+  const [sortDir, setSortDir] = useState(1);
+  const [saveName, setSaveName] = useState("");
+  const [showSave, setShowSave] = useState(false);
+  const cancelRef = useRef(false);
+
+  const setF = (k,v)=> setFilters(f=>({ ...f, [k]: (v===""||v==null)?undefined:v }));
+  const applyPreset = (p)=>{ setMode(p.mode); setFilters({ fcf_positive:false, cheap_vs_sector:false, sectors:[], ...p.filters }); };
+  const activeFilterCount = Object.entries(filters).filter(([k,v])=>{
+    if (k==="sectors") return v && v.length; if (typeof v==="boolean") return v; return v!=null && v!=="";
+  }).length;
+
+  const buildParams = () => {
+    const p = {};
+    SCREEN_FIELDS.forEach(f=>{ if (filters[f.k]!=null && filters[f.k]!=="") p[f.k]=filters[f.k]; });
+    if (filters.fcf_positive) p.fcf_positive = 1;
+    if (filters.cheap_vs_sector) p.cheap_vs_sector = 1;
+    if (filters.sectors?.length) p.sectors = filters.sectors.join(",");
+    return p;
+  };
+
+  const run = async () => {
+    cancelRef.current = false;
+    setRunning(true); setResults(null); setProgress(null);
+    const base = buildParams();
+    try {
+      if (mode==="watchlist") {
+        const wl = (watchlist||[]).filter(t=>!isCrypto(t));
+        const d = await fetchScreen({ ...base, mode:"watchlist", tickers: wl.join(",") });
+        setResults(d.matches||[]);
+      } else {
+        let offset = 0, acc = [], total = 0;
+        while (offset!=null && !cancelRef.current) {
+          const d = await fetchScreen({ ...base, mode:"market", offset, limit:40 });
+          acc = acc.concat(d.matches||[]);
+          total = d.total_universe||0;
+          setResults([...acc]);
+          setProgress({ scanned: Math.min(offset+40, total), total });
+          offset = d.next_offset;
+        }
+      }
+    } catch(e){ setResults([]); }
+    setRunning(false); setProgress(null);
+  };
+
+  const sorted = results ? [...results].sort((a,b)=>{
+    const col = RES_COLS.find(c=>c.k===sortKey); const av=col.get(a), bv=col.get(b);
+    if (av==null) return 1; if (bv==null) return -1;
+    if (col.num) return (av-bv)*sortDir;
+    return String(av).localeCompare(String(bv))*sortDir;
+  }) : null;
+
+  const toggleSector = (s)=> setFilters(f=>{ const cur=f.sectors||[]; return { ...f, sectors: cur.includes(s)?cur.filter(x=>x!==s):[...cur,s] }; });
+  const chip = (active)=>({ padding:"6px 11px", borderRadius:20, border:`1px solid ${active?C.cold:C.line}`, background:active?`${C.cold}14`:C.panel, color:active?C.cold:C.sub, fontSize:11.5, fontWeight:600, cursor:"pointer", whiteSpace:"nowrap" });
+  const inputBox = { width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:7, padding:"7px 9px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" };
+
+  return (
+    <div>
+      {/* Saved + preset screens */}
+      <div style={{ display:"flex", gap:7, flexWrap:"wrap", marginBottom:14, alignItems:"center" }}>
+        <span style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.05em" }}>SCREENS</span>
+        {PRESET_SCREENS.map(p=>(
+          <button key={p.name} onClick={()=>applyPreset(p)} style={chip(false)}>{p.name}</button>
+        ))}
+        {(savedScreens||[]).map(s=>(
+          <span key={s.name} style={{ display:"inline-flex", alignItems:"center", gap:5, ...chip(false) }}>
+            <span onClick={()=>{ setMode(s.mode||"market"); setFilters({ fcf_positive:false, cheap_vs_sector:false, sectors:[], ...s.filters }); }} style={{ cursor:"pointer" }}>★ {s.name}</span>
+            <X size={11} style={{ cursor:"pointer", color:C.faint }} onClick={()=>onDeleteScreen(s.name)}/>
+          </span>
+        ))}
+      </div>
+
+      {/* Filter inputs */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px", marginBottom:14 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px,1fr))", gap:10, marginBottom:14 }}>
+          {SCREEN_FIELDS.map(f=>(
+            <div key={f.k}>
+              <div style={{ fontSize:9.5, color:C.faint, marginBottom:3 }}>{f.label.toUpperCase()}</div>
+              <input type="number" value={filters[f.k] ?? ""} onChange={e=>setF(f.k, e.target.value===""?"":parseFloat(e.target.value))} placeholder="—" style={inputBox}/>
+            </div>
+          ))}
+        </div>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center", marginBottom:12 }}>
+          <button onClick={()=>setF("fcf_positive", !filters.fcf_positive)} style={chip(filters.fcf_positive)}>Positive FCF</button>
+          <button onClick={()=>setF("cheap_vs_sector", !filters.cheap_vs_sector)} style={chip(filters.cheap_vs_sector)}>Cheap vs sector</button>
+        </div>
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:14 }}>
+          {SECTORS.map(s=>(<button key={s} onClick={()=>toggleSector(s)} style={{ ...chip(filters.sectors?.includes(s)), fontSize:10.5, padding:"4px 9px" }}>{s}</button>))}
+        </div>
+        {/* Mode + run */}
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center" }}>
+          <div style={{ display:"flex", gap:2, background:C.panel2, borderRadius:9, padding:3, border:`1px solid ${C.line}` }}>
+            {[["watchlist","My Watchlist"],["market","S&P 500"]].map(([id,lab])=>(
+              <button key={id} onClick={()=>setMode(id)} style={{ padding:"6px 12px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:mode===id?C.line:"transparent", color:mode===id?C.ink:C.sub }}>{lab}</button>
+            ))}
+          </div>
+          <button onClick={run} disabled={running} style={{ background:running?C.line:C.up, border:"none", borderRadius:9, padding:"9px 18px", color:running?C.sub:"#06080d", cursor:running?"default":"pointer", fontSize:13, fontWeight:700, display:"flex", gap:7, alignItems:"center" }}>
+            {running ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Scanning…</> : <><Search size={14}/> Run Screen ({activeFilterCount})</>}
+          </button>
+          {mode==="market" && running && <button onClick={()=>{ cancelRef.current=true; }} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:9, padding:"9px 14px", color:C.sub, cursor:"pointer", fontSize:12 }}>Stop</button>}
+          {results && !running && (
+            showSave ? (
+              <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                <input autoFocus value={saveName} onChange={e=>setSaveName(e.target.value)} placeholder="Screen name" style={{ ...inputBox, width:150 }}
+                  onKeyDown={e=>{ if(e.key==="Enter"&&saveName.trim()){ onSaveScreen({ name:saveName.trim(), mode, filters }); setSaveName(""); setShowSave(false); } }}/>
+                <button onClick={()=>{ if(saveName.trim()){ onSaveScreen({ name:saveName.trim(), mode, filters }); setSaveName(""); setShowSave(false); } }} style={{ background:C.up, border:"none", borderRadius:7, padding:"7px 11px", color:"#06080d", fontSize:12, fontWeight:700, cursor:"pointer" }}>Save</button>
+              </div>
+            ) : <button onClick={()=>setShowSave(true)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:9, padding:"9px 14px", color:C.sub, cursor:"pointer", fontSize:12, display:"flex", gap:6, alignItems:"center" }}><Star size={13}/> Save screen</button>
+          )}
+        </div>
+        {progress && (
+          <div style={{ marginTop:12 }}>
+            <div style={{ fontSize:11, color:C.faint, marginBottom:4 }}>Scanned {progress.scanned} / {progress.total}</div>
+            <div style={{ height:5, background:C.line, borderRadius:3, overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${progress.total?100*progress.scanned/progress.total:0}%`, background:C.cold, transition:"width .2s" }}/>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Results */}
+      {sorted && (
+        sorted.length===0 ? (
+          <div style={{ textAlign:"center", padding:"40px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>
+            No matches{running?" yet…":"."} {!running && "Try loosening a filter — lower a minimum or raise a maximum."}
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize:12, color:C.sub, marginBottom:8 }}><b style={{ color:C.ink }}>{sorted.length}</b> match{sorted.length===1?"":"es"}{mode==="market"?" in S&P 500":" in watchlist"}</div>
+            <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch", border:`1px solid ${C.line}`, borderRadius:12, background:C.panel }}>
+              <div style={{ minWidth:640 }}>
+                <div style={{ display:"grid", gridTemplateColumns:`minmax(70px,1fr) minmax(120px,1.4fr) repeat(7, minmax(64px,0.9fr))`, borderBottom:`1px solid ${C.line}` }}>
+                  {RES_COLS.map(c=>(
+                    <div key={c.k} onClick={()=>{ if(sortKey===c.k) setSortDir(d=>-d); else { setSortKey(c.k); setSortDir(c.num?1:1); } }}
+                      style={{ padding:"9px 11px", fontSize:9.5, color:sortKey===c.k?C.ink:C.faint, letterSpacing:"0.04em", textTransform:"uppercase", cursor:"pointer", textAlign:c.num?"right":"left", fontWeight:sortKey===c.k?700:500 }}>
+                      {c.label}{sortKey===c.k?(sortDir>0?" ↑":" ↓"):""}
+                    </div>
+                  ))}
+                </div>
+                {sorted.map(m=>(
+                  <div key={m.ticker} onClick={()=>onFinancials(m.ticker)} className="pos-row"
+                    style={{ display:"grid", gridTemplateColumns:`minmax(70px,1fr) minmax(120px,1.4fr) repeat(7, minmax(64px,0.9fr))`, borderTop:`1px solid ${C.panel2}`, cursor:"pointer" }}
+                    onMouseEnter={e=>e.currentTarget.style.background=C.panel2} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                    {RES_COLS.map(c=>(
+                      <div key={c.k} style={{ padding:"9px 11px", fontFamily:c.num?C.mono:"inherit", fontSize:12, textAlign:c.num?"right":"left",
+                        color:c.k==="ticker"?C.ink:C.sub, fontWeight:c.k==="ticker"?700:500, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                        {c.fmt(c.get(m))}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScreens, onSaveScreen, onDeleteScreen, onOpenDetail }) {
+  const [view, setView]   = useState("analyze");   // analyze | compare | screener
+  const [ticker, setTicker] = useState(initialTicker || "AAPL");
+  const [query, setQuery] = useState("");
+  const [fund, setFund]   = useState(null);
+  const [err, setErr]     = useState(false);
+  const [ai, setAi]       = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [cmp, setCmp]     = useState({});   // ticker -> {data,loading}
+  const [cmpList, setCmpList] = useState(initialTicker ? [initialTicker] : ["AAPL"]);
+
+  useEffect(()=>{ if (initialTicker) { setTicker(initialTicker); setView("analyze"); } },[initialTicker]);
+
+  // Load fundamentals for the analyze ticker
+  useEffect(()=>{
+    let alive=true; setFund(null); setErr(false); setAi(null);
+    fetchFundamentals(ticker).then(d=>{ if(alive){ d.error?setErr(true):setFund(d); } }).catch(()=>alive&&setErr(true));
+    return ()=>{ alive=false; };
+  },[ticker]);
+
+  // Load compare data for any missing tickers
+  useEffect(()=>{
+    cmpList.forEach(t=>{
+      if (cmp[t]) return;
+      setCmp(c=>({ ...c, [t]:{ loading:true, data:null } }));
+      fetchFundamentals(t).then(d=>setCmp(c=>({ ...c, [t]:{ loading:false, data:d.error?null:d } })))
+        .catch(()=>setCmp(c=>({ ...c, [t]:{ loading:false, data:null } })));
+    });
+  // eslint-disable-next-line
+  },[cmpList]);
+
+  const go = (t) => { const T=normalizeTicker(t); if(T){ setTicker(T); setQuery(""); setView("analyze"); } };
+  const loadAi = () => {
+    setAiLoading(true); setAi(null);
+    fetchBusinessQuality(ticker, profile).then(setAi).catch(()=>setAi({ ai_error:"request failed" })).finally(()=>setAiLoading(false));
+  };
+  const addCompare = (t) => { const T=normalizeTicker(t); if(T && !cmpList.includes(T) && cmpList.length<4) setCmpList(l=>[...l,T]); };
+  const removeCompare = (t) => setCmpList(l=>l.filter(x=>x!==t));
+
+  const subTab = (id,label) => (
+    <button key={id} onClick={()=>setView(id)} style={{ padding:"7px 15px", borderRadius:7, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:600,
+      background:view===id?C.line:"transparent", color:view===id?C.ink:C.sub }}>{label}</button>
+  );
+  const searchBar = (onSubmit, placeholder) => (
+    <div style={{ flex:"1 1 220px", maxWidth:360, position:"relative" }}>
+      <Search size={15} color={C.faint} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)" }}/>
+      <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&onSubmit(query)} placeholder={placeholder}
+        style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 12px 8px 36px", color:C.ink, fontSize:13, outline:"none" }}/>
+    </div>
+  );
+
+  const t = fund?.trends || {};
+  return (
+    <div>
+      {/* Header + sub-tabs */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:10 }}>
+        <div>
+          <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Financials</div>
+          <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>Value a business at a glance · free fundamentals + valuation</div>
+        </div>
+        <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}` }}>
+          {subTab("analyze","Analyze")}{subTab("compare","Compare")}{subTab("screener","Screener")}
+        </div>
+      </div>
+
+      {view==="analyze" && (
+        <div>
+          <div style={{ marginBottom:16 }}>{searchBar(go, "Company fundamentals — e.g. AAPL, NVDA, COST")}</div>
+          {err ? (
+            <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"14px 16px", color:C.down, fontSize:12.5 }}>Couldn't load fundamentals for {ticker}.</div>
+          ) : !fund ? (
+            <div style={{ padding:50, textAlign:"center", color:C.sub }}><Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:10 }}>Loading {ticker} fundamentals…</div></div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+              {/* Verdict banner */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, flexWrap:"wrap", background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+                <div style={{ minWidth:0 }}>
+                  <div style={{ display:"flex", alignItems:"baseline", gap:10, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:20, fontWeight:800, color:C.ink }}>{displaySym(fund.ticker)}</span>
+                    <span style={{ fontSize:13, color:C.sub }}>{fund.name}</span>
+                    <span style={{ fontFamily:C.mono, fontSize:14, color:C.ink }}>${fund.spot?.toFixed?.(2) ?? "—"}</span>
+                  </div>
+                  <div style={{ fontSize:11, color:C.faint, marginTop:2 }}>{fund.sector} · {fund.industry} · {fmtMoney(fund.marketCap)} mkt cap</div>
+                  {fund.verdict && <div style={{ fontSize:13.5, color:C.ink, marginTop:10, lineHeight:1.5, fontWeight:500 }}>{fund.verdict}</div>}
+                </div>
+                <button onClick={()=>onOpenDetail(fund.ticker)} style={{ background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"7px 12px", color:C.cold, cursor:"pointer", fontSize:12, fontWeight:600, flexShrink:0 }}>Chart & AI →</button>
+              </div>
+
+              {/* Fundamentals trends */}
+              <div>
+                <div style={{ fontSize:12.5, fontWeight:700, color:C.sub, marginBottom:9 }}>Company Fundamentals <span style={{ color:C.faint, fontWeight:400 }}>· {fund.years?.join(" → ")}</span></div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px,1fr))", gap:10 }}>
+                  <TrendStat label="Revenue"     series={t.revenue}   fmt={fmtMoney}/>
+                  <TrendStat label="Net Income"  series={t.netIncome} fmt={fmtMoney}/>
+                  <TrendStat label="Diluted EPS" series={t.eps}       fmt={v=>v==null?"—":`$${v.toFixed(2)}`}/>
+                  <TrendStat label="Gross Margin" series={t.grossMargin} fmt={v=>fmtPct(v)}/>
+                  <TrendStat label="Oper. Margin" series={t.operatingMargin} fmt={v=>fmtPct(v)}/>
+                  <TrendStat label="Net Margin"  series={t.netMargin} fmt={v=>fmtPct(v)}/>
+                  <TrendStat label="Free Cash Flow" series={t.fcf}    fmt={fmtMoney}/>
+                  <TrendStat label="Shares Out"  series={t.shares}    fmt={v=>v==null?"—":`${(v/1e9).toFixed(2)}B`} invert/>
+                </div>
+                {/* health strip */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px,1fr))", gap:10, marginTop:10 }}>
+                  <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:11, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase" }}>Cash vs Debt</div><div style={{ fontFamily:C.mono, fontSize:13, marginTop:3 }}><span style={{ color:C.up }}>{fmtMoney(fund.health?.totalCash)}</span> / <span style={{ color:C.down }}>{fmtMoney(fund.health?.totalDebt)}</span></div></div>
+                  <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:11, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase" }}>ROE</div><div style={{ fontFamily:C.mono, fontSize:15, fontWeight:700, marginTop:3, color:C.ink }}>{fmtPct(fund.health?.roe)}</div></div>
+                  <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:11, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase" }}>Current Ratio</div><div style={{ fontFamily:C.mono, fontSize:15, fontWeight:700, marginTop:3, color:(fund.health?.currentRatio||0)>=1?C.ink:C.down }}>{fund.health?.currentRatio?.toFixed?.(2) ?? "—"}</div></div>
+                  <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:11, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase" }}>Dilution (window)</div><div style={{ fontFamily:C.mono, fontSize:15, fontWeight:700, marginTop:3, color:(fund.dilution||0)>1?C.down:(fund.dilution||0)<-1?C.up:C.ink }}>{fund.dilution==null?"—":`${fund.dilution>=0?"+":""}${fund.dilution.toFixed(1)}%`}</div></div>
+                </div>
+              </div>
+
+              {/* Valuation snapshot */}
+              <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+                <div style={{ fontSize:14, fontWeight:700, color:C.ink, marginBottom:2 }}>Valuation Snapshot</div>
+                <div style={{ fontSize:11, color:C.faint, marginBottom:6 }}>Green = cheap · Yellow = fair · Red = expensive — vs sector median and its own 5-yr history</div>
+                <div style={{ display:"grid", gridTemplateColumns:"minmax(96px,1.4fr) minmax(60px,1fr) minmax(90px,1.3fr) minmax(90px,1.3fr)", gap:8, fontSize:9, color:C.faint, textTransform:"uppercase", letterSpacing:"0.05em", paddingBottom:2 }}>
+                  <div>Metric</div><div style={{ textAlign:"right" }}>Now</div><div style={{ textAlign:"right" }}>vs Sector</div><div style={{ textAlign:"right" }}>vs Own 5yr</div>
+                </div>
+                <ValuationRow label="Forward P/E"  m={fund.valuation?.forwardPE}/>
+                <ValuationRow label="Trailing P/E" m={fund.valuation?.trailingPE}/>
+                <ValuationRow label="PEG"          m={fund.valuation?.peg}/>
+                <ValuationRow label="P/S"          m={fund.valuation?.ps}/>
+                <ValuationRow label="P/B"          m={fund.valuation?.pb}/>
+                <ValuationRow label="EV/EBITDA"    m={fund.valuation?.evEbitda}/>
+              </div>
+
+              {/* Fair value model */}
+              <FairValueModel inp={fund.fairValueInputs}/>
+
+              {/* AI business quality */}
+              <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
+                  <div style={{ fontSize:14, fontWeight:700, color:C.ink }}>AI Business-Quality Read <span style={{ fontSize:11, color:C.faint, fontWeight:400 }}>· 3–5 yr moat & durability</span></div>
+                  {aiEnabled && !ai && !aiLoading && <button onClick={loadAi} style={{ background:C.cold, border:"none", borderRadius:8, padding:"8px 14px", color:"#fff", cursor:"pointer", fontSize:12.5, fontWeight:600, display:"flex", gap:6, alignItems:"center" }}><Zap size={13}/> Analyze</button>}
+                </div>
+                {!aiEnabled ? (
+                  <div style={{ fontSize:12.5, color:C.faint, marginTop:10 }}>Turn on <b style={{ color:C.sub }}>AI Insights</b> in Settings for the written business-quality analysis. All the fundamentals, valuation, compare and fair-value tools above are free and need no AI.</div>
+                ) : aiLoading ? (
+                  <div style={{ padding:"18px 0", textAlign:"center", color:C.sub }}><Loader2 size={16} style={{ animation:"spin 1s linear infinite" }}/><div style={{ fontSize:12, marginTop:6 }}>Reading the business…</div></div>
+                ) : ai?.ai_error ? (
+                  <div style={{ fontSize:12, color:C.amber, marginTop:10 }} title={String(ai.ai_error)}>AI error — {String(ai.ai_error).slice(0,120)}</div>
+                ) : ai ? (
+                  <div style={{ marginTop:12, display:"flex", flexDirection:"column", gap:10 }}>
+                    <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+                      <span style={{ fontFamily:C.mono, fontSize:22, fontWeight:800, color:scoreColor(ai.quality_score) }}>{ai.quality_score}/10</span>
+                      <span style={{ fontSize:12, fontWeight:700, color:ai.direction==="strengthening"?C.up:ai.direction==="weakening"?C.down:C.amber, textTransform:"uppercase", letterSpacing:"0.04em" }}>{ai.direction}</span>
+                    </div>
+                    {ai.verdict && <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.5, fontWeight:500 }}>{ai.verdict}</div>}
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px,1fr))", gap:10 }}>
+                      {[["Moat",ai.moat],["Market Opportunity",ai.market_opportunity],["Entry Read",ai.entry_read]].map(([k,v])=>v&&(
+                        <div key={k} style={{ background:C.panel2, borderRadius:10, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:3 }}>{k}</div><div style={{ fontSize:12, color:C.sub, lineHeight:1.5 }}>{v}</div></div>
+                      ))}
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px,1fr))", gap:10 }}>
+                      {ai.bull && <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}30`, borderRadius:10, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.up, textTransform:"uppercase", marginBottom:3, fontWeight:700 }}>Bull</div><div style={{ fontSize:12, color:C.sub, lineHeight:1.5 }}>{ai.bull}</div></div>}
+                      {ai.bear && <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}30`, borderRadius:10, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.down, textTransform:"uppercase", marginBottom:3, fontWeight:700 }}>Bear</div><div style={{ fontSize:12, color:C.sub, lineHeight:1.5 }}>{ai.bear}</div></div>}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {view==="compare" && (
+        <div>
+          <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16, flexWrap:"wrap" }}>
+            {searchBar((v)=>{ addCompare(v); setQuery(""); }, "Add a ticker to compare (up to 4)")}
+            <button onClick={()=>{ addCompare(query); setQuery(""); }} disabled={cmpList.length>=4} style={{ background:cmpList.length>=4?C.line:C.up, border:"none", borderRadius:9, padding:"9px 15px", color:cmpList.length>=4?C.sub:"#06080d", cursor:cmpList.length>=4?"default":"pointer", fontSize:12.5, fontWeight:700, display:"flex", gap:6, alignItems:"center" }}><Plus size={14}/> Add</button>
+            <span style={{ fontSize:11.5, color:C.faint }}>{cmpList.length}/4 · best value in each row highlighted</span>
+          </div>
+          {cmpList.length===0 ? (
+            <div style={{ textAlign:"center", padding:"40px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Add 2–4 tickers to compare them side by side.</div>
+          ) : (
+            <CompareTable items={cmpList.map(tk=>({ ticker:tk, ...(cmp[tk]||{ loading:true, data:null }) }))} onRemove={removeCompare} onOpen={go}/>
+          )}
+        </div>
+      )}
+
+      {view==="screener" && (
+        <ScreenerPanel watchlist={watchlist} savedScreens={savedScreens} onSaveScreen={onSaveScreen} onDeleteScreen={onDeleteScreen}
+          onOpen={onOpenDetail} onFinancials={go}/>
+      )}
+    </div>
+  );
+}
+
 // ── MAIN ──────────────────────────────────────────────────────────────
 export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [tab, setTab]             = useState("watchlist");
@@ -2795,6 +3414,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [alertHistory, setAlertHistory] = useState(loadAlerts);
   const [accounts, setAccounts]         = useState(loadAccounts);
   const [accountCollapsed, setAccountCollapsed] = useState(loadAccountCollapsed);
+  const [savedScreens, setSavedScreens] = useState(loadSavedScreens);
+  const [financialsTicker, setFinancialsTicker] = useState(null);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
 
@@ -2806,6 +3427,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ if (profile) saveProfile(profile); },[profile]);
   useEffect(()=>{ saveAccounts(accounts); },[accounts]);
   useEffect(()=>{ saveAccountCollapsed(accountCollapsed); },[accountCollapsed]);
+  useEffect(()=>{ saveSavedScreens(savedScreens); },[savedScreens]);
 
   // Keep-alive: ping the backend every 8 min so Render never cold-starts mid-session
   useEffect(()=>{
@@ -2836,6 +3458,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.alertHistory?.length) setAlertHistory(data.alertHistory);
         if (data.accounts)             setAccounts(data.accounts);
         if (data.accountCollapsed)     setAccountCollapsed(data.accountCollapsed);
+        if (data.savedScreens)         setSavedScreens(data.savedScreens);
       }).catch(()=>{});
     } else {
       // Anonymous path: fall back to server positions.json + settings.json
@@ -2848,13 +3471,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed };
+  sbState.current = { positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, userId]);
+  },[positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, userId]);
 
   // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
   // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
@@ -2981,6 +3604,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const removeTicker = (t)=> setWatchlist(w=>w.filter(x=>x!==t));
   const toggleWatch  = (t)=>{ const T=normalizeTicker(t); setWatchlist(w=>w.includes(T)?w.filter(x=>x!==T):[...w,T]); };
   const runSearch    = ()=>{ const T=normalizeTicker(query); if(T) setDetail(T); };
+  const openFinancials = (t) => { const T=normalizeTicker(t); if(T){ setDetail(null); setFinancialsTicker(T); setTab("financials"); } };
+  const saveScreen   = ({ name, mode, filters }) => setSavedScreens(s => [...s.filter(x=>x.name!==name), { name, mode, filters }]);
+  const deleteScreen = (name) => setSavedScreens(s => s.filter(x=>x.name!==name));
   const onAlertNavigate = (link) => {
     if (!link) return;
     if (link.startsWith("ticker:")) { setDetail(link.slice(7)); }
@@ -3013,7 +3639,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             {query && <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={14}/></button>}
           </div>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0, flexWrap:"wrap" }}>
-            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["brief","News"],["map","Map"]].map(([id,label])=>(
+            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["financials","Financials"],["brief","News"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
                 style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500,
                   background: !detail && tab===id ? C.line : "transparent",
@@ -3041,7 +3667,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
       {/* ── Content area ─────────────────────────────────────── */}
       {detail ? (
-        <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
+        <DetailPage ticker={detail} onBack={()=>setDetail(null)} inWatchlist={watchlist.includes(detail)} onToggleWatch={toggleWatch} aiEnabled={aiEnabled} onFinancials={openFinancials} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
       ) : (
         <div style={{ maxWidth:1180, margin:"0 auto", padding:"16px 14px 60px" }}>
           {tab==="watchlist" && (
@@ -3104,7 +3730,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                       onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
                       onDragEnd={()=>setWlDrag(null)}
                       style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
-                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData} range={wlRange} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
+                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData} range={wlRange} onFinancials={openFinancials} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
                     </div>
                   ))}
                 </div>
@@ -3112,6 +3738,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             </div>
           )}
           {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds}/>}
+          {tab==="financials" && <FinancialsPage initialTicker={financialsTicker} watchlist={watchlist} aiEnabled={aiEnabled}
+            profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}
+            savedScreens={savedScreens} onSaveScreen={saveScreen} onDeleteScreen={deleteScreen} onOpenDetail={setDetail}/>}
           {tab==="brief" && <BriefingRoom/>}
           {tab==="map" && <SectorMap watchlist={watchlist} cardCache={cardCache} onOpen={setDetail}/>}
         </div>

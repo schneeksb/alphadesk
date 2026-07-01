@@ -379,6 +379,400 @@ def research(ticker, ai=False, profile: str = ""):
     return _json_safe({"ticker": ticker, **tech, **ai_data})
 
 
+# ── FINANCIALS / FUNDAMENTALS (free, yfinance) ────────────────────────────────
+# Approximate sector-median valuation multiples used as a fast, free reference so
+# a single-ticker view can flag "cheap vs sector" without fetching a whole peer
+# group. Ballpark market figures — refine over time; kept intentionally simple.
+_SECTOR_MULTIPLES = {
+    "Technology":             {"forwardPE":27, "trailingPE":32, "peg":2.0, "ps":7.0, "pb":8.0, "evEbitda":20},
+    "Communication Services": {"forwardPE":18, "trailingPE":21, "peg":1.5, "ps":3.5, "pb":3.5, "evEbitda":11},
+    "Consumer Cyclical":      {"forwardPE":20, "trailingPE":24, "peg":1.6, "ps":1.8, "pb":5.0, "evEbitda":13},
+    "Consumer Defensive":     {"forwardPE":20, "trailingPE":22, "peg":2.5, "ps":1.5, "pb":4.0, "evEbitda":13},
+    "Healthcare":             {"forwardPE":18, "trailingPE":24, "peg":1.8, "ps":4.0, "pb":4.0, "evEbitda":14},
+    "Financial Services":     {"forwardPE":14, "trailingPE":15, "peg":1.4, "ps":3.0, "pb":1.6, "evEbitda":11},
+    "Industrials":            {"forwardPE":20, "trailingPE":24, "peg":2.0, "ps":2.2, "pb":5.0, "evEbitda":14},
+    "Energy":                 {"forwardPE":12, "trailingPE":13, "peg":1.2, "ps":1.4, "pb":1.8, "evEbitda":6},
+    "Utilities":              {"forwardPE":17, "trailingPE":19, "peg":3.0, "ps":2.5, "pb":1.8, "evEbitda":11},
+    "Real Estate":            {"forwardPE":30, "trailingPE":35, "peg":2.5, "ps":6.0, "pb":2.2, "evEbitda":17},
+    "Basic Materials":        {"forwardPE":15, "trailingPE":18, "peg":1.6, "ps":1.6, "pb":2.0, "evEbitda":8},
+}
+_SECTOR_DEFAULT = {"forwardPE":20, "trailingPE":22, "peg":1.8, "ps":3.0, "pb":3.0, "evEbitda":13}
+
+
+def _num(x):
+    """Coerce to a finite float or None."""
+    try:
+        f = float(x)
+        return f if np.isfinite(f) else None
+    except Exception:
+        return None
+
+
+def _stmt_row(df, *names):
+    """Return a statement row (list, newest→oldest) by trying several label spellings."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    for n in names:
+        if n in df.index:
+            return [_num(v) for v in df.loc[n].tolist()]
+    return None
+
+
+def fundamentals(ticker):
+    """Full fundamentals + valuation bundle for the Financials page. Free (yfinance)."""
+    ticker = ticker.upper().strip()
+    tk = yf.Ticker(ticker)
+    info = {}
+    try: info = tk.info or {}
+    except Exception: info = {}
+    if not info.get("longName") and not info.get("shortName") and not info.get("regularMarketPrice"):
+        # Might still have statements; but with nothing, bail
+        pass
+
+    try: inc = tk.income_stmt
+    except Exception: inc = None
+    try: bal = tk.balance_sheet
+    except Exception: bal = None
+    try: cf  = tk.cashflow
+    except Exception: cf  = None
+
+    # Annual series (yfinance columns are newest→oldest). Reverse to oldest→newest.
+    dates = []
+    try:
+        if inc is not None and not inc.empty:
+            dates = [c.strftime("%Y") for c in inc.columns][::-1]
+    except Exception:
+        dates = []
+
+    rev   = _stmt_row(inc, "Total Revenue", "Operating Revenue")
+    ni    = _stmt_row(inc, "Net Income", "Net Income Common Stockholders", "Net Income Continuous Operations")
+    eps   = _stmt_row(inc, "Diluted EPS", "Basic EPS")
+    gp    = _stmt_row(inc, "Gross Profit")
+    cor   = _stmt_row(inc, "Cost Of Revenue", "Reconciled Cost Of Revenue")
+    opinc = _stmt_row(inc, "Operating Income", "Total Operating Income As Reported")
+    fcf   = _stmt_row(cf,  "Free Cash Flow")
+    ocf   = _stmt_row(cf,  "Operating Cash Flow", "Cash Flow From Continuing Operating Activities")
+    capex = _stmt_row(cf,  "Capital Expenditure")
+    sh    = _stmt_row(bal, "Ordinary Shares Number", "Share Issued")
+
+    def rev_at(i):
+        return rev[i] if rev and i < len(rev) and rev[i] else None
+
+    # Derive FCF if missing (OCF + capex, capex is negative in yfinance)
+    if not fcf and ocf and capex:
+        fcf = [ (ocf[i] + capex[i]) if (ocf[i] is not None and capex[i] is not None) else None
+                for i in range(min(len(ocf), len(capex))) ]
+
+    def series(vals):
+        return list(reversed(vals)) if vals else []
+
+    # Per-year margins
+    gross_m, op_m, net_m = [], [], []
+    n = len(rev) if rev else 0
+    for i in range(n):
+        r = rev[i]
+        g = gp[i] if gp and i < len(gp) else (
+            (r - cor[i]) if (cor and i < len(cor) and r is not None and cor[i] is not None) else None)
+        gross_m.append((g / r) if (g is not None and r) else None)
+        op_m.append((opinc[i] / r) if (opinc and i < len(opinc) and opinc[i] is not None and r) else None)
+        net_m.append((ni[i] / r) if (ni and i < len(ni) and ni[i] is not None and r) else None)
+
+    # Revenue growth YoY (oldest→newest order)
+    rev_o = series(rev)
+    rev_growth = []
+    for i in range(1, len(rev_o)):
+        p, c = rev_o[i-1], rev_o[i]
+        rev_growth.append(((c / p - 1) * 100) if (p and c) else None)
+
+    # Dilution: shares oldest→newest. Use first/last NON-None (yfinance leaves the
+    # oldest balance-sheet column NaN for some names), so buybacks show as negative.
+    sh_o = series(sh)
+    dilution = None
+    sh_valid = [x for x in sh_o if x]
+    if len(sh_valid) >= 2:
+        dilution = (sh_valid[-1] / sh_valid[0] - 1) * 100  # % change in share count over the window
+
+    spot = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
+    if spot is None:
+        try:
+            h = tk.history(period="5d")["Close"].dropna()
+            spot = float(h.iloc[-1]) if not h.empty else None
+        except Exception:
+            spot = None
+
+    sector = info.get("sector") or "—"
+    smed = _SECTOR_MULTIPLES.get(sector, _SECTOR_DEFAULT)
+
+    # ── Own-history valuation bands (approx): P/E and P/S per statement year ──
+    # historical P/E = price at year-end / that year's diluted EPS
+    # historical P/S = (price * shares) / revenue at year-end
+    pe_hist, ps_hist = [], []
+    try:
+        ph = tk.history(period="6y", interval="1mo")["Close"].dropna()
+        if inc is not None and not inc.empty and not ph.empty:
+            for idx, col in enumerate(inc.columns):
+                # nearest monthly close to the statement period end
+                try:
+                    price_at = float(ph[ph.index <= col.tz_localize(ph.index.tz) if ph.index.tz else col].iloc[-1]) \
+                               if len(ph[ph.index <= (col.tz_localize(ph.index.tz) if ph.index.tz else col)]) else None
+                except Exception:
+                    price_at = None
+                if price_at is None:
+                    continue
+                e = eps[idx] if eps and idx < len(eps) else None
+                r = rev[idx] if rev and idx < len(rev) else None
+                s = sh[idx] if sh and idx < len(sh) else None
+                if e and e > 0:
+                    pe_hist.append(price_at / e)
+                if r and s:
+                    ps_hist.append((price_at * s) / r)
+    except Exception:
+        pass
+
+    def band(vals):
+        vals = [v for v in vals if v is not None and np.isfinite(v) and v > 0]
+        if not vals:
+            return None
+        return {"min": round(min(vals), 1), "avg": round(sum(vals) / len(vals), 1), "max": round(max(vals), 1)}
+
+    pe_band = band(pe_hist)
+    ps_band = band(ps_hist)
+
+    def verdict(value, ref):
+        """green(cheap)/yellow(fair)/red(expensive) for a lower-is-cheaper multiple."""
+        if value is None or ref is None or ref <= 0:
+            return None
+        ratio = value / ref
+        tag = "cheap" if ratio < 0.85 else ("expensive" if ratio > 1.15 else "fair")
+        return {"ratio": round(ratio, 2), "verdict": tag}
+
+    def metric(value, sector_ref, own_band):
+        own_avg = own_band["avg"] if own_band else None
+        return {
+            "value": _num(value),
+            "sector": sector_ref,
+            "vs_sector": verdict(_num(value), sector_ref),
+            "own_avg": own_avg,
+            "own_band": own_band,
+            "vs_own": verdict(_num(value), own_avg),
+        }
+
+    fpe = _num(info.get("forwardPE")); tpe = _num(info.get("trailingPE"))
+    peg = _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio"))
+    ps  = _num(info.get("priceToSalesTrailing12Months"))
+    pb  = _num(info.get("priceToBook")); ev = _num(info.get("enterpriseToEbitda"))
+
+    valuation = {
+        "forwardPE": metric(fpe, smed["forwardPE"], None),
+        "trailingPE": metric(tpe, smed["trailingPE"], pe_band),
+        "peg":       metric(peg, smed["peg"], None),
+        "ps":        metric(ps,  smed["ps"],  ps_band),
+        "pb":        metric(pb,  smed["pb"],  None),
+        "evEbitda":  metric(ev,  smed["evEbitda"], None),
+    }
+
+    # ── Plain-English verdict line (no AI) ──
+    def _x(v): return f"{v:.0f}x" if v is not None else "—"
+    verdict_line = None
+    if fpe:
+        ref_sec = smed["forwardPE"]
+        own_txt = f" and its own ~5yr avg of {pe_band['avg']:.0f}x" if pe_band else ""
+        own_ref = pe_band["avg"] if pe_band else ref_sec
+        blended = (ref_sec + own_ref) / 2
+        if fpe < blended * 0.85:
+            read = "undervalued, trading at a discount with room to re-rate higher"
+        elif fpe > blended * 1.15:
+            read = "richly valued, priced for strong execution with limited margin of safety"
+        else:
+            read = "reasonably valued, roughly in line with peers and its own history"
+        verdict_line = (f"{ticker} trades at {_x(fpe)} forward earnings vs a "
+                        f"{sector} sector median of {_x(ref_sec)}{own_txt} — {read}.")
+
+    health = {
+        "totalCash":  _num(info.get("totalCash")),
+        "totalDebt":  _num(info.get("totalDebt")),
+        "debtToEquity": _num(info.get("debtToEquity")),
+        "currentRatio": _num(info.get("currentRatio")),
+        "roe":        _num(info.get("returnOnEquity")),
+        "roa":        _num(info.get("returnOnAssets")),
+        "fcf":        _num(info.get("freeCashflow")),
+        "grossMargin": _num(info.get("grossMargins")),
+        "operatingMargin": _num(info.get("operatingMargins")),
+        "netMargin":  _num(info.get("profitMargins")),
+    }
+
+    return _json_safe({
+        "ticker": ticker,
+        "name":   info.get("longName") or info.get("shortName") or ticker,
+        "sector": sector,
+        "industry": info.get("industry") or "—",
+        "spot":   spot,
+        "marketCap": _num(info.get("marketCap")),
+        "years": dates,
+        "trends": {
+            "revenue":     series(rev),
+            "netIncome":   series(ni),
+            "eps":         series(eps),
+            "grossMargin": series(gross_m),
+            "operatingMargin": series(op_m),
+            "netMargin":   series(net_m),
+            "fcf":         series(fcf),
+            "shares":      sh_o,
+            "revenueGrowth": rev_growth,
+        },
+        "ttm": {
+            "revenue":      _num(info.get("totalRevenue")),
+            "revenueGrowth": _num(info.get("revenueGrowth")),
+            "earningsGrowth": _num(info.get("earningsGrowth")),
+            "trailingEps":  _num(info.get("trailingEps")),
+            "forwardEps":   _num(info.get("forwardEps")),
+        },
+        "dilution": dilution,
+        "health": health,
+        "valuation": valuation,
+        "verdict": verdict_line,
+        # Base inputs for the editable fair-value model (frontend recomputes live)
+        "fairValueInputs": {
+            "revenue":     _num(info.get("totalRevenue")),
+            "revenueGrowth": (_num(info.get("revenueGrowth")) or 0.10),
+            "netMargin":   (_num(info.get("profitMargins")) or 0.15),
+            "shares":      _num(info.get("sharesOutstanding")),
+            "fcf":         _num(info.get("freeCashflow")),
+            "spot":        spot,
+            "exitPE":      smed["forwardPE"],
+        },
+    })
+
+
+def business_quality(ticker, fund, profile: str = ""):
+    """AI business-quality analysis for a 3-5yr core holding. Runs only when ai=1."""
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    t = fund.get("trends", {}); h = fund.get("health", {}); v = fund.get("valuation", {})
+    def last(lst):
+        lst = [x for x in (lst or []) if x is not None]
+        return lst[-1] if lst else None
+    def pct(x): return f"{x*100:.1f}%" if x is not None else "—"
+    rev_series = t.get("revenue") or []
+    prof_block = _profile_ctx(profile)
+    prof_line = f"\n{prof_block}\n" if prof_block else ""
+    fpe = (v.get("forwardPE") or {}).get("value")
+    prompt = f"""You are a long-term business-quality analyst evaluating {fund.get('name')} ({ticker}) as a
+POTENTIAL 3-5 YEAR CORE HOLDING — not a swing trade. Sector: {fund.get('sector')}, {fund.get('industry')}.
+{prof_line}
+FUNDAMENTALS (yfinance):
+- Revenue trend ({', '.join(fund.get('years',[]))}): {rev_series}
+- Revenue growth TTM: {pct((fund.get('ttm') or {}).get('revenueGrowth'))}
+- Gross margin: {pct(h.get('grossMargin'))} · Operating margin: {pct(h.get('operatingMargin'))} · Net margin: {pct(h.get('netMargin'))}
+- ROE: {pct(h.get('roe'))} · Free cash flow: {h.get('fcf')}
+- Total cash: {h.get('totalCash')} · Total debt: {h.get('totalDebt')} · Current ratio: {h.get('currentRatio')}
+- Share count trend (dilution % over window): {fund.get('dilution')}
+- Forward P/E: {fpe} · Valuation verdict: {fund.get('verdict')}
+
+Weight your analysis toward BUSINESS QUALITY and MOAT DURABILITY. Channel the frameworks of
+trusted long-term analysts: Financial Education (Jeremy) on management & growth runway, Jerry Romine
+on deep financial quality, Stealth Wealth on disciplined valuation, and Ticker Symbol YOU on the
+durability of a tech/product moat.
+
+Respond with JSON only, no markdown:
+{{
+  "quality_score": <1-10 integer, business quality & durability>,
+  "direction": "strengthening" | "stable" | "weakening",
+  "moat": "<1-2 sentences: what the moat is and whether it's widening or eroding>",
+  "market_opportunity": "<1-2 sentences: is the TAM large and growing?>",
+  "entry_read": "<1-2 sentences: is the CURRENT price a good long-term entry for this trader?>",
+  "bull": "<the single strongest reason to own this for 5 years>",
+  "bear": "<the single biggest long-term risk>",
+  "verdict": "<one plain-English sentence: high-quality compounder, fair, or avoid — and why>"
+}}"""
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=900,
+        messages=[{"role": "user", "content": prompt}])
+    from scanner import _lenient_json
+    return _lenient_json(r.content[0].text)
+
+
+# ── STOCK SCREENER (free, yfinance) ───────────────────────────────────────────
+# Preset market universe. Starts with major S&P 500 constituents; expand freely —
+# the screener batches through this list so a longer list just takes more passes.
+_SP500 = [
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","BRK-B","LLY","AVGO","TSLA","JPM","WMT","V",
+    "UNH","XOM","MA","ORCL","JNJ","HD","PG","COST","ABBV","BAC","KO","MRK","CVX","CRM","NFLX","AMD",
+    "PEP","TMO","LIN","ADBE","ACN","MCD","CSCO","ABT","WFC","DHR","GE","QCOM","TXN","IBM","NOW","PM",
+    "CAT","INTU","VZ","DIS","AXP","AMGN","ISRG","MS","PFE","GS","RTX","SPGI","NEE","UNP","T","LOW",
+    "HON","BKNG","COP","UBER","BLK","SYK","PLD","TJX","VRTX","C","MDT","ADP","GILD","LMT","MMC","CB",
+    "BSX","AMAT","ADI","BA","SBUX","MDLZ","DE","REGN","ETN","PANW","CI","BMY","SO","MU","KLAC","SCHW",
+    "DUK","ANET","ICE","SHW","APH","MO","ZTS","PGR","CL","EQIX","SNPS","CMG","USB","WM","AON","ITW",
+    "CDNS","TT","PYPL","MSI","CME","GD","EOG","CVS","BDX","MCK","NOC","FCX","EMR","PH","MAR","CRWD",
+    "MMM","ORLY","APD","ROP","PNC","TDG","ECL","COF","CARR","AJG","NXPI","HCA","WELL","PCAR","SPG",
+    "OXY","AFL","MET","TFC","AIG","F","GM","DHI","HLT","NSC","PSA","AEP","TEL","O","SLB","KMB","D",
+    "ADSK","FTNT","ROST","GWW","MCHP","JCI","IDXX","AMP","CCI","FIS","DLR","CTAS","EW","KVUE","VLO",
+    "PSX","MPC","TRV","SRE","A","FDX","URI","CPRT","NEM","KMI","OKE","DOW","EXC","HUM","BK","GEHC",
+    "PRU","XEL","CMI","LEN","VRSK","YUM","GIS","KR","ODFL","MLM","ACGL","CTVA","VMC","MNST"," WMB",
+    "ED","IR","OTIS","EA","HES","DD","CSGP","KHC","AME","PWR","RSG","DFS","FICO","PPG","ON","ROK",
+]
+_SP500 = [t.strip() for t in _SP500 if t.strip()]
+
+
+def screen_metrics(ticker):
+    """Compact metric bundle for the screener. Cached long (~3h) — screening is free."""
+    def produce():
+        tk = yf.Ticker(ticker)
+        try: info = tk.info or {}
+        except Exception: info = {}
+        if not info:
+            return None
+        return {
+            "ticker": ticker,
+            "name": info.get("shortName") or info.get("longName") or ticker,
+            "sector": info.get("sector") or "—",
+            "price": _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice")),
+            "marketCap": _num(info.get("marketCap")),
+            "forwardPE": _num(info.get("forwardPE")),
+            "trailingPE": _num(info.get("trailingPE")),
+            "peg": _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio")),
+            "ps": _num(info.get("priceToSalesTrailing12Months")),
+            "evEbitda": _num(info.get("enterpriseToEbitda")),
+            "revenueGrowth": _num(info.get("revenueGrowth")),
+            "epsGrowth": _num(info.get("earningsGrowth")),
+            "grossMargin": _num(info.get("grossMargins")),
+            "roe": _num(info.get("returnOnEquity")),
+            "fcf": _num(info.get("freeCashflow")),
+            "debtToEquity": _num(info.get("debtToEquity")),
+            "currentRatio": _num(info.get("currentRatio")),
+        }
+    return _cached_swr(f"screen:{ticker}", produce, ttl=10800, stale_ttl=86400)
+
+
+def _passes(m, f):
+    """True if metrics dict m passes every provided filter f. Missing data fails a set filter."""
+    if m is None:
+        return False
+    def need(key, cond):
+        v = m.get(key)
+        return v is not None and cond(v)
+    if f.get("fpe_max")     is not None and not need("forwardPE",  lambda v: v <= f["fpe_max"]):     return False
+    if f.get("peg_max")     is not None and not need("peg",        lambda v: 0 < v <= f["peg_max"]):  return False
+    if f.get("ps_max")      is not None and not need("ps",         lambda v: v <= f["ps_max"]):       return False
+    if f.get("ev_max")      is not None and not need("evEbitda",   lambda v: v <= f["ev_max"]):       return False
+    if f.get("rev_growth_min") is not None and not need("revenueGrowth", lambda v: v*100 >= f["rev_growth_min"]): return False
+    if f.get("eps_growth_min") is not None and not need("epsGrowth",     lambda v: v*100 >= f["eps_growth_min"]): return False
+    if f.get("gross_min")   is not None and not need("grossMargin",lambda v: v*100 >= f["gross_min"]): return False
+    if f.get("roe_min")     is not None and not need("roe",        lambda v: v*100 >= f["roe_min"]):   return False
+    if f.get("fcf_positive")               and not need("fcf",        lambda v: v > 0):                 return False
+    if f.get("de_max")      is not None and not need("debtToEquity",lambda v: v <= f["de_max"]):       return False
+    if f.get("cr_min")      is not None and not need("currentRatio",lambda v: v >= f["cr_min"]):       return False
+    if f.get("cheap_vs_sector"):
+        smed = _SECTOR_MULTIPLES.get(m.get("sector"), _SECTOR_DEFAULT)["forwardPE"]
+        if not need("forwardPE", lambda v: 0 < v < smed):
+            return False
+    if f.get("mcap_min")    is not None and not need("marketCap",  lambda v: v >= f["mcap_min"]*1e9):  return False
+    if f.get("mcap_max")    is not None and not need("marketCap",  lambda v: v <= f["mcap_max"]*1e9):  return False
+    if f.get("sectors"):
+        secs = [s.strip().lower() for s in f["sectors"] if s.strip()]
+        if secs and (m.get("sector") or "").lower() not in secs:
+            return False
+    return True
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     tickers = sys.argv[1:] or ["NVDA"]
@@ -575,6 +969,60 @@ try:
     def research_endpoint(ticker: str, ai: int = 0, profile: str = ""):
         t = ticker.upper().strip()
         return _cached(f"research:{t}:{ai}:{profile}", lambda: research(t, ai=bool(ai), profile=profile))
+
+    @app.get("/fundamentals")
+    def fundamentals_endpoint(ticker: str):
+        """Full fundamentals + valuation bundle for the Financials page (free)."""
+        t = ticker.upper().strip()
+        return _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+
+    @app.get("/business-quality")
+    def business_quality_endpoint(ticker: str, profile: str = ""):
+        """AI business-quality read for a long-term holding. Costs a Claude call."""
+        t = ticker.upper().strip()
+        def produce():
+            try:
+                fund = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+                return _json_safe({"ticker": t, **(business_quality(t, fund, profile) or {})})
+            except Exception as e:
+                return {"ticker": t, "ai_error": str(e)}
+        return _cached(f"bizq:{t}:{profile}", produce)
+
+    @app.get("/screen")
+    def screen_endpoint(
+        mode: str = "market", tickers: str = "", offset: int = 0, limit: int = 40,
+        fpe_max: float = None, peg_max: float = None, ps_max: float = None, ev_max: float = None,
+        rev_growth_min: float = None, eps_growth_min: float = None, gross_min: float = None,
+        roe_min: float = None, fcf_positive: int = 0, de_max: float = None, cr_min: float = None,
+        mcap_min: float = None, mcap_max: float = None, sectors: str = "", cheap_vs_sector: int = 0,
+    ):
+        """Screen a batch of the universe (market) or the user's watchlist against the filters.
+        Market mode is paged via offset/limit so the frontend can show progress and avoid timeouts."""
+        f = {"fpe_max":fpe_max, "peg_max":peg_max, "ps_max":ps_max, "ev_max":ev_max,
+             "rev_growth_min":rev_growth_min, "eps_growth_min":eps_growth_min, "gross_min":gross_min,
+             "roe_min":roe_min, "fcf_positive":bool(fcf_positive), "de_max":de_max, "cr_min":cr_min,
+             "mcap_min":mcap_min, "mcap_max":mcap_max, "cheap_vs_sector":bool(cheap_vs_sector),
+             "sectors":[s for s in sectors.split(",") if s.strip()] if sectors else None}
+        if mode == "watchlist":
+            universe = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+            batch, done = universe, True
+        else:
+            universe = _SP500
+            batch = universe[offset:offset+limit]
+            done = (offset + limit) >= len(universe)
+        matches = []
+        for t in batch:
+            try:
+                m = screen_metrics(t)
+                if _passes(m, f):
+                    matches.append(m)
+            except Exception:
+                pass
+        return _json_safe({
+            "matches": matches, "scanned": len(batch),
+            "offset": offset, "next_offset": (None if done else offset + limit),
+            "total_universe": len(universe), "done": done,
+        })
 
     @app.get("/chart")
     def chart_endpoint(ticker: str, range: str = "3m"):

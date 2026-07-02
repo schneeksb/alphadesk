@@ -53,10 +53,16 @@ _YT_NS = {
 }
 
 
-# ── YouTube RSS (latest video IDs/titles — free, no quota) ────────────────────
-def fetch_entries(channel_id):
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+# ── Latest videos per channel (RSS first, HTML scrape fallback) ────────────────
+# YouTube's RSS feed endpoint (feeds/videos.xml) began returning 404 for all
+# channels, so we fall back to scraping the channel's /videos page and pulling
+# recent (videoId, title) pairs out of the embedded ytInitialData JSON.
+def _fetch_entries_rss(channel_id):
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=10) as r:
         root = ET.fromstring(r.read())
     out = []
@@ -72,48 +78,144 @@ def fetch_entries(channel_id):
     return out
 
 
-# ── Transcript fetch (youtube-transcript-api + optional cookies.txt) ──────────
-# YouTube rate-limits (429) unauthenticated transcript requests from residential
-# IPs after a burst. Fix: export your YouTube cookies once from Edge using the
-# "Get cookies.txt LOCALLY" Edge extension, save as yt_cookies.txt next to this
-# file, then add YT_COOKIES_PATH=yt_cookies.txt to .env.
-_YT_COOKIES = os.getenv("YT_COOKIES_PATH", "").strip() or None
+def _extract_balanced_json(html, marker):
+    """Extract the balanced {...} object that follows `marker` (string-aware)."""
+    i = html.find(marker)
+    if i < 0:
+        return None
+    i = html.find("{", i)
+    if i < 0:
+        return None
+    depth = 0; instr = False; esc = False
+    for j in range(i, len(html)):
+        c = html[j]
+        if esc:
+            esc = False; continue
+        if c == "\\":
+            esc = True; continue
+        if c == '"':
+            instr = not instr; continue
+        if instr:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return html[i:j+1]
+    return None
+
+
+def _fetch_entries_scrape(channel_id):
+    url = f"https://www.youtube.com/channel/{channel_id}/videos"
+    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        html = r.read().decode("utf-8", "replace")
+    blob = _extract_balanced_json(html, "ytInitialData")
+    out, seen = [], set()
+    if blob:
+        try:
+            data = json.loads(blob)
+        except Exception:
+            data = None
+        def walk(o):
+            if isinstance(o, dict):
+                # Legacy videoRenderer
+                vr = o.get("videoRenderer")
+                if isinstance(vr, dict) and vr.get("videoId"):
+                    vid = vr["videoId"]
+                    if vid not in seen:
+                        seen.add(vid)
+                        t = ""
+                        try: t = vr["title"]["runs"][0]["text"]
+                        except Exception:
+                            try: t = vr["title"]["simpleText"]
+                            except Exception: t = ""
+                        out.append({"vid": vid, "title": t, "link": f"https://youtube.com/watch?v={vid}",
+                                    "pub": "", "is_short": "#short" in (t or "").lower()})
+                # Current lockupViewModel (contentId = videoId, title under metadata)
+                lm = o.get("lockupViewModel")
+                if isinstance(lm, dict) and lm.get("contentId") and lm.get("contentType") == "LOCKUP_CONTENT_TYPE_VIDEO":
+                    vid = lm["contentId"]
+                    if vid not in seen and len(vid) == 11:
+                        seen.add(vid)
+                        t = ""
+                        try: t = lm["metadata"]["lockupMetadataViewModel"]["title"]["content"]
+                        except Exception: t = ""
+                        out.append({"vid": vid, "title": t, "link": f"https://youtube.com/watch?v={vid}",
+                                    "pub": "", "is_short": "#short" in (t or "").lower()})
+                for v in o.values(): walk(v)
+            elif isinstance(o, list):
+                for v in o: walk(v)
+        if data:
+            walk(data)
+    return out[:12]
+
+
+def fetch_entries(channel_id):
+    try:
+        rss = _fetch_entries_rss(channel_id)
+        if rss:
+            return rss
+    except Exception:
+        pass
+    return _fetch_entries_scrape(channel_id)
+
+
+# ── Transcript fetch (youtube-transcript-api 1.x) ─────────────────────────────
+# IMPORTANT: YouTube IP-BLOCKS caption downloads from residential/datacenter IPs
+# after a handful of requests (the api raises IpBlocked / RequestBlocked). The
+# list endpoint keeps working, but .fetch() gets blocked. The only robust fix is
+# to route through a proxy — set ONE of:
+#     YT_PROXY=http://user:pass@host:port          (any HTTP/HTTPS proxy)
+#     WEBSHARE_USER=... and WEBSHARE_PASS=...       (Webshare residential proxies)
+# Without a proxy it still works in short bursts / when the IP isn't currently
+# blocked, so a single clean run after a cooldown often succeeds.
+_YT_PROXY      = os.getenv("YT_PROXY", "").strip() or None
+_WEBSHARE_USER = os.getenv("WEBSHARE_USER", "").strip() or None
+_WEBSHARE_PASS = os.getenv("WEBSHARE_PASS", "").strip() or None
+_LANGS = ["en", "en-US", "en-GB"]
+
+def _yt_api():
+    from youtube_transcript_api import YouTubeTranscriptApi
+    try:
+        if _WEBSHARE_USER and _WEBSHARE_PASS:
+            from youtube_transcript_api.proxies import WebshareProxyConfig
+            return YouTubeTranscriptApi(proxy_config=WebshareProxyConfig(
+                proxy_username=_WEBSHARE_USER, proxy_password=_WEBSHARE_PASS))
+        if _YT_PROXY:
+            from youtube_transcript_api.proxies import GenericProxyConfig
+            return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(
+                http_url=_YT_PROXY, https_url=_YT_PROXY))
+    except Exception:
+        pass
+    return YouTubeTranscriptApi()
 
 def get_transcript(vid):
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api import YouTubeTranscriptApi  # noqa: F401
     except ImportError:
-        raise SystemExit("Missing dependency — run:  pip install youtube-transcript-api")
-    langs = ["en", "en-US", "en-GB"]
-    kwargs = {}
-    if _YT_COOKIES and os.path.isfile(_YT_COOKIES):
-        kwargs["cookies"] = _YT_COOKIES
+        raise SystemExit("Missing dependency — run:  pip install -U youtube-transcript-api")
+    api = _yt_api()
+    # Preferred: 1.x instance .fetch()
     try:
-        if hasattr(YouTubeTranscriptApi, "list_transcripts"):
-            tl = YouTubeTranscriptApi.list_transcripts(vid, **kwargs)
-            try:
-                t = tl.find_manually_created_transcript(langs)
-            except Exception:
-                try:
-                    t = tl.find_generated_transcript(langs)
-                except Exception:
-                    t = next(iter(tl))
-            return " ".join(p["text"] for p in t.fetch())
-        if hasattr(YouTubeTranscriptApi, "get_transcript"):
-            return " ".join(
-                p["text"] for p in YouTubeTranscriptApi.get_transcript(vid, languages=langs, **kwargs)
-            )
-    except Exception:
-        pass
-    # 1.x instance API
+        fetched = api.fetch(vid, languages=_LANGS)
+        try:    return " ".join(s["text"] for s in fetched.to_raw_data())
+        except Exception: return " ".join(getattr(s, "text", "") for s in fetched)
+    except Exception as e:
+        global _IP_BLOCKED
+        if type(e).__name__ in ("IpBlocked", "RequestBlocked"):
+            _IP_BLOCKED = True
+            return None
+    # Fallback: any available language via list()
     try:
-        fetched = YouTubeTranscriptApi().fetch(vid, languages=langs)
-        try:
-            return " ".join(p["text"] for p in fetched.to_raw_data())
-        except Exception:
-            return " ".join(getattr(s, "text", "") for s in fetched)
+        tl = api.list(vid)
+        t = tl.find_transcript([tr.language_code for tr in tl])
+        return " ".join(s["text"] for s in t.fetch().to_raw_data())
     except Exception:
         return None
+
+_IP_BLOCKED = False
 
 
 # ── Claude: extract 2-3 real insights from a transcript ───────────────────────
@@ -244,19 +346,28 @@ def main():
             print(f"    ✓ {v['title'][:60]}  [{ins['sentiment']}]")
         summary.append((a["name"], found))
 
-    print("\nSaving to Supabase …")
-    save_to_supabase(all_rows)
+    total = sum(n for _, n in summary)
+    # Don't wipe existing good data on a fully-blocked/empty run.
+    if all_rows or not _IP_BLOCKED:
+        print("\nSaving to Supabase …")
+        save_to_supabase(all_rows)
+    else:
+        print("\nSkipping save — IP-blocked run with 0 insights (kept existing data).")
 
     print("\n" + "=" * 48)
     print("MARKET PULSE — fetch complete")
     print("=" * 48)
-    total = 0
     for name, n in summary:
         print(f"  {n} insight(s)  ·  {name}")
-        total += n
     print("-" * 48)
     print(f"  {total} total insight(s) across {len(summary)} analysts")
-    print(f"  written to market_pulse @ {now_iso}")
+    if total:
+        print(f"  written to market_pulse @ {now_iso}")
+    if _IP_BLOCKED:
+        print("\n⚠  YouTube IP-BLOCKED transcript downloads from this network.")
+        print("   Video discovery worked, but captions couldn't be fetched.")
+        print("   Fix: set WEBSHARE_USER/WEBSHARE_PASS (or YT_PROXY=http://user:pass@host:port)")
+        print("   in .env to route through a proxy, or re-run later after a cooldown.")
 
 
 if __name__ == "__main__":

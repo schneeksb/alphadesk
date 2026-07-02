@@ -773,6 +773,132 @@ def _passes(m, f):
     return True
 
 
+# ── CHAT ASSISTANT (grounded Q&A over live data; runs only when ai=1) ─────────
+_TICKER_STOP = {
+    "A","I","THE","AND","OR","IS","IT","IF","TO","OF","IN","ON","AT","BE","DO","GO","MY","ME","AN",
+    "AS","AI","US","PE","P","E","CEO","CFO","ETF","YOY","USD","DCF","EPS","ROE","ROA","TTM","IPO",
+    "OK","VS","AM","PM","EV","FCF","PEG","RSI","IV","ATH","YTD","Q1","Q2","Q3","Q4","DTE","CALL","PUT",
+    "BUY","SELL","HOLD","NOW","WHY","HOW","WHAT","WHEN","GET","OUT","UP","ALL","FOR","ARE","CAN","YOU",
+}
+
+def extract_tickers(text, extra=None):
+    """Best-effort ticker detection: uppercase 1-5 letter tokens, plus any word (any
+    case) that matches a ticker the user already tracks (watchlist/portfolio)."""
+    import re
+    out = []
+    for c in re.findall(r"\b[A-Z]{1,5}\b", text or ""):
+        if c not in _TICKER_STOP and c not in out:
+            out.append(c)
+    known = {str(t).upper() for t in (extra or [])}
+    if known:
+        for w in re.findall(r"\b[A-Za-z]{1,6}\b", text or ""):
+            u = w.upper()
+            if u in known and u not in out:
+                out.append(u)
+    return out[:4]
+
+
+def _chat_ticker_context(t):
+    """Compact, factual snapshot for one ticker pulled from cached research + fundamentals."""
+    try:
+        rb = _cached(f"research:{t}:0:", lambda: research(t, ai=False))
+    except Exception:
+        rb = None
+    if not rb or rb.get("error"):
+        return None
+    parts = [f"{t}: ${rb.get('spot')} ({rb.get('chg')}% today), RSI {rb.get('rsi')}"]
+    if rb.get("week52Low") and rb.get("week52High"):
+        parts.append(f"52wk ${rb['week52Low']}–${rb['week52High']}")
+    an = rb.get("analyst") or {}
+    if an.get("targetMean"):
+        parts.append(f"analyst target ${an['targetMean']} ({(an.get('recKey') or '').replace('_',' ')})")
+    if rb.get("daysToEarn") is not None:
+        parts.append(f"earnings in {rb['daysToEarn']}d")
+    if rb.get("iv"):
+        parts.append(f"IV {rb['iv']}%")
+    line = " · ".join(str(p) for p in parts)
+    try:
+        fb = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+        if fb and not fb.get("error"):
+            v = fb.get("valuation") or {}
+            fpe = (v.get("forwardPE") or {}).get("value")
+            vs  = (v.get("forwardPE") or {}).get("vs_sector") or {}
+            extra = []
+            if fpe: extra.append(f"fwd P/E {round(fpe,1)}" + (f" ({vs.get('verdict')} vs sector)" if vs.get('verdict') else ""))
+            if (fb.get('ttm') or {}).get('revenueGrowth') is not None:
+                extra.append(f"rev growth {round(fb['ttm']['revenueGrowth']*100,1)}%")
+            if fb.get("verdict"): extra.append(fb["verdict"])
+            if extra: line += " | " + " · ".join(extra)
+    except Exception:
+        pass
+    return line
+
+
+def chat_reply(message, history=None, profile="", portfolio=None, watchlist=None):
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    known = list(watchlist or []) + [p.get("ticker") for p in (portfolio or []) if p.get("ticker")]
+    tickers = extract_tickers(message, extra=known)
+    # Also pull recent tickers referenced earlier in the conversation
+    for h in (history or [])[-4:]:
+        for c in extract_tickers(h.get("content",""), extra=known):
+            if c not in tickers and len(tickers) < 4:
+                tickers.append(c)
+
+    ctx_blocks = []
+    for t in tickers[:4]:
+        c = _chat_ticker_context(t)
+        if c: ctx_blocks.append(c)
+
+    port_ctx = ""
+    if portfolio:
+        rows = []
+        for p in portfolio[:20]:
+            if p.get("error"): continue
+            sym = p.get("ticker"); typ = p.get("type","")
+            pnl = p.get("pnl"); dpnl = p.get("day_change")
+            rows.append(f"{sym} {typ} x{p.get('qty')}: val ${p.get('current_val')}, P&L ${pnl}"
+                        + (f", today ${dpnl}" if dpnl is not None else ""))
+        if rows:
+            port_ctx = "USER PORTFOLIO (live):\n" + "\n".join(rows)
+
+    data_ctx = ""
+    if ctx_blocks:
+        data_ctx += "LIVE DATA CONTEXT (use these exact numbers):\n" + "\n".join(ctx_blocks) + "\n"
+    if port_ctx:
+        data_ctx += "\n" + port_ctx + "\n"
+    if watchlist:
+        data_ctx += f"\nWatchlist: {', '.join(watchlist[:40])}\n"
+    if not data_ctx:
+        data_ctx = "(No specific ticker data resolved for this question — answer from general market knowledge and ask for a ticker if needed.)"
+
+    prof_block = _profile_ctx(profile)
+    system = (
+        "You are AlphaDesk's research assistant — a sharp, concise markets analyst helping a retail "
+        "investor reason about their watchlist, holdings, and specific stocks using the LIVE DATA provided.\n\n"
+        + (prof_block + "\n\n" if prof_block else "")
+        + ANALYST_WEIGHT_BLOCK + "\n\n"
+        "RULES:\n"
+        "- Ground every claim in the LIVE DATA CONTEXT. Cite the actual numbers (price, RSI, P/E, targets, P&L).\n"
+        "- If the data needed isn't in context, say so plainly and ask for the ticker rather than inventing figures.\n"
+        "- For buy/sell/timing questions, give a BALANCED read: the bull case, the bear case, the key levels "
+        "(entry / stop / target if inferable), and what would change the thesis — not a bare 'yes/no'.\n"
+        "- Tailor the lens to the user's trader profile above.\n"
+        "- Be tight and conversational: 2-4 short paragraphs or a few bullets, no filler.\n"
+        "- FORMAT for a narrow chat window: short paragraphs and simple '- ' bullet lists only. "
+        "Use **bold** sparingly for key numbers/tickers. Do NOT use markdown headers (#) or tables.\n"
+        "- For any specific buy/sell/timing question, END with exactly one line: "
+        "\"This is analysis to inform your own decision — not personalized financial advice.\"\n"
+    )
+    msgs = []
+    for h in (history or [])[-8:]:
+        role = h.get("role"); content = (h.get("content") or "").strip()
+        if role in ("user","assistant") and content:
+            msgs.append({"role": role, "content": content})
+    msgs.append({"role": "user", "content": f"{data_ctx}\n\nQUESTION: {message}"})
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=900, system=system, messages=msgs)
+    return {"reply": r.content[0].text, "tickers": tickers}
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     tickers = sys.argv[1:] or ["NVDA"]
@@ -1023,6 +1149,25 @@ try:
             "offset": offset, "next_offset": (None if done else offset + limit),
             "total_universe": len(universe), "done": done,
         })
+
+    @app.post("/chat")
+    def chat_endpoint(body: dict = Body(...)):
+        """Grounded research-assistant chat. Costs a Claude call — frontend gates on AI Insights."""
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            return {"reply": "AI is off — enable AI Insights (and set the API key) to chat.", "ai_error": "no_key"}
+        msg = (body.get("message") or "").strip()
+        if not msg:
+            return {"reply": "Ask me anything about your watchlist, holdings, or a specific ticker."}
+        try:
+            return chat_reply(
+                msg,
+                history=body.get("history") or [],
+                profile=body.get("profile") or "",
+                portfolio=body.get("portfolio") or [],
+                watchlist=body.get("watchlist") or [],
+            )
+        except Exception as e:
+            return {"reply": f"Sorry — I hit an error answering that ({str(e)[:80]}). Try again.", "ai_error": str(e)}
 
     @app.get("/chart")
     def chart_endpoint(ticker: str, range: str = "3m"):

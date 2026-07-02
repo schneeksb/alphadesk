@@ -7,4 +7,4 @@ anthropic==0.111.0
 python-dotenv==1.2.2
 fastapi==0.137.2
 uvicorn[standard]==0.49.0
-youtube-transcript-api==0.6.2
+youtube-transcript-api==1.2.4

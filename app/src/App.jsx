@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap, FolderPlus, Check } from "lucide-react";
+import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap, FolderPlus, Check, MessageCircle, Send } from "lucide-react";
 import { DndContext, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDroppable, closestCorners } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -229,6 +229,13 @@ async function fetchScreen(params) {
   const qs = new URLSearchParams();
   Object.entries(params).forEach(([k,v])=>{ if (v!==null && v!==undefined && v!=="") qs.set(k, v); });
   const r = await fetch(`${API}/screen?${qs.toString()}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchChat(body) {
+  const r = await fetch(`${API}/chat`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -3394,6 +3401,142 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
   );
 }
 
+// ── AI CHAT ASSISTANT (floating; grounded in the user's live data) ────────────
+// Lightweight markdown: **bold**, "- " bullets, blank-line paragraphs. No tables/headers
+// (the backend prompt is told to avoid them so this stays simple).
+function renderRich(text) {
+  const lines = String(text || "").split("\n");
+  const out = []; let bullets = null; let key = 0;
+  const inline = (s) => s.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    part.startsWith("**") && part.endsWith("**")
+      ? <strong key={i} style={{ color:C.ink }}>{part.slice(2,-2)}</strong>
+      : <span key={i}>{part}</span>);
+  const flush = () => { if (bullets) { out.push(<ul key={`u${key++}`} style={{ margin:"4px 0", paddingLeft:18 }}>{bullets}</ul>); bullets=null; } };
+  for (const raw of lines) {
+    const line = raw.replace(/^#+\s*/, "");   // strip stray headers
+    if (/^\s*[-*]\s+/.test(line)) {
+      if (!bullets) bullets = [];
+      bullets.push(<li key={key++} style={{ marginBottom:3, lineHeight:1.5 }}>{inline(line.replace(/^\s*[-*]\s+/, ""))}</li>);
+    } else if (line.trim()==="") {
+      flush();
+    } else {
+      flush();
+      out.push(<div key={key++} style={{ lineHeight:1.55, margin:"3px 0" }}>{inline(line)}</div>);
+    }
+  }
+  flush();
+  return out;
+}
+
+const CHAT_SUGGESTIONS = [
+  "How's my portfolio positioned right now?",
+  "Is NVDA cheap or expensive at these levels?",
+  "What are the biggest risks in my watchlist this week?",
+];
+
+function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
+  const [open, setOpen] = useState(false);
+  const [msgs, setMsgs] = useState([]);   // {role, content}
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scrollRef = useRef(null);
+  useEffect(()=>{ if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; },[msgs, busy, open]);
+
+  const send = async (text) => {
+    const q = (text ?? input).trim();
+    if (!q || busy) return;
+    const history = msgs.slice(-8);
+    const next = [...msgs, { role:"user", content:q }];
+    setMsgs(next); setInput(""); setBusy(true);
+    try {
+      const d = await fetchChat({ message:q, history, profile, watchlist,
+        portfolio: (portfolio||[]).map(p=>({ ticker:p.ticker, type:p.type, qty:p.qty, current_val:p.current_val, pnl:p.pnl, day_change:p.day_change, error:p.error })) });
+      setMsgs(m => [...m, { role:"assistant", content: d.reply || "…" }]);
+    } catch {
+      setMsgs(m => [...m, { role:"assistant", content:"Sorry — I couldn't reach the server. Is the backend running?" }]);
+    }
+    setBusy(false);
+  };
+
+  const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
+  return (
+    <>
+      {/* Floating launcher */}
+      <button onClick={()=>setOpen(o=>!o)} title="Ask AlphaDesk"
+        style={{ position:"fixed", right:18, bottom:18, zIndex:80, width:54, height:54, borderRadius:"50%",
+          background:C.cold, border:"none", boxShadow:"0 8px 28px rgba(0,0,0,0.35)", cursor:"pointer",
+          display:"flex", alignItems:"center", justifyContent:"center", color:"#fff" }}>
+        {open ? <X size={22}/> : <MessageCircle size={24}/>}
+      </button>
+
+      {open && (
+        <div style={{ position:"fixed", zIndex:80, background:C.bg, border:`1px solid ${C.line}`, boxShadow:"0 16px 50px rgba(0,0,0,0.4)",
+          display:"flex", flexDirection:"column", overflow:"hidden",
+          ...(isMobile
+            ? { inset:0, borderRadius:0 }
+            : { right:18, bottom:84, width:400, height:"min(620px, 78vh)", borderRadius:16 }) }}>
+          {/* Header */}
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"13px 16px", borderBottom:`1px solid ${C.line}`, flexShrink:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+              <div style={{ width:30, height:30, borderRadius:9, background:`${C.cold}1c`, display:"flex", alignItems:"center", justifyContent:"center" }}><Zap size={16} color={C.cold}/></div>
+              <div>
+                <div style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>AlphaDesk Assistant</div>
+                <div style={{ fontSize:10.5, color:C.faint }}>grounded in your live data</div>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:6 }}>
+              {msgs.length>0 && <button onClick={()=>setMsgs([])} title="Clear chat" style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:7, padding:"5px 8px", color:C.faint, cursor:"pointer", fontSize:11 }}>Clear</button>}
+              <button onClick={()=>setOpen(false)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", display:"flex" }}><X size={18}/></button>
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div ref={scrollRef} style={{ flex:1, overflowY:"auto", padding:"14px 14px", display:"flex", flexDirection:"column", gap:10 }}>
+            {msgs.length===0 && (
+              <div style={{ color:C.sub }}>
+                <div style={{ fontSize:13, lineHeight:1.6, marginBottom:12 }}>Ask about any ticker, your holdings, or the market. I read your live prices, valuations, and P&amp;L to answer.</div>
+                <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+                  {CHAT_SUGGESTIONS.map(s=>(
+                    <button key={s} onClick={()=>send(s)} disabled={!aiEnabled}
+                      style={{ textAlign:"left", background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:"9px 12px", color:aiEnabled?C.sub:C.faint, cursor:aiEnabled?"pointer":"default", fontSize:12.5, lineHeight:1.4 }}>{s}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {msgs.map((m,i)=>(
+              <div key={i} style={{ display:"flex", justifyContent: m.role==="user"?"flex-end":"flex-start" }}>
+                <div style={{ maxWidth:"88%", padding:"9px 13px", borderRadius:13, fontSize:12.5,
+                  background: m.role==="user"?C.cold:C.panel, color: m.role==="user"?"#fff":C.sub,
+                  border: m.role==="user"?"none":`1px solid ${C.line}`,
+                  borderBottomRightRadius: m.role==="user"?4:13, borderBottomLeftRadius: m.role==="user"?13:4 }}>
+                  {m.role==="user" ? m.content : <div>{renderRich(m.content)}</div>}
+                </div>
+              </div>
+            ))}
+            {busy && <div style={{ display:"flex", alignItems:"center", gap:7, color:C.faint, fontSize:12 }}><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> thinking…</div>}
+          </div>
+
+          {/* Input */}
+          <div style={{ padding:"11px 12px", borderTop:`1px solid ${C.line}`, flexShrink:0 }}>
+            {!aiEnabled ? (
+              <div style={{ fontSize:12, color:C.faint, textAlign:"center", padding:"6px 0" }}>Turn on <b style={{ color:C.sub }}>AI Insights</b> in Settings to chat.</div>
+            ) : (
+              <div style={{ display:"flex", gap:8, alignItems:"flex-end" }}>
+                <textarea value={input} onChange={e=>setInput(e.target.value)} rows={1}
+                  onKeyDown={e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } }}
+                  placeholder="Ask about a ticker, your holdings, the market…"
+                  style={{ flex:1, resize:"none", maxHeight:96, background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:"9px 11px", color:C.ink, fontSize:12.5, outline:"none", fontFamily:"inherit", lineHeight:1.4 }}/>
+                <button onClick={()=>send()} disabled={busy||!input.trim()} style={{ background: (busy||!input.trim())?C.line:C.cold, border:"none", borderRadius:10, width:38, height:38, flexShrink:0, cursor:(busy||!input.trim())?"default":"pointer", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center" }}><Send size={16}/></button>
+              </div>
+            )}
+            <div style={{ fontSize:9.5, color:C.faint, textAlign:"center", marginTop:7 }}>Analysis to inform your decisions — not financial advice.</div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── MAIN ──────────────────────────────────────────────────────────────
 export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [tab, setTab]             = useState("watchlist");
@@ -3745,6 +3888,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           {tab==="map" && <SectorMap watchlist={watchlist} cardCache={cardCache} onOpen={setDetail}/>}
         </div>
       )}
+      <ChatAssistant aiEnabled={aiEnabled} watchlist={watchlist} portfolio={portfolio?.positions}
+        profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );

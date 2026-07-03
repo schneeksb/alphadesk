@@ -19,24 +19,5 @@ services:
       - key: PYTHON_VERSION
         value: "3.11.9"
 
-  # Pre-market Market Brief agent — runs the tool-use loop and writes the brief
-  # to Supabase. Weekdays 11:45 UTC ≈ 7:45am ET during DST (12:45 UTC in winter —
-  # adjust the hour when clocks change, cron is UTC-only). Cron jobs bill only
-  # for runtime (~pennies/month at a few minutes/day).
-  - type: cron
-    name: alphadesk-brief
-    runtime: python
-    plan: starter
-    region: oregon
-    schedule: "45 11 * * 1-5"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python run_market_brief.py
-    envVars:
-      - key: ANTHROPIC_API_KEY
-        sync: false          # set in dashboard
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false          # service key lives ONLY on this private cron job — never the web service or frontend
-      - key: PYTHON_VERSION
-        value: "3.11.9"
+# Scheduled Market Brief runs live in GitHub Actions (free) instead of a Render
+# cron job — see .github/workflows/market-brief.yml

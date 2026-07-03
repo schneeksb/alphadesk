@@ -1,0 +1,44 @@
+# Scheduled Market Brief — runs the agent pre-market and writes the brief to
+# Supabase (run_market_brief.py). Free on GitHub Actions (~3 min/run).
+#
+# Setup (one time): repo → Settings → Secrets and variables → Actions → add:
+#   ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+#
+# Notes:
+# - Cron is UTC. 11:47 ≈ 7:47am ET during daylight time; use 12:47 in winter.
+#   Odd minute on purpose — top-of-hour slots are congested and start late.
+# - GitHub may delay scheduled runs 5-15 min; fine for a pre-market brief.
+# - "Run workflow" button (workflow_dispatch) lets you trigger it manually.
+
+name: Market Brief
+
+on:
+  schedule:
+    - cron: "47 11 * * 1-5"
+  workflow_dispatch: {}
+
+concurrency:
+  group: market-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Market Brief agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python run_market_brief.py

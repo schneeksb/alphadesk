@@ -1169,6 +1169,35 @@ try:
         except Exception as e:
             return {"reply": f"Sorry — I hit an error answering that ({str(e)[:80]}). Try again.", "ai_error": str(e)}
 
+    @app.post("/brief/refresh")
+    def brief_refresh_endpoint(body: dict = Body(...)):
+        """On-demand Market Brief: values the posted positions, runs the agent
+        (tool-use loop, ~1-4 min), returns {brief, tool_log, ...}. The frontend
+        persists the result (Supabase when signed in, localStorage otherwise) —
+        this service never holds the Supabase service key."""
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            return {"error": "ANTHROPIC_API_KEY not set on the backend."}
+        try:
+            from market_brief_agent import run_market_brief
+            positions = body.get("positions") or []
+            valued, analytics = [], {}
+            if positions:
+                from run_daily import layer1_data_valuation, layer2_portfolio_analytics
+                valued = layer1_data_valuation(positions)
+                ok = [p for p in valued if not p.get("error") and not p.get("expired")]
+                if ok:
+                    analytics = layer2_portfolio_analytics(ok)
+            out = run_market_brief(
+                positions=valued, analytics=analytics,
+                conviction=body.get("conviction") or body.get("watchlist") or [],
+                radar=body.get("radar") or [],
+                profile=body.get("profile") or "")
+            if not out.get("brief"):
+                return {"error": "agent finished without submitting a brief", "tool_log": out.get("tool_log")}
+            return _json_safe(out)
+        except Exception as e:
+            return {"error": str(e)}
+
     @app.get("/chart")
     def chart_endpoint(ticker: str, range: str = "3m"):
         """Price history for any timeframe with correct yfinance params per range."""
@@ -1378,8 +1407,8 @@ try:
             try:
                 import pandas as pd
                 tickers = ["SPY"] + list(_ROTATION_ETFS.values())
-                raw = yf.download(tickers, period="60d", auto_adjust=True,
-                                  progress=False, show_errors=False)
+                # (yfinance >=0.2.52 removed the show_errors kwarg)
+                raw = yf.download(tickers, period="60d", auto_adjust=True, progress=False)
                 # Handle both flat and MultiIndex columns
                 closes = raw["Close"] if "Close" in raw.columns else raw
                 if hasattr(closes.columns, 'levels'):

@@ -239,6 +239,14 @@ async function fetchChat(body) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchBriefRefresh(body) {
+  // Agent loop server-side — expect 1-4 minutes.
+  const r = await fetch(`${API}/brief/refresh`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchValue(positions, margin = 0, margin_rate = 0) {
   const r = await fetch(`${API}/value`, {
     method: "POST",
@@ -321,6 +329,23 @@ async function sbSave(uid, payload) {
     { onConflict: "user_id" }
   );
   if (error) console.error("[sb] save error:", error.message);
+}
+// Market Brief artifacts (agent output + tool log) — RLS user-keyed table
+async function sbLoadBrief(uid) {
+  if (!supabase || !uid) return null;
+  const { data, error } = await supabase
+    .from("market_brief").select("brief,tool_log,generated_at,source,model,turns")
+    .eq("user_id", uid).order("generated_at", { ascending: false }).limit(1).maybeSingle();
+  if (error) { console.error("[sb] brief load error:", error.message); return null; }
+  return data;
+}
+async function sbSaveBrief(uid, out) {
+  if (!supabase || !uid) return;
+  const { error } = await supabase.from("market_brief").insert({
+    user_id: uid, source: "manual", brief: out.brief, tool_log: out.tool_log,
+    model: out.model, turns: out.turns,
+  });
+  if (error) console.error("[sb] brief save error:", error.message);
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────
@@ -1047,6 +1072,239 @@ function EconomicCalendar({ events }) {
 }
 
 // ── BRIEFING ROOM (refreshes every open/focus) ────────────────────────
+// ── MARKET BRIEF (agent-written; decision first, evidence on demand) ──────────
+const URGENCY_COL = { high: () => C.down, medium: () => C.amber, low: () => C.faint };
+const REGIME_COL  = { "risk-on": () => C.up, "risk-off": () => C.down, neutral: () => C.amber, mixed: () => C.violet };
+const Badge = ({ text, col }) => (
+  <span style={{ fontSize:10, fontWeight:800, letterSpacing:"0.06em", textTransform:"uppercase",
+    color:col, background:`${col}16`, border:`1px solid ${col}40`, borderRadius:5, padding:"2px 8px", whiteSpace:"nowrap" }}>{text}</span>
+);
+
+function MarketBriefSection({ userId, positions, watchlist, profile, aiEnabled }) {
+  const [row, setRow]           = useState(null);     // {brief, tool_log, generated_at, source}
+  const [loading, setLoading]   = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [elapsed, setElapsed]   = useState(0);
+  const [err, setErr]           = useState(null);
+  const [openObs, setOpenObs]   = useState({});
+  const [showLog, setShowLog]   = useState(false);
+
+  useEffect(()=>{
+    let alive = true;
+    (async () => {
+      let r = userId ? await sbLoadBrief(userId) : null;
+      if (!r) { try { r = JSON.parse(localStorage.getItem("alphadesk:lastBrief") || "null"); } catch {} }
+      if (alive) { setRow(r); setLoading(false); }
+    })();
+    return ()=>{ alive = false; };
+  },[userId]);
+
+  useEffect(()=>{
+    if (!refreshing) return;
+    const t0 = Date.now();
+    const id = setInterval(()=>setElapsed(Math.floor((Date.now()-t0)/1000)), 1000);
+    return ()=>clearInterval(id);
+  },[refreshing]);
+
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true); setErr(null); setElapsed(0);
+    try {
+      const out = await fetchBriefRefresh({ positions, watchlist, profile });
+      if (out.error) { setErr(out.error); }
+      else {
+        const r = { brief: out.brief, tool_log: out.tool_log, generated_at: out.generated_at,
+                    source: "manual", model: out.model, turns: out.turns };
+        setRow(r);
+        try { localStorage.setItem("alphadesk:lastBrief", JSON.stringify(r)); } catch {}
+        if (userId) sbSaveBrief(userId, out);
+      }
+    } catch (e) { setErr(String(e.message || e)); }
+    setRefreshing(false);
+  };
+
+  const b = row?.brief;
+  const regimeCol = b ? (REGIME_COL[b.market_regime?.label] || (()=>C.amber))() : C.amber;
+  const when = row?.generated_at ? new Date(row.generated_at) : null;
+
+  return (
+    <div style={{ marginBottom:30 }}>
+      {/* Header */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12, flexWrap:"wrap", gap:8 }}>
+        <div>
+          <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Market Brief</div>
+          <div style={{ fontSize:11.5, color:C.faint, marginTop:2 }}>
+            {when ? `${row.source==="scheduled" ? "pre-market run" : "manual run"} · ${when.toLocaleString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" })}` : "agent-written, evidence-backed"}
+          </div>
+        </div>
+        <button onClick={refresh} disabled={refreshing || !aiEnabled}
+          title={aiEnabled ? "Run the agent now (~1-4 min)" : "Turn on AI Insights in Settings"}
+          style={{ background: refreshing||!aiEnabled ? C.panel : C.cold, border:`1px solid ${refreshing||!aiEnabled?C.line:C.cold}`,
+            borderRadius:9, padding:"8px 15px", color: refreshing||!aiEnabled ? C.sub : "#fff",
+            cursor: refreshing||!aiEnabled ? "default" : "pointer", fontSize:12.5, fontWeight:700,
+            display:"flex", gap:7, alignItems:"center" }}>
+          {refreshing ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Investigating… {elapsed}s</> : <><Zap size={14}/> Refresh Brief</>}
+        </button>
+      </div>
+
+      {err && <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"11px 14px", color:C.down, fontSize:12.5, marginBottom:12 }}>Brief failed: {err}</div>}
+
+      {loading ? (
+        <div style={{ padding:30, textAlign:"center", color:C.sub }}><Loader2 size={18} style={{ animation:"spin 1s linear infinite" }}/></div>
+      ) : !b ? (
+        <div style={{ background:C.panel, border:`1px dashed ${C.line}`, borderRadius:14, padding:"26px 22px", textAlign:"center" }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.ink, marginBottom:6 }}>No brief yet</div>
+          <div style={{ fontSize:12.5, color:C.sub, lineHeight:1.6, maxWidth:520, margin:"0 auto" }}>
+            The Market Brief agent investigates the macro regime, sector rotation, and your holdings before
+            the open, then writes a decision-first summary with its evidence attached.
+            {aiEnabled ? " Hit Refresh Brief to run it now." : " Turn on AI Insights in Settings, then hit Refresh Brief."}
+          </div>
+        </div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {/* Headline + regime */}
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderLeft:`4px solid ${regimeCol}`, borderRadius:14, padding:"18px 20px" }}>
+            <div style={{ fontSize:18, fontWeight:800, color:C.ink, lineHeight:1.35, letterSpacing:"-0.01em" }}>{b.headline}</div>
+            <div style={{ display:"flex", gap:8, alignItems:"center", marginTop:10, flexWrap:"wrap" }}>
+              <Badge text={b.market_regime?.label} col={regimeCol}/>
+              <span style={{ fontSize:10.5, color:C.faint }}>confidence: {b.market_regime?.confidence}</span>
+            </div>
+            <div style={{ fontSize:12.5, color:C.sub, lineHeight:1.6, marginTop:9 }}>{b.market_regime?.summary}</div>
+          </div>
+
+          {/* Portfolio read — the priority section */}
+          {b.portfolio_read && (
+            <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 20px" }}>
+              <div style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.08em", marginBottom:8 }}>YOUR PORTFOLIO</div>
+              <div style={{ fontSize:13.5, color:C.ink, lineHeight:1.65, fontWeight:500 }}>{b.portfolio_read.takeaway}</div>
+              {(b.portfolio_read.exposures||[]).length > 0 && (
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginTop:12 }}>
+                  {b.portfolio_read.exposures.map((x,i)=>{
+                    const col = (URGENCY_COL[x.severity]||URGENCY_COL.low)();
+                    return (
+                      <div key={i} title={x.detail} style={{ border:`1px solid ${col}40`, background:`${col}0c`, borderRadius:9, padding:"7px 11px", maxWidth:340 }}>
+                        <div style={{ display:"flex", gap:7, alignItems:"center" }}>
+                          <span style={{ fontSize:12, fontWeight:700, color:C.ink }}>{x.theme}</span>
+                          <Badge text={x.severity} col={col}/>
+                        </div>
+                        <div style={{ fontSize:11, color:C.sub, marginTop:3, lineHeight:1.45 }}>{x.detail}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Observations — expandable evidence */}
+          {(b.key_observations||[]).length > 0 && (
+            <div>
+              <div style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.08em", marginBottom:8 }}>KEY OBSERVATIONS <span style={{ textTransform:"none", letterSpacing:0 }}>· tap for evidence</span></div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {b.key_observations.map((o,i)=>(
+                  <div key={i} onClick={()=>setOpenObs(m=>({ ...m, [i]: !m[i] }))}
+                    style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"13px 16px", cursor:"pointer" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", gap:10, alignItems:"flex-start" }}>
+                      <div style={{ minWidth:0 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:C.ink }}>{o.title}</div>
+                        <div style={{ fontSize:12, color:C.sub, marginTop:4, lineHeight:1.55 }}>{o.so_what}</div>
+                      </div>
+                      <ChevronDown size={15} color={C.faint} style={{ flexShrink:0, transform: openObs[i]?"rotate(180deg)":"none", transition:"transform .15s" }}/>
+                    </div>
+                    {openObs[i] && (o.evidence||[]).length > 0 && (
+                      <div style={{ marginTop:10, borderTop:`1px solid ${C.panel2}`, paddingTop:10, display:"flex", flexDirection:"column", gap:6 }}>
+                        {o.evidence.map((ev,j)=>(
+                          <div key={j} style={{ display:"flex", gap:9, alignItems:"baseline" }}>
+                            <span style={{ fontFamily:C.mono, fontSize:9.5, color:C.cold, background:`${C.cold}12`, borderRadius:4, padding:"1px 6px", whiteSpace:"nowrap", flexShrink:0 }}>{ev.source}</span>
+                            <span style={{ fontSize:11.5, color:C.sub, lineHeight:1.5 }}>{ev.fact}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Watchlist flags */}
+          {(b.watchlist_flags||[]).length > 0 && (
+            <div>
+              <div style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.08em", marginBottom:8 }}>WATCHLIST FLAGS</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(250px,1fr))", gap:8 }}>
+                {b.watchlist_flags.map((f,i)=>{
+                  const col = (URGENCY_COL[f.urgency]||URGENCY_COL.low)();
+                  return (
+                    <div key={i} style={{ background:C.panel, border:`1px solid ${C.line}`, borderLeft:`3px solid ${col}`, borderRadius:10, padding:"11px 13px" }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+                        <span style={{ fontWeight:800, fontSize:13, color:C.ink }}>{displaySym(f.ticker)}</span>
+                        <Badge text={f.urgency} col={col}/>
+                      </div>
+                      <div style={{ fontSize:11.5, fontWeight:600, color:C.sub, marginTop:4 }}>{f.flag}</div>
+                      <div style={{ fontSize:11, color:C.faint, marginTop:3, lineHeight:1.45 }}>{f.reason}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Suggested actions */}
+          {(b.suggested_actions||[]).length > 0 && (
+            <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px" }}>
+              <div style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.08em", marginBottom:9 }}>SUGGESTED ACTIONS</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
+                {b.suggested_actions.map((a,i)=>{
+                  const col = a.confidence==="high" ? C.up : a.confidence==="medium" ? C.amber : C.faint;
+                  return (
+                    <div key={i} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                      <Badge text={a.confidence} col={col}/>
+                      <div style={{ minWidth:0 }}>
+                        <div style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{a.action}</div>
+                        <div style={{ fontSize:11.5, color:C.sub, marginTop:2, lineHeight:1.5 }}>{a.rationale}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Honesty footer + tool log */}
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {(b.what_i_did_not_check||[]).length > 0 && (
+              <div style={{ fontSize:11, color:C.faint, fontStyle:"italic", lineHeight:1.6 }}>
+                <b style={{ fontStyle:"normal" }}>Not checked:</b> {b.what_i_did_not_check.join(" · ")}
+              </div>
+            )}
+            <div>
+              <button onClick={()=>setShowLog(s=>!s)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:8, padding:"7px 12px", color:C.sub, cursor:"pointer", fontSize:11.5, fontWeight:600, display:"flex", gap:6, alignItems:"center" }}>
+                <Activity size={12}/> How I got here — {row.tool_log?.length ?? 0} tool calls {showLog?"▴":"▾"}
+              </button>
+              {showLog && (
+                <div style={{ marginTop:8, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"6px 0", overflowX:"auto" }}>
+                  {(row.tool_log||[]).map((e,i)=>(
+                    <div key={i} style={{ padding:"9px 14px", borderTop: i?`1px solid ${C.panel2}`:"none", fontFamily:C.mono, fontSize:11 }}>
+                      <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+                        <span style={{ color:C.faint }}>#{e.turn}</span>
+                        <span style={{ color:C.cold, fontWeight:700 }}>{e.tool}</span>
+                        {e.input && Object.keys(e.input).length > 0 && <span style={{ color:C.sub }}>{JSON.stringify(e.input).slice(0,90)}</span>}
+                        <span style={{ color:C.faint, marginLeft:"auto" }}>{e.ms}ms</span>
+                      </div>
+                      {e.result_preview && <div style={{ color:C.faint, marginTop:4, lineHeight:1.5, wordBreak:"break-all" }}>{String(e.result_preview).slice(0,300)}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={{ fontSize:10, color:C.faint }}>Personal research input — not financial advice.</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BriefingRoom() {
   const [b, setB]           = useState(null);
   const [outlook, setOutlook] = useState(null);
@@ -3782,7 +4040,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             {query && <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={14}/></button>}
           </div>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0, flexWrap:"wrap" }}>
-            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["financials","Financials"],["brief","News"],["map","Map"]].map(([id,label])=>(
+            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["financials","Financials"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
                 style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500,
                   background: !detail && tab===id ? C.line : "transparent",
@@ -3884,7 +4142,14 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           {tab==="financials" && <FinancialsPage initialTicker={financialsTicker} watchlist={watchlist} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}
             savedScreens={savedScreens} onSaveScreen={saveScreen} onDeleteScreen={deleteScreen} onOpenDetail={setDetail}/>}
-          {tab==="brief" && <BriefingRoom/>}
+          {tab==="brief" && (
+            <div>
+              {/* Decision first: the agent's brief. Evidence below: the full market intelligence. */}
+              <MarketBriefSection userId={userId} positions={positions} watchlist={watchlist} aiEnabled={aiEnabled}
+                profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
+              <BriefingRoom/>
+            </div>
+          )}
           {tab==="map" && <SectorMap watchlist={watchlist} cardCache={cardCache} onOpen={setDetail}/>}
         </div>
       )}

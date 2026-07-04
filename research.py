@@ -576,6 +576,46 @@ def fundamentals(ticker):
         except Exception:
             spot = None
 
+    # ── Statement-derived fallbacks ──────────────────────────────────────────
+    # Yahoo's info/quoteSummary API is frequently BLOCKED from datacenter IPs
+    # (e.g. Render) while statements + price history still work. Derive the core
+    # metrics from statements so the Financials page stays fully useful in
+    # production. info values win whenever present.
+    try: qinc = tk.quarterly_income_stmt
+    except Exception: qinc = None
+    try: qcf = tk.quarterly_cashflow
+    except Exception: qcf = None
+    def _ttm(df, *names, n=4):
+        r = _stmt_row(df, *names)
+        vals = [v for v in (r or [])[:n] if v is not None]
+        return sum(vals) if len(vals) == n else None
+    def _newest(df, *names):
+        r = _stmt_row(df, *names)
+        return next((v for v in (r or []) if v is not None), None)
+    def _first(*vals):
+        return next((v for v in vals if v is not None), None)
+    rev_ttm = _first(_ttm(qinc, "Total Revenue", "Operating Revenue"), rev[0] if rev else None)
+    ni_ttm  = _first(_ttm(qinc, "Net Income", "Net Income Common Stockholders"), ni[0] if ni else None)
+    eps_ttm = _first(_ttm(qinc, "Diluted EPS", "Basic EPS"), eps[0] if eps else None)
+    fcf_ttm = _first(_ttm(qcf, "Free Cash Flow"), fcf[0] if fcf else None)
+    gp_ttm  = _first(_ttm(qinc, "Gross Profit"), gp[0] if gp else None)
+    op_ttm  = _first(_ttm(qinc, "Operating Income", "Total Operating Income As Reported"), opinc[0] if opinc else None)
+    shares_d = _first(_num(info.get("sharesOutstanding")), next((v for v in (sh or []) if v), None))
+    equity_d = _newest(bal, "Stockholders Equity", "Common Stock Equity")
+    cash_d   = _newest(bal, "Cash Cash Equivalents And Short Term Investments", "Cash And Cash Equivalents")
+    debt_d   = _newest(bal, "Total Debt")
+    ca_d     = _newest(bal, "Current Assets")
+    cl_d     = _newest(bal, "Current Liabilities")
+    mcap_d   = (spot * shares_d) if (spot and shares_d) else None
+    def _ratio(a, b):
+        return (a / b) if (a is not None and b) else None
+    rev_growth_yoy = None   # annual YoY fallback for TTM revenue growth
+    if rev and len(rev) >= 2 and rev[0] and rev[1]:
+        rev_growth_yoy = rev[0] / rev[1] - 1
+    eps_growth_yoy = None
+    if eps and len(eps) >= 2 and eps[0] and eps[1] and eps[1] > 0:
+        eps_growth_yoy = eps[0] / eps[1] - 1
+
     sector = info.get("sector") or "—"
     smed = _SECTOR_MULTIPLES.get(sector, _SECTOR_DEFAULT)
 
@@ -633,10 +673,16 @@ def fundamentals(ticker):
             "vs_own": verdict(_num(value), own_avg),
         }
 
-    fpe = _num(info.get("forwardPE")); tpe = _num(info.get("trailingPE"))
+    # info first, statement-derived second (production fallback when info is blocked)
+    tpe = _first(_num(info.get("trailingPE")),
+                 _ratio(spot, eps_ttm) if (eps_ttm and eps_ttm > 0) else None)
+    fpe = _num(info.get("forwardPE"))                       # needs analyst estimates
     peg = _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio"))
-    ps  = _num(info.get("priceToSalesTrailing12Months"))
-    pb  = _num(info.get("priceToBook")); ev = _num(info.get("enterpriseToEbitda"))
+    if peg is None and tpe and eps_growth_yoy and eps_growth_yoy > 0:
+        peg = tpe / (eps_growth_yoy * 100)
+    ps  = _first(_num(info.get("priceToSalesTrailing12Months")), _ratio(mcap_d, rev_ttm))
+    pb  = _first(_num(info.get("priceToBook")), _ratio(mcap_d, equity_d))
+    ev  = _num(info.get("enterpriseToEbitda"))
 
     valuation = {
         "forwardPE": metric(fpe, smed["forwardPE"], None),
@@ -650,31 +696,33 @@ def fundamentals(ticker):
     # ── Plain-English verdict line (no AI) ──
     def _x(v): return f"{v:.0f}x" if v is not None else "—"
     verdict_line = None
-    if fpe:
-        ref_sec = smed["forwardPE"]
+    v_pe, v_word = (fpe, "forward") if fpe else (tpe, "trailing")
+    if v_pe:
+        ref_sec = smed["forwardPE"] if fpe else smed["trailingPE"]
         own_txt = f" and its own ~5yr avg of {pe_band['avg']:.0f}x" if pe_band else ""
         own_ref = pe_band["avg"] if pe_band else ref_sec
         blended = (ref_sec + own_ref) / 2
-        if fpe < blended * 0.85:
+        if v_pe < blended * 0.85:
             read = "undervalued, trading at a discount with room to re-rate higher"
-        elif fpe > blended * 1.15:
+        elif v_pe > blended * 1.15:
             read = "richly valued, priced for strong execution with limited margin of safety"
         else:
             read = "reasonably valued, roughly in line with peers and its own history"
-        verdict_line = (f"{ticker} trades at {_x(fpe)} forward earnings vs a "
+        verdict_line = (f"{ticker} trades at {_x(v_pe)} {v_word} earnings vs a "
                         f"{sector} sector median of {_x(ref_sec)}{own_txt} — {read}.")
 
     health = {
-        "totalCash":  _num(info.get("totalCash")),
-        "totalDebt":  _num(info.get("totalDebt")),
-        "debtToEquity": _num(info.get("debtToEquity")),
-        "currentRatio": _num(info.get("currentRatio")),
-        "roe":        _num(info.get("returnOnEquity")),
+        "totalCash":  _first(_num(info.get("totalCash")), cash_d),
+        "totalDebt":  _first(_num(info.get("totalDebt")), debt_d),
+        "debtToEquity": _first(_num(info.get("debtToEquity")),
+                               (_ratio(debt_d, equity_d) * 100) if _ratio(debt_d, equity_d) is not None else None),
+        "currentRatio": _first(_num(info.get("currentRatio")), _ratio(ca_d, cl_d)),
+        "roe":        _first(_num(info.get("returnOnEquity")), _ratio(ni_ttm, equity_d)),
         "roa":        _num(info.get("returnOnAssets")),
-        "fcf":        _num(info.get("freeCashflow")),
-        "grossMargin": _num(info.get("grossMargins")),
-        "operatingMargin": _num(info.get("operatingMargins")),
-        "netMargin":  _num(info.get("profitMargins")),
+        "fcf":        _first(_num(info.get("freeCashflow")), fcf_ttm),
+        "grossMargin": _first(_num(info.get("grossMargins")), _ratio(gp_ttm, rev_ttm)),
+        "operatingMargin": _first(_num(info.get("operatingMargins")), _ratio(op_ttm, rev_ttm)),
+        "netMargin":  _first(_num(info.get("profitMargins")), _ratio(ni_ttm, rev_ttm)),
     }
 
     # ── Forward analyst estimates (avg/low/high per period: 0q,+1q,0y,+1y) ──
@@ -698,10 +746,10 @@ def fundamentals(ticker):
     eps_0y = (est_eps.get("0y") or {}).get("avg")
     advanced = {
         "fwd2PE":          (spot / eps_1y) if (spot and eps_1y and eps_1y > 0) else None,
-        "epsGrowthTTM":    _num(info.get("earningsGrowth")),
+        "epsGrowthTTM":    _first(_num(info.get("earningsGrowth")), eps_growth_yoy),
         "epsGrowthCurrYr": (est_eps.get("0y") or {}).get("growth"),
         "epsGrowthNextYr": (est_eps.get("+1y") or {}).get("growth"),
-        "revGrowthTTM":    _num(info.get("revenueGrowth")),
+        "revGrowthTTM":    _first(_num(info.get("revenueGrowth")), rev_growth_yoy),
         "revGrowthCurrYr": (est_rev.get("0y") or {}).get("growth"),
         "revGrowthNextYr": (est_rev.get("+1y") or {}).get("growth"),
         "epsCurrYrEst":    eps_0y, "epsNextYrEst": eps_1y,
@@ -713,7 +761,7 @@ def fundamentals(ticker):
         "sector": sector,
         "industry": info.get("industry") or "—",
         "spot":   spot,
-        "marketCap": _num(info.get("marketCap")),
+        "marketCap": _first(_num(info.get("marketCap")), mcap_d),
         "years": dates,
         "trends": {
             "revenue":     series(rev),
@@ -727,11 +775,11 @@ def fundamentals(ticker):
             "revenueGrowth": rev_growth,
         },
         "ttm": {
-            "revenue":      _num(info.get("totalRevenue")),
-            "revenueGrowth": _num(info.get("revenueGrowth")),
-            "earningsGrowth": _num(info.get("earningsGrowth")),
-            "trailingEps":  _num(info.get("trailingEps")),
-            "forwardEps":   _num(info.get("forwardEps")),
+            "revenue":      _first(_num(info.get("totalRevenue")), rev_ttm),
+            "revenueGrowth": _first(_num(info.get("revenueGrowth")), rev_growth_yoy),
+            "earningsGrowth": _first(_num(info.get("earningsGrowth")), eps_growth_yoy),
+            "trailingEps":  _first(_num(info.get("trailingEps")), eps_ttm),
+            "forwardEps":   _first(_num(info.get("forwardEps")), eps_1y),
         },
         "dilution": dilution,
         "health": health,
@@ -741,11 +789,11 @@ def fundamentals(ticker):
         "verdict": verdict_line,
         # Base inputs for the editable fair-value model (frontend recomputes live)
         "fairValueInputs": {
-            "revenue":     _num(info.get("totalRevenue")),
-            "revenueGrowth": (_num(info.get("revenueGrowth")) or 0.10),
-            "netMargin":   (_num(info.get("profitMargins")) or 0.15),
-            "shares":      _num(info.get("sharesOutstanding")),
-            "fcf":         _num(info.get("freeCashflow")),
+            "revenue":     _first(_num(info.get("totalRevenue")), rev_ttm),
+            "revenueGrowth": _first(_num(info.get("revenueGrowth")), rev_growth_yoy, 0.10),
+            "netMargin":   _first(_num(info.get("profitMargins")), _ratio(ni_ttm, rev_ttm), 0.15),
+            "shares":      shares_d,
+            "fcf":         _first(_num(info.get("freeCashflow")), fcf_ttm),
             "spot":        spot,
             "exitPE":      smed["forwardPE"],
         },
@@ -1373,6 +1421,79 @@ try:
             except Exception as e:
                 return {"ticker": t, "filings": [], "error": str(e)}
         return _cached_swr(f"filings:{t}", produce, ttl=21600, stale_ttl=172800)
+
+    @app.get("/symbol-search")
+    def symbol_search_endpoint(q: str = ""):
+        """Ticker autocomplete: proxy Yahoo's symbol search (equities/ETFs/crypto),
+        cached per prefix. Tiny payloads; the frontend also has a built-in static
+        list as fallback if this is unavailable."""
+        q = q.strip()
+        if not q or len(q) > 20:
+            return {"results": []}
+        def produce():
+            import urllib.request as _ur, urllib.parse as _up, json as _json
+            try:
+                url = ("https://query1.finance.yahoo.com/v1/finance/search?"
+                       + _up.urlencode({"q": q, "quotesCount": 8, "newsCount": 0, "listsCount": 0}))
+                req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with _ur.urlopen(req, timeout=8) as r:
+                    data = _json.loads(r.read())
+                out = []
+                for x in (data.get("quotes") or []):
+                    sym = x.get("symbol"); name = x.get("shortname") or x.get("longname") or ""
+                    typ = x.get("quoteType") or ""
+                    if sym and typ in ("EQUITY", "ETF", "CRYPTOCURRENCY", "INDEX", "FUTURE"):
+                        out.append({"t": sym, "n": name, "type": typ, "exch": x.get("exchDisp") or ""})
+                return {"results": out[:8]}
+            except Exception:
+                return {"results": []}
+        return _cached_swr(f"symsearch:{q.upper()}", produce, ttl=86400, stale_ttl=604800)
+
+    @app.get("/earnings-prep")
+    def earnings_prep_endpoint(ticker: str, profile: str = "", authorization: str = Header(None)):
+        """AI pre-earnings briefing: what to watch on the upcoming call, grounded in
+        fundamentals, analyst estimates, and recent filing activity. Costs a Claude
+        call — login required. Honest scope: we do NOT parse full filing text; the
+        analysis uses financial data + filing metadata."""
+        require_user(authorization)
+        t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "ai_error": "invalid ticker"}
+        def produce():
+            try:
+                fund = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+                fil  = filings_endpoint(t)
+                est  = fund.get("estimates") or {}
+                h    = fund.get("health") or {}
+                a    = fund.get("advanced") or {}
+                filing_lines = "\n".join(f"  {f['form']} filed {f['date']}: {f['desc']}"
+                                         for f in (fil.get("filings") or [])[:8])
+                prof_block = _profile_ctx(profile)
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""You are preparing an investor for {t}'s UPCOMING earnings call. Date: {datetime.date.today()}.
+{prof_block}
+FINANCIAL SNAPSHOT (yfinance):
+- Valuation verdict: {fund.get('verdict')}
+- TTM revenue growth: {a.get('revGrowthTTM')} · gross margin {h.get('grossMargin')} · net margin {h.get('netMargin')}
+- FCF: {h.get('fcf')} · cash {h.get('totalCash')} vs debt {h.get('totalDebt')}
+- ANALYST ESTIMATES — revenue: {est.get('revenue')}
+- ANALYST ESTIMATES — EPS: {est.get('eps')}
+RECENT SEC FILINGS (metadata only — full text not parsed):
+{filing_lines or '  (none found)'}
+
+Write an earnings-call prep. Respond with JSON only, no markdown:
+{{"headline": "<one line: the single thing this earnings call is really about>",
+"numbers_to_beat": ["<the specific revenue/EPS bar vs estimates, with figures>", "<second metric>"],
+"watch_items": ["<specific thing 1 to listen for on the call>", "<2>", "<3>", "<4>"],
+"filing_notes": ["<anything notable from the filing cadence/types above, or say nothing notable>"],
+"risks": ["<what could make the stock drop even on a beat>", "<second risk>"],
+"bottom_line": "<2 sentences: how this trader should approach the print>"}}"""
+                r = client.messages.create(model="claude-sonnet-4-6", max_tokens=800,
+                                           messages=[{"role": "user", "content": prompt}])
+                from scanner import _lenient_json
+                return _json_safe({"ticker": t, **(_lenient_json(r.content[0].text) or {})})
+            except Exception as e:
+                return {"ticker": t, "ai_error": str(e)}
+        return _cached(f"earnprep:{t}:{profile}", produce)
 
     @app.get("/business-quality")
     def business_quality_endpoint(ticker: str, profile: str = "", authorization: str = Header(None)):

@@ -237,6 +237,11 @@ async function fetchFilings(ticker) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchEarningsPrep(ticker, profile = "") {
+  const r = await fetch(`${API}/earnings-prep?ticker=${encodeURIComponent(ticker)}&profile=${encodeURIComponent(profile||"")}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchScreen(params) {
   const qs = new URLSearchParams();
   Object.entries(params).forEach(([k,v])=>{ if (v!==null && v!==undefined && v!=="") qs.set(k, v); });
@@ -368,6 +373,98 @@ const rsiColor = (v) => v==null ? C.faint : v < 30 ? C.up : v > 70 ? C.down : C.
 const rsiLabel = (v) => v==null ? "" : v < 30 ? "oversold" : v > 70 ? "overbought" : "neutral";
 // Tactical setup (mean reversion × trend) tone → color.
 const tacticalCol = (t) => t?.tone==="bullish"?C.up : t?.tone==="bearish"?C.down : t?.tone==="caution"?C.amber : C.faint;
+
+// ── TICKER AUTOCOMPLETE ───────────────────────────────────────────────
+// Instant suggestions from a built-in directory (zero server load), enriched by
+// the backend's Yahoo symbol search after a short debounce.
+const TICKER_DIR = [
+  ["AAPL","Apple"],["MSFT","Microsoft"],["NVDA","NVIDIA"],["GOOGL","Alphabet"],["AMZN","Amazon"],
+  ["META","Meta Platforms"],["TSLA","Tesla"],["AVGO","Broadcom"],["BRK-B","Berkshire Hathaway"],
+  ["LLY","Eli Lilly"],["JPM","JPMorgan Chase"],["V","Visa"],["WMT","Walmart"],["XOM","Exxon Mobil"],
+  ["UNH","UnitedHealth"],["MA","Mastercard"],["ORCL","Oracle"],["COST","Costco"],["HD","Home Depot"],
+  ["PG","Procter & Gamble"],["NFLX","Netflix"],["JNJ","Johnson & Johnson"],["ABBV","AbbVie"],
+  ["BAC","Bank of America"],["CRM","Salesforce"],["KO","Coca-Cola"],["MRK","Merck"],["CVX","Chevron"],
+  ["AMD","Advanced Micro Devices"],["PEP","PepsiCo"],["ADBE","Adobe"],["TMO","Thermo Fisher"],
+  ["MU","Micron Technology"],["PLTR","Palantir"],["SOFI","SoFi Technologies"],["INTC","Intel"],
+  ["QCOM","Qualcomm"],["TXN","Texas Instruments"],["IBM","IBM"],["NOW","ServiceNow"],["GE","GE Aerospace"],
+  ["CAT","Caterpillar"],["DIS","Disney"],["BA","Boeing"],["GS","Goldman Sachs"],["MS","Morgan Stanley"],
+  ["UBER","Uber"],["SBUX","Starbucks"],["NKE","Nike"],["PFE","Pfizer"],["T","AT&T"],["VZ","Verizon"],
+  ["SNDK","SanDisk"],["WDC","Western Digital"],["ALAB","Astera Labs"],["VRT","Vertiv"],["APP","AppLovin"],
+  ["ANET","Arista Networks"],["PANW","Palo Alto Networks"],["CRWD","CrowdStrike"],["SMCI","Super Micro"],
+  ["ASML","ASML"],["TSM","Taiwan Semiconductor"],["BABA","Alibaba"],["SHOP","Shopify"],["PYPL","PayPal"],
+  ["COIN","Coinbase"],["HOOD","Robinhood"],["MRNA","Moderna"],["LULU","Lululemon"],["ENPH","Enphase"],
+  ["IREN","IREN"],["CELH","Celsius"],["LMT","Lockheed Martin"],["NEE","NextEra Energy"],["LIN","Linde"],
+  ["SPY","S&P 500 ETF"],["QQQ","Nasdaq-100 ETF"],["MAGS","Mag 7 ETF (Roundhill)"],["IWM","Russell 2000 ETF"],
+  ["XLK","Technology Sector ETF"],["XLF","Financials ETF"],["XLE","Energy ETF"],["XLV","Health Care ETF"],
+  ["XLI","Industrials ETF"],["XLY","Consumer Discretionary ETF"],["XLP","Consumer Staples ETF"],
+  ["XLC","Communication Services ETF"],["XLU","Utilities ETF"],["XLB","Materials ETF"],["XLRE","Real Estate ETF"],
+  ["GLD","Gold ETF"],["SLV","Silver ETF"],["BTC-USD","Bitcoin"],["ETH-USD","Ethereum"],["SOL-USD","Solana"],
+];
+
+function TickerInput({ onPick, placeholder, extra=[], style, inputStyle, autoFocus=false }) {
+  const [q, setQ]       = useState("");
+  const [sugs, setSugs] = useState([]);
+  const [open, setOpen] = useState(false);
+  const deb = useRef(null);
+  const update = (val) => {
+    setQ(val);
+    const s = val.trim().toUpperCase();
+    if (!s) { setSugs([]); setOpen(false); return; }
+    // Instant local matches: caller's extras (watchlist etc.) first, then ticker
+    // prefix matches, then company-name substring matches.
+    const seen = new Set(); const out = [];
+    const push = (t, n) => { if (!seen.has(t) && out.length < 8) { seen.add(t); out.push({ t, n }); } };
+    extra.forEach(t => { if (String(t).toUpperCase().startsWith(s)) push(String(t).toUpperCase(), "on your watchlist"); });
+    TICKER_DIR.forEach(([t, n]) => { if (t.startsWith(s)) push(t, n); });
+    TICKER_DIR.forEach(([t, n]) => { if (n.toUpperCase().includes(s)) push(t, n); });
+    setSugs(out); setOpen(true);
+    clearTimeout(deb.current);
+    deb.current = setTimeout(async () => {
+      try {
+        const r = await fetch(`${API}/symbol-search?q=${encodeURIComponent(s)}`);
+        const d = await r.json();
+        if ((d.results || []).length) {
+          setSugs(prev => {
+            const have = new Set(prev.map(x => x.t)); const merged = [...prev];
+            d.results.forEach(x => { if (!have.has(x.t) && merged.length < 8) merged.push({ t: x.t, n: x.n }); });
+            return merged;
+          });
+        }
+      } catch {}
+    }, 280);
+  };
+  const pick = (t) => { setQ(""); setSugs([]); setOpen(false); if (t) onPick(t); };
+  const onKey = (e) => {
+    if (e.key === "Enter") {
+      const s = q.trim().toUpperCase();
+      // exact directory/suggestion match or a plain typed symbol wins; else first suggestion
+      const exact = sugs.find(x => x.t === s);
+      pick(exact ? exact.t : (sugs[0] && s.length < 2 ? sugs[0].t : (s || sugs[0]?.t)));
+    }
+    if (e.key === "Escape") { setOpen(false); }
+  };
+  return (
+    <div style={{ position:"relative", ...style }}>
+      <Search size={15} color={C.faint} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", pointerEvents:"none" }}/>
+      <input value={q} autoFocus={autoFocus} onChange={e=>update(e.target.value)} onKeyDown={onKey}
+        onFocus={()=>q && setOpen(true)} onBlur={()=>setTimeout(()=>setOpen(false), 160)}
+        placeholder={placeholder}
+        style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 12px 8px 36px", color:C.ink, fontSize:13, outline:"none", fontFamily:"inherit", ...inputStyle }}/>
+      {open && sugs.length > 0 && (
+        <div style={{ position:"absolute", top:"calc(100% + 4px)", left:0, right:0, zIndex:120, background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, boxShadow:"0 12px 34px rgba(0,0,0,0.28)", overflow:"hidden" }}>
+          {sugs.map((x,i)=>(
+            <div key={x.t} onMouseDown={(e)=>{ e.preventDefault(); pick(x.t); }}
+              style={{ display:"flex", alignItems:"center", gap:9, padding:"8px 12px", cursor:"pointer", borderTop: i?`1px solid ${C.panel2}`:"none" }}
+              onMouseEnter={e=>e.currentTarget.style.background=C.panel2} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+              <span style={{ fontFamily:C.mono, fontWeight:800, fontSize:12.5, color:C.ink, minWidth:64 }}>{x.t}</span>
+              <span style={{ fontSize:11.5, color:C.sub, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{x.n}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // RSI(14) from a close series — Wilder's smoothing, matching the backend and
 // the standard shown on TradingView/brokers. Seeds with a simple average of
@@ -3417,19 +3514,37 @@ const valColorOf = (verd) => verd==="cheap"?C.up:verd==="expensive"?C.down:verd=
 const SECTORS = ["Technology","Communication Services","Consumer Cyclical","Consumer Defensive","Healthcare",
   "Financial Services","Industrials","Energy","Utilities","Real Estate","Basic Materials"];
 
-// One fundamentals metric with a small trend so you see direction, not just a number.
-function TrendStat({ label, series, fmt, invert=false }) {
-  const clean = (series||[]).filter(v=>v!=null && !isNaN(v));
-  const latest = clean.length ? clean[clean.length-1] : null;
-  const first  = clean.length ? clean[0] : null;
-  const rising = (first!=null && latest!=null) ? latest>=first : null;
-  const good   = rising==null ? null : (invert ? !rising : rising);
-  const col    = good==null ? C.faint : good ? C.up : C.down;
+// One fundamentals metric as a mini bar chart (per-year bars + YoY change badge),
+// so you see the trajectory and its magnitude — not just a squiggle.
+function TrendStat({ label, series, fmt, invert=false, years=[] }) {
+  const [hov, setHov] = useState(null);
+  const clean = (series||[]).map((v,i)=>({ v, y: years[i] })).filter(x=>x.v!=null && !isNaN(x.v));
+  const latest = clean.length ? clean[clean.length-1].v : null;
+  const prev   = clean.length > 1 ? clean[clean.length-2].v : null;
+  const yoy    = (latest!=null && prev!=null && prev!==0) ? (latest/prev - 1) : null;
+  const goodYoY = yoy==null ? null : (invert ? yoy<=0 : yoy>=0);
+  const yoyCol = goodYoY==null ? C.faint : goodYoY ? C.up : C.down;
+  const maxAbs = Math.max(...clean.map(x=>Math.abs(x.v)), 1e-12);
   return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:11, padding:"12px 13px", minWidth:0 }}>
       <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:4 }}>{label}</div>
-      <div style={{ fontFamily:C.mono, fontSize:17, fontWeight:700, color:C.ink }}>{fmt(latest)}</div>
-      {clean.length>1 && <div style={{ marginTop:6 }}><Sparkline data={clean} h={22} color={col}/></div>}
+      <div style={{ display:"flex", alignItems:"baseline", gap:7, flexWrap:"wrap" }}>
+        <span style={{ fontFamily:C.mono, fontSize:17, fontWeight:700, color:C.ink }}>{fmt(hov!=null ? clean[hov].v : latest)}</span>
+        {hov==null && yoy!=null && (
+          <span style={{ fontFamily:C.mono, fontSize:10.5, fontWeight:800, color:yoyCol }}>{yoy>=0?"+":""}{(yoy*100).toFixed(0)}% YoY</span>
+        )}
+        {hov!=null && clean[hov].y && <span style={{ fontFamily:C.mono, fontSize:10.5, color:C.faint }}>{clean[hov].y}</span>}
+      </div>
+      {clean.length>1 && (
+        <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:30, marginTop:7 }} onMouseLeave={()=>setHov(null)}>
+          {clean.map((x,i)=>(
+            <div key={i} onMouseEnter={()=>setHov(i)} title={`${x.y||""} ${fmt(x.v)}`}
+              style={{ flex:1, minWidth:0, height:Math.max(3, Math.abs(x.v)/maxAbs*30),
+                background: x.v<0 ? C.down : C.cold, opacity: i===clean.length-1 ? 1 : 0.55,
+                borderRadius:"2px 2px 0 0", outline: i===clean.length-1 ? `1px solid ${C.ink}` : "none", cursor:"default" }}/>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -3647,19 +3762,30 @@ function FinBarChart({ title, unit="money", past=[], est=[], note }) {
         <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{title}{note && <span style={{ fontSize:9.5, color:C.faint, fontWeight:400 }}> {note}</span>}</span>
         <span style={{ fontFamily:C.mono, fontSize:11, color:C.sub, minHeight:14 }}>{hovTxt || ""}</span>
       </div>
-      <div style={{ display:"flex", alignItems:"flex-end", gap:2, height:H }}>
-        {cells.map((c,i)=> c.kind==="a" ? (
-          <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label}: ${fmtV(c.value)}`}
-            style={{ flex:1, minWidth:0, height:hOf(c.value), background:(c.value||0)<0?C.down:C.cold, opacity:hov===i?1:0.82,
-              borderRadius:"3px 3px 0 0", outline: i===past.length-1 ? `1.5px solid ${C.ink}` : "none", cursor:"default" }}/>
-        ) : (
-          <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label} analyst est: avg ${fmtV(c.avg)} (low ${fmtV(c.low)} · high ${fmtV(c.high)})`}
-            style={{ flex:1, minWidth:0, height:hOf(c.high ?? c.avg), display:"flex", flexDirection:"column", justifyContent:"flex-end", opacity:hov===i?1:0.85, cursor:"default" }}>
-            <div style={{ height:Math.max(1, hOf(c.high ?? c.avg)-hOf(c.avg)), background:C.up, borderRadius:"3px 3px 0 0" }}/>
-            <div style={{ height:Math.max(1, hOf(c.avg)-hOf(c.low ?? c.avg)), background:C.amber }}/>
-            <div style={{ height:hOf(c.low ?? c.avg), background:`${C.down}cc` }}/>
-          </div>
-        ))}
+      <div style={{ display:"flex", alignItems:"flex-end", gap:2, height:H + 14 }}>
+        {cells.map((c,i)=>{
+          const showLbl = cells.length <= 9;
+          const lblTxt = c.kind==="a" ? fmtV(c.value) : fmtV(c.avg);
+          const lbl = showLbl && (
+            <div style={{ fontSize:8, fontFamily:C.mono, color:c.kind==="e"?C.amber:C.sub, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", marginBottom:2 }}>{lblTxt}</div>
+          );
+          return c.kind==="a" ? (
+            <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label}: ${fmtV(c.value)}`}
+              style={{ flex:1, minWidth:0, display:"flex", flexDirection:"column", justifyContent:"flex-end", height:"100%", cursor:"default" }}>
+              {lbl}
+              <div style={{ height:hOf(c.value), background:(c.value||0)<0?C.down:C.cold, opacity:hov===i?1:0.82,
+                borderRadius:"3px 3px 0 0", outline: i===past.length-1 ? `1.5px solid ${C.ink}` : "none" }}/>
+            </div>
+          ) : (
+            <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label} analyst est: avg ${fmtV(c.avg)} (low ${fmtV(c.low)} · high ${fmtV(c.high)})`}
+              style={{ flex:1, minWidth:0, display:"flex", flexDirection:"column", justifyContent:"flex-end", height:"100%", opacity:hov===i?1:0.85, cursor:"default" }}>
+              {lbl}
+              <div style={{ height:Math.max(1, hOf(c.high ?? c.avg)-hOf(c.avg)), background:C.up, borderRadius:"3px 3px 0 0" }}/>
+              <div style={{ height:Math.max(1, hOf(c.avg)-hOf(c.low ?? c.avg)), background:C.amber }}/>
+              <div style={{ height:hOf(c.low ?? c.avg), background:`${C.down}cc` }}/>
+            </div>
+          );
+        })}
       </div>
       <div style={{ display:"flex", gap:2, marginTop:4 }}>
         {cells.map((c,i)=>(<div key={i} style={{ flex:1, minWidth:0, fontSize:8, color:c.kind==="e"?C.amber:C.faint, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", fontFamily:C.mono }}>{c.label}</div>))}
@@ -3719,82 +3845,91 @@ function FinancialsCharts({ ticker }) {
 
 // Year-by-year projection model: edit growth, margin and exit-P/E per year →
 // implied share price (low/high) and CAGR from today. Persists per ticker.
+// 1000X-style projection model. Inputs (blue): REV GROWTH, NET INC. GROWTH, and
+// P/E LOW/HIGH per year. Everything else derives: revenue, net income, margins,
+// EPS, share-price low/high, and the CAGR you'd earn reaching each price.
 function ProjectionsTable({ fund }) {
   const T = fund?.ticker;
   const spot = fund?.spot, shares = fund?.fairValueInputs?.shares, rev0 = fund?.fairValueInputs?.revenue;
-  const KEY = `alphadesk:proj:${T}`;
+  const KEY = `alphadesk:proj2:${T}`;
   const clamp = (v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  const nm0 = fund?.fairValueInputs?.netMargin ?? 0.15;
+  const ni0 = rev0 != null ? rev0 * nm0 : null;
   const seed = () => {
-    const g1 = clamp(Math.round(((fund?.advanced?.revGrowthNextYr ?? fund?.ttm?.revenueGrowth ?? 0.10))*100), -20, 80);
-    const nm = clamp(Math.round((fund?.health?.netMargin ?? 0.15)*100), 1, 60);
-    const fpe = fund?.valuation?.forwardPE?.value || 24;
+    const g1  = clamp(Math.round(((fund?.advanced?.revGrowthNextYr ?? fund?.ttm?.revenueGrowth ?? 0.10))*100), -20, 100);
+    const ng1 = clamp(Math.round(((fund?.advanced?.epsGrowthNextYr ?? fund?.ttm?.earningsGrowth ?? (g1/100)))*100), -20, 120);
+    const fpe = fund?.valuation?.forwardPE?.value || fund?.valuation?.trailingPE?.value || 25;
     return {
-      g:   [g1, Math.round(g1*0.85), Math.round(g1*0.7), Math.round(g1*0.6)].map(x=>Math.max(x,2)),
-      m:   [nm, nm, nm, nm],
-      peLo:[1,1,1,1].map(()=>clamp(Math.round(fpe*0.7),5,60)),
-      peHi:[1,1,1,1].map(()=>clamp(Math.round(fpe*1.1),8,80)),
+      g:   [g1, Math.round(g1*0.85), Math.round(g1*0.72), Math.round(g1*0.6)].map(x=>Math.max(x,2)),
+      ng:  [ng1, Math.round(ng1*0.85), Math.round(ng1*0.72), Math.round(ng1*0.6)].map(x=>Math.max(x,2)),
+      peLo:[1,1,1,1].map(()=>clamp(Math.round(fpe*0.65),5,80)),
+      peHi:[1,1,1,1].map(()=>clamp(Math.round(fpe*1.05),8,120)),
     };
   };
   const [p, setP] = useState(null);
-  useEffect(()=>{ if(!T) return; try { const s = JSON.parse(localStorage.getItem(KEY)||"null"); setP(s?.g ? s : seed()); } catch { setP(seed()); }
+  useEffect(()=>{ if(!T) return; try { const s = JSON.parse(localStorage.getItem(KEY)||"null"); setP(s?.ng ? s : seed()); } catch { setP(seed()); }
   // eslint-disable-next-line
-  },[T]);
+  },[T, fund]);
   useEffect(()=>{ if (p && T) try { localStorage.setItem(KEY, JSON.stringify(p)); } catch {} },[p, T]);
   if (!fund) return null;
   if (!spot || !shares || !rev0) return <div style={{ padding:30, textAlign:"center", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Not enough data to project {T} (needs price, shares and revenue).</div>;
   if (!p) return null;
   const y0 = new Date().getFullYear();
-  const ni0 = rev0 * (fund?.health?.netMargin ?? 0.15);
-  // derive the 4 future years
+  // derive the 4 future years: revenue and net income compound off the inputs
   const yrs = [];
-  let rev = rev0;
+  let rev = rev0, ni = ni0;
   for (let i = 0; i < 4; i++) {
     rev = rev * (1 + (p.g[i]||0)/100);
-    const ni  = rev * (p.m[i]||0)/100;
+    ni  = ni  * (1 + (p.ng[i]||0)/100);
+    const margin = rev ? ni / rev : null;
     const eps = ni / shares;
     const lo  = eps * (p.peLo[i]||0), hiP = eps * (p.peHi[i]||0);
     const n = i + 1;
-    yrs.push({ year:y0+n, rev, ni, eps, lo, hi:hiP,
-      cagrLo: lo>0 ? Math.pow(lo/spot, 1/n)-1 : null,
-      cagrHi: hiP>0 ? Math.pow(hiP/spot, 1/n)-1 : null });
+    yrs.push({ year:y0+n, rev, ni, margin, eps, lo, hi:hiP,
+      cagrLo: (lo>0 && spot>0) ? Math.pow(lo/spot, 1/n)-1 : null,
+      cagrHi: (hiP>0 && spot>0) ? Math.pow(hiP/spot, 1/n)-1 : null });
   }
   const setCell = (key, i, v) => setP(prev => ({ ...prev, [key]: prev[key].map((x,j)=>j===i? v : x) }));
   const inp = (key, i) => (
     <input type="number" value={p[key][i]} onChange={e=>setCell(key, i, parseFloat(e.target.value)||0)}
-      style={{ width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"4px 6px", color:C.cold, fontSize:11.5, fontFamily:C.mono, outline:"none", textAlign:"right", fontWeight:700 }}/>
+      style={{ width:"100%", background:C.panel2, border:`1px solid ${C.cold}55`, borderRadius:6, padding:"4px 6px", color:C.cold, fontSize:11.5, fontFamily:C.mono, outline:"none", textAlign:"right", fontWeight:700 }}/>
   );
   const cell = { padding:"7px 10px", textAlign:"right", fontFamily:C.mono, fontSize:11.5, color:C.ink, whiteSpace:"nowrap" };
   const lblCell = { padding:"7px 10px", fontSize:10.5, color:C.sub, fontWeight:700, whiteSpace:"nowrap", textTransform:"uppercase", letterSpacing:"0.03em" };
   const cagrFmt = v => v==null ? "—" : `${v>=0?"+":""}${(v*100).toFixed(0)}%`;
+  const pctFmtV = v => v==null ? "—" : `${(v*100).toFixed(0)}%`;
+  // Row order mirrors 1000X: year → revenue → rev growth → net income →
+  // net inc growth → net inc margins → EPS → PE low/high → price low/high → CAGRs
   const rows = [
-    ["Revenue",        [fmtMoney(rev0), ...yrs.map(y=>fmtMoney(y.rev))]],
-    ["Rev growth %",   ["", ...yrs.map((_,i)=>inp("g", i))], true],
-    ["Net income",     [fmtMoney(ni0), ...yrs.map(y=>fmtMoney(y.ni))]],
-    ["Net margin %",   ["", ...yrs.map((_,i)=>inp("m", i))], true],
-    ["EPS",            [fund?.ttm?.trailingEps!=null?`$${fund.ttm.trailingEps.toFixed(2)}`:"—", ...yrs.map(y=>`$${y.eps.toFixed(2)}`)]],
-    ["P/E low est",    ["", ...yrs.map((_,i)=>inp("peLo", i))], true],
-    ["P/E high est",   ["", ...yrs.map((_,i)=>inp("peHi", i))], true],
-    ["Price low",      [`$${spot?.toFixed(2)}`, ...yrs.map(y=>`$${y.lo.toFixed(0)}`)], false, C.down],
-    ["Price high",     [`$${spot?.toFixed(2)}`, ...yrs.map(y=>`$${y.hi.toFixed(0)}`)], false, C.up],
-    ["CAGR low",       ["", ...yrs.map(y=>cagrFmt(y.cagrLo))], false, C.down],
-    ["CAGR high",      ["", ...yrs.map(y=>cagrFmt(y.cagrHi))], false, C.up],
+    ["Revenue",          [fmtMoney(rev0), ...yrs.map(y=>fmtMoney(y.rev))]],
+    ["Rev growth",       ["", ...yrs.map((_,i)=>inp("g", i))], true],
+    ["Net income",       [fmtMoney(ni0), ...yrs.map(y=>fmtMoney(y.ni))]],
+    ["Net inc. growth",  ["", ...yrs.map((_,i)=>inp("ng", i))], true],
+    ["Net inc. margins", [pctFmtV(nm0), ...yrs.map(y=>pctFmtV(y.margin))]],
+    ["EPS",              [fund?.ttm?.trailingEps!=null?`$${Number(fund.ttm.trailingEps).toFixed(2)}`:"—", ...yrs.map(y=>`$${y.eps.toFixed(2)}`)]],
+    ["P/E low est.",     ["", ...yrs.map((_,i)=>inp("peLo", i))], true],
+    ["P/E high est.",    ["", ...yrs.map((_,i)=>inp("peHi", i))], true],
+    ["Share price low",  [`$${spot?.toFixed(0)}`, ...yrs.map(y=>`$${y.lo.toFixed(0)}`)], false, C.down],
+    ["Share price high", [`$${spot?.toFixed(0)}`, ...yrs.map(y=>`$${y.hi.toFixed(0)}`)], false, C.up],
+    ["CAGR low",         ["", ...yrs.map(y=>cagrFmt(y.cagrLo))], false, C.down],
+    ["CAGR high",        ["", ...yrs.map(y=>cagrFmt(y.cagrHi))], false, C.up],
   ];
   return (
     <div>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
-        <div style={{ fontSize:12, color:C.sub }}>Type your assumptions (blue cells) — price targets and yearly returns recompute live. Saved per ticker.</div>
+        <div style={{ fontSize:12, color:C.sub }}>Enter your assumptions in the <b style={{ color:C.cold }}>blue cells</b> — growth rates and P/E multiples. Price targets, margins and CAGR recompute live. Saved per ticker.</div>
         <button onClick={()=>setP(seed())} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:8, padding:"6px 12px", color:C.sub, cursor:"pointer", fontSize:11.5 }}>Reset to analyst-seeded</button>
       </div>
       <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch", border:`1px solid ${C.line}`, borderRadius:12, background:C.panel }}>
-        <div style={{ minWidth:640 }}>
-          <div style={{ display:"grid", gridTemplateColumns:`minmax(120px,1.3fr) repeat(5, minmax(88px,1fr))`, borderBottom:`1px solid ${C.line}` }}>
+        <div style={{ minWidth:660 }}>
+          <div style={{ display:"grid", gridTemplateColumns:`minmax(132px,1.4fr) repeat(5, minmax(88px,1fr))`, borderBottom:`1px solid ${C.line}` }}>
             <div style={lblCell}>Year</div>
             <div style={{ ...cell, fontWeight:800, color:C.faint }}>{y0} (TTM)</div>
             {yrs.map(y=><div key={y.year} style={{ ...cell, fontWeight:800 }}>{y.year}</div>)}
           </div>
           {rows.map(([label, vals, editable, col], ri)=>(
-            <div key={ri} style={{ display:"grid", gridTemplateColumns:`minmax(120px,1.3fr) repeat(5, minmax(88px,1fr))`, borderTop:ri?`1px solid ${C.panel2}`:"none", background: editable ? `${C.cold}08` : "transparent" }}>
-              <div style={lblCell}>{label}</div>
+            <div key={ri} style={{ display:"grid", gridTemplateColumns:`minmax(132px,1.4fr) repeat(5, minmax(88px,1fr))`, borderTop:ri?`1px solid ${C.panel2}`:"none", background: editable ? `${C.cold}0a` : "transparent", alignItems:"center" }}>
+              <div style={lblCell}>{label}{editable && <span style={{ color:C.cold, fontWeight:400, textTransform:"none", letterSpacing:0 }}> · %</span>}</div>
               {vals.map((v,ci)=><div key={ci} style={{ ...cell, color: col || cell.color }}>{v}</div>)}
             </div>
           ))}
@@ -3805,15 +3940,21 @@ function ProjectionsTable({ fund }) {
   );
 }
 
-function FilingsSection({ ticker }) {
+function FilingsSection({ ticker, aiEnabled, profile }) {
   const [d, setD] = useState(null);
   const [nextEarn, setNextEarn] = useState(null);
+  const [prep, setPrep] = useState(null);
+  const [prepLoading, setPrepLoading] = useState(false);
   useEffect(()=>{
-    let alive = true; setD(null); setNextEarn(null);
+    let alive = true; setD(null); setNextEarn(null); setPrep(null); setPrepLoading(false);
     fetchFilings(ticker).then(x=>alive&&setD(x)).catch(()=>alive&&setD({ filings:[], error:"request failed" }));
     fetchFinancialsDetail(ticker).then(x=>{ if(alive && x.next_earnings) setNextEarn(String(x.next_earnings).slice(0,10)); }).catch(()=>{});
     return ()=>{ alive=false; };
   },[ticker]);
+  const loadPrep = () => {
+    setPrepLoading(true); setPrep(null);
+    fetchEarningsPrep(ticker, profile).then(setPrep).catch(()=>setPrep({ ai_error:"request failed" })).finally(()=>setPrepLoading(false));
+  };
   const FORM_COL = { "10-K":C.cold, "10-Q":C.up, "8-K":C.amber, "DEF 14A":C.violet };
   const linkBtn = (href, label) => (
     <a href={href} target="_blank" rel="noreferrer" style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 13px", color:C.cold, fontSize:12, fontWeight:600, textDecoration:"none" }}>{label} ↗</a>
@@ -3828,6 +3969,55 @@ function FilingsSection({ ticker }) {
           {linkBtn(`https://seekingalpha.com/symbol/${ticker}/earnings/transcripts`, "Transcripts (Seeking Alpha)")}
           {linkBtn(`https://www.google.com/search?q=${encodeURIComponent(ticker + " investor relations earnings call webcast")}`, "Company IR / webcast")}
           {linkBtn(`https://finance.yahoo.com/quote/${ticker}/analysis`, "Analyst estimates (Yahoo)")}
+        </div>
+
+        {/* AI earnings-call prep */}
+        <div style={{ marginTop:14, paddingTop:14, borderTop:`1px solid ${C.panel2}` }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
+            <div style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>AI Earnings-Call Prep <span style={{ fontSize:10.5, color:C.faint, fontWeight:400 }}>· the numbers to beat + what to listen for</span></div>
+            {aiEnabled && !prep && !prepLoading && (
+              <button onClick={loadPrep} style={{ background:C.cold, border:"none", borderRadius:8, padding:"7px 13px", color:"#fff", cursor:"pointer", fontSize:12, fontWeight:600, display:"flex", gap:6, alignItems:"center" }}><Zap size={13}/> Prep me</button>
+            )}
+          </div>
+          {!aiEnabled ? (
+            <div style={{ fontSize:11.5, color:C.faint, marginTop:8 }}>Turn on AI Insights in Settings to generate the prep.</div>
+          ) : prepLoading ? (
+            <div style={{ padding:"14px 0", color:C.sub, display:"flex", gap:8, alignItems:"center" }}><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> <span style={{ fontSize:12 }}>Reading estimates & filing activity…</span></div>
+          ) : prep?.ai_error ? (
+            <div style={{ fontSize:12, color:C.amber, marginTop:8 }}>AI error — {String(prep.ai_error).slice(0,100)}</div>
+          ) : prep ? (
+            <div style={{ marginTop:10, display:"flex", flexDirection:"column", gap:10 }}>
+              {prep.headline && <div style={{ fontSize:13.5, fontWeight:700, color:C.ink, lineHeight:1.5 }}>{prep.headline}</div>}
+              {(prep.numbers_to_beat||[]).length>0 && (
+                <div style={{ background:C.panel2, borderRadius:10, padding:"11px 13px" }}>
+                  <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:5 }}>Numbers to beat</div>
+                  {prep.numbers_to_beat.map((x,i)=><div key={i} style={{ fontSize:12, color:C.sub, lineHeight:1.6, fontFamily:C.mono }}>· {x}</div>)}
+                </div>
+              )}
+              {(prep.watch_items||[]).length>0 && (
+                <div>
+                  <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:5 }}>Listen for</div>
+                  {prep.watch_items.map((x,i)=><div key={i} style={{ fontSize:12, color:C.sub, lineHeight:1.6 }}>• {x}</div>)}
+                </div>
+              )}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px,1fr))", gap:10 }}>
+                {(prep.filing_notes||[]).length>0 && (
+                  <div style={{ background:C.panel2, borderRadius:10, padding:"11px 13px" }}>
+                    <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:4 }}>Filing activity</div>
+                    {prep.filing_notes.map((x,i)=><div key={i} style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>{x}</div>)}
+                  </div>
+                )}
+                {(prep.risks||[]).length>0 && (
+                  <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}30`, borderRadius:10, padding:"11px 13px" }}>
+                    <div style={{ fontSize:9.5, color:C.down, textTransform:"uppercase", marginBottom:4, fontWeight:700 }}>Drop risks (even on a beat)</div>
+                    {prep.risks.map((x,i)=><div key={i} style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>{x}</div>)}
+                  </div>
+                )}
+              </div>
+              {prep.bottom_line && <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.6, fontWeight:500, borderLeft:`3px solid ${C.cold}`, paddingLeft:10 }}>{prep.bottom_line}</div>}
+              <div style={{ fontSize:9.5, color:C.faint }}>Built from analyst estimates, fundamentals and filing metadata — full filing text isn't parsed. Not financial advice.</div>
+            </div>
+          ) : null}
         </div>
       </div>
       {/* SEC filings */}
@@ -3888,6 +4078,27 @@ function EducationPanel() {
     </div>
   );
 }
+
+// Compare auto-population: closest big competitor by sector + the sector's ETF.
+const SECTOR_PEERS = {
+  "Technology": ["MSFT","NVDA","AAPL","AVGO","AMD"],
+  "Communication Services": ["GOOGL","META","NFLX","DIS"],
+  "Consumer Cyclical": ["AMZN","TSLA","HD","NKE"],
+  "Consumer Defensive": ["WMT","PG","COST","KO"],
+  "Healthcare": ["LLY","UNH","JNJ","MRK"],
+  "Financial Services": ["JPM","V","MA","BAC"],
+  "Industrials": ["GE","CAT","UBER","BA"],
+  "Energy": ["XOM","CVX"],
+  "Utilities": ["NEE","DUK"],
+  "Real Estate": ["PLD","AMT"],
+  "Basic Materials": ["LIN","SHW"],
+};
+const SECTOR_ETF = {
+  "Technology":"XLK", "Communication Services":"XLC", "Financial Services":"XLF",
+  "Consumer Cyclical":"XLY", "Consumer Defensive":"XLP", "Healthcare":"XLV",
+  "Industrials":"XLI", "Energy":"XLE", "Utilities":"XLU", "Real Estate":"XLRE",
+  "Basic Materials":"XLB",
+};
 
 const PRESET_SCREENS = [
   {name:"Undervalued Growth",  mode:"market", filters:{fpe_max:25, rev_growth_min:20, fcf_positive:true}},
@@ -4081,13 +4292,13 @@ function ScreenerPanel({ watchlist, savedScreens, onSaveScreen, onDeleteScreen, 
 function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScreens, onSaveScreen, onDeleteScreen, onOpenDetail }) {
   const [view, setView]   = useState("analyze");   // analyze | compare | screener
   const [ticker, setTicker] = useState(initialTicker || "AAPL");
-  const [query, setQuery] = useState("");
   const [fund, setFund]   = useState(null);
   const [err, setErr]     = useState(false);
   const [ai, setAi]       = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [cmp, setCmp]     = useState({});   // ticker -> {data,loading}
   const [cmpList, setCmpList] = useState(initialTicker ? [initialTicker] : ["AAPL"]);
+  const cmpAuto = useRef(true);   // auto-populate compare until the user edits it
 
   useEffect(()=>{ if (initialTicker) { setTicker(initialTicker); setView("analyze"); } },[initialTicker]);
 
@@ -4097,6 +4308,17 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
     fetchFundamentals(ticker).then(d=>{ if(alive){ d.error?setErr(true):setFund(d); } }).catch(()=>alive&&setErr(true));
     return ()=>{ alive=false; };
   },[ticker]);
+
+  // Auto-populate Compare: the chosen stock + its closest big competitor + its
+  // sector ETF + the broad market. Stops as soon as the user edits the list.
+  useEffect(()=>{
+    if (!cmpAuto.current || !fund?.ticker) return;
+    const peers = SECTOR_PEERS[fund.sector] || [];
+    const comp  = peers.find(p => p !== fund.ticker);
+    const list  = [fund.ticker, comp, SECTOR_ETF[fund.sector], "SPY"]
+      .filter(Boolean).filter((x,i,arr)=>arr.indexOf(x)===i).slice(0,4);
+    setCmpList(list);
+  },[fund]);
 
   // Load compare data for any missing tickers
   useEffect(()=>{
@@ -4109,24 +4331,21 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
   // eslint-disable-next-line
   },[cmpList]);
 
-  const go = (t) => { const T=normalizeTicker(t); if(T){ setTicker(T); setQuery(""); setView("analyze"); } };
+  // Picking a stock updates EVERY sub-tab; it does NOT yank you back to Analyze.
+  const go = (t) => { const T=normalizeTicker(t); if(T) setTicker(T); };
   const loadAi = () => {
     setAiLoading(true); setAi(null);
     fetchBusinessQuality(ticker, profile).then(setAi).catch(()=>setAi({ ai_error:"request failed" })).finally(()=>setAiLoading(false));
   };
-  const addCompare = (t) => { const T=normalizeTicker(t); if(T && !cmpList.includes(T) && cmpList.length<4) setCmpList(l=>[...l,T]); };
-  const removeCompare = (t) => setCmpList(l=>l.filter(x=>x!==t));
+  const addCompare = (t) => { cmpAuto.current = false; const T=normalizeTicker(t); if(T && !cmpList.includes(T) && cmpList.length<4) setCmpList(l=>[...l,T]); };
+  const removeCompare = (t) => { cmpAuto.current = false; setCmpList(l=>l.filter(x=>x!==t)); };
 
   const subTab = (id,label) => (
     <button key={id} onClick={()=>setView(id)} style={{ padding:"7px 15px", borderRadius:7, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:600,
       background:view===id?C.line:"transparent", color:view===id?C.ink:C.sub }}>{label}</button>
   );
   const searchBar = (onSubmit, placeholder) => (
-    <div style={{ flex:"1 1 220px", maxWidth:360, position:"relative" }}>
-      <Search size={15} color={C.faint} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)" }}/>
-      <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&onSubmit(query)} placeholder={placeholder}
-        style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 12px 8px 36px", color:C.ink, fontSize:13, outline:"none" }}/>
-    </div>
+    <TickerInput onPick={onSubmit} placeholder={placeholder} style={{ flex:"1 1 220px", maxWidth:360 }}/>
   );
 
   const t = fund?.trends || {};
@@ -4170,14 +4389,14 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
               <div>
                 <div style={{ fontSize:12.5, fontWeight:700, color:C.sub, marginBottom:9 }}>Company Fundamentals <span style={{ color:C.faint, fontWeight:400 }}>· {fund.years?.join(" → ")}</span></div>
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px,1fr))", gap:10 }}>
-                  <TrendStat label="Revenue"     series={t.revenue}   fmt={fmtMoney}/>
-                  <TrendStat label="Net Income"  series={t.netIncome} fmt={fmtMoney}/>
-                  <TrendStat label="Diluted EPS" series={t.eps}       fmt={v=>v==null?"—":`$${v.toFixed(2)}`}/>
-                  <TrendStat label="Gross Margin" series={t.grossMargin} fmt={v=>fmtPct(v)}/>
-                  <TrendStat label="Oper. Margin" series={t.operatingMargin} fmt={v=>fmtPct(v)}/>
-                  <TrendStat label="Net Margin"  series={t.netMargin} fmt={v=>fmtPct(v)}/>
-                  <TrendStat label="Free Cash Flow" series={t.fcf}    fmt={fmtMoney}/>
-                  <TrendStat label="Shares Out"  series={t.shares}    fmt={v=>v==null?"—":`${(v/1e9).toFixed(2)}B`} invert/>
+                  <TrendStat label="Revenue"     series={t.revenue}   fmt={fmtMoney} years={fund.years}/>
+                  <TrendStat label="Net Income"  series={t.netIncome} fmt={fmtMoney} years={fund.years}/>
+                  <TrendStat label="Diluted EPS" series={t.eps}       fmt={v=>v==null?"—":`$${v.toFixed(2)}`} years={fund.years}/>
+                  <TrendStat label="Gross Margin" series={t.grossMargin} fmt={v=>fmtPct(v)} years={fund.years}/>
+                  <TrendStat label="Oper. Margin" series={t.operatingMargin} fmt={v=>fmtPct(v)} years={fund.years}/>
+                  <TrendStat label="Net Margin"  series={t.netMargin} fmt={v=>fmtPct(v)} years={fund.years}/>
+                  <TrendStat label="Free Cash Flow" series={t.fcf}    fmt={fmtMoney} years={fund.years}/>
+                  <TrendStat label="Shares Out"  series={t.shares}    fmt={v=>v==null?"—":`${(v/1e9).toFixed(2)}B`} invert years={fund.years}/>
                 </div>
                 {/* health strip */}
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px,1fr))", gap:10, marginTop:10 }}>
@@ -4251,9 +4470,8 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
       {view==="compare" && (
         <div>
           <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16, flexWrap:"wrap" }}>
-            {searchBar((v)=>{ addCompare(v); setQuery(""); }, "Add a ticker to compare (up to 4)")}
-            <button onClick={()=>{ addCompare(query); setQuery(""); }} disabled={cmpList.length>=4} style={{ background:cmpList.length>=4?C.line:C.up, border:"none", borderRadius:9, padding:"9px 15px", color:cmpList.length>=4?C.sub:"#06080d", cursor:cmpList.length>=4?"default":"pointer", fontSize:12.5, fontWeight:700, display:"flex", gap:6, alignItems:"center" }}><Plus size={14}/> Add</button>
-            <span style={{ fontSize:11.5, color:C.faint }}>{cmpList.length}/4 · best value in each row highlighted</span>
+            {searchBar(addCompare, "Add a ticker to compare (up to 4)")}
+            <span style={{ fontSize:11.5, color:C.faint }}>{cmpList.length}/4 · auto-filled with a competitor, the sector ETF and SPY — edit freely · best value highlighted</span>
           </div>
           {cmpList.length===0 ? (
             <div style={{ textAlign:"center", padding:"40px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Add 2–4 tickers to compare them side by side.</div>
@@ -4287,7 +4505,7 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
         <div>
           <div style={{ marginBottom:16 }}>{searchBar(go, "Filings & earnings calls — any ticker")}</div>
           <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>{displaySym(ticker)} — filings & earnings calls</div>
-          <FilingsSection ticker={ticker}/>
+          <FilingsSection ticker={ticker} aiEnabled={aiEnabled} profile={profile}/>
         </div>
       )}
     </div>
@@ -4435,7 +4653,6 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [tab, setTab]             = useState("watchlist");
   const [watchlist, setWatchlist] = useState(loadWL);
   const [detail, setDetail]       = useState(null);
-  const [query, setQuery]         = useState("");
   const [positions, setPositions] = useState(loadPositions);
   const [portfolio, setPortfolio] = useState(null);
   const [pfErr, setPfErr]         = useState(null);
@@ -4641,7 +4858,6 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const addTicker    = (t)=>{ const T=normalizeTicker(t); if(T) setWatchlist(w=>w.includes(T)?w:[...w,T]); };
   const removeTicker = (t)=> setWatchlist(w=>w.filter(x=>x!==t));
   const toggleWatch  = (t)=>{ const T=normalizeTicker(t); setWatchlist(w=>w.includes(T)?w.filter(x=>x!==T):[...w,T]); };
-  const runSearch    = ()=>{ const T=normalizeTicker(query); if(T) setDetail(T); };
   const openFinancials = (t) => { const T=normalizeTicker(t); if(T){ setDetail(null); setFinancialsTicker(T); setTab("financials"); } };
   const saveScreen   = ({ name, mode, filters }) => setSavedScreens(s => [...s.filter(x=>x.name!==name), { name, mode, filters }]);
   const deleteScreen = (name) => setSavedScreens(s => s.filter(x=>x.name!==name));
@@ -4668,14 +4884,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       <div style={{ borderBottom:`1px solid ${C.line}`, padding:"10px 14px", position:"sticky", top:0, background:C.bg, zIndex:20 }}>
         <div style={{ display:"flex", flexWrap:"wrap", justifyContent:"space-between", alignItems:"center", gap:8, maxWidth:1180, margin:"0 auto" }}>
           <div onClick={()=>{ setDetail(null); setTab("watchlist"); }} title="Go to Watchlist" style={{ fontWeight:800, fontSize:17, letterSpacing:"-0.02em", flexShrink:0, cursor:"pointer" }}>AlphaDesk <span style={{ color:C.hot }}>·</span></div>
-          <div style={{ flex:"1 1 180px", maxWidth:420, position:"relative" }}>
-            <Search size={15} color={C.faint} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)" }}/>
-            <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&runSearch()}
-              placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"
-              style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 12px 8px 36px", color:C.ink, fontSize:13, outline:"none", fontFamily:"inherit" }}
-              onFocus={e=>e.target.style.borderColor=C.cold} onBlur={e=>e.target.style.borderColor=C.line}/>
-            {query && <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={14}/></button>}
-          </div>
+          <TickerInput style={{ flex:"1 1 180px", maxWidth:420 }} extra={watchlist}
+            placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"
+            onPick={(t)=>{ const T=normalizeTicker(t)||t; if(T) setDetail(T); }}/>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0, flexWrap:"wrap" }}>
             {[["watchlist","Watchlist"],["portfolio","Portfolio"],["financials","Financials"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
@@ -4821,14 +5032,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 }
 
 function AddInline({ onAdd }) {
-  const [open,setOpen]=useState(false); const [val,setVal]=useState("");
+  const [open,setOpen]=useState(false);
   if(!open) return <button onClick={()=>setOpen(true)} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 13px", color:C.sub, cursor:"pointer", display:"flex", gap:6, alignItems:"center", fontSize:12.5 }}><Plus size={14}/> Add stock / crypto / metal</button>;
   return (
-    <div style={{ display:"flex", gap:6 }}>
-      <input autoFocus value={val} onChange={e=>setVal(e.target.value)}
-        onKeyDown={e=>{ if(e.key==="Enter"){onAdd(val);setVal("");setOpen(false);} if(e.key==="Escape")setOpen(false); }}
-        placeholder="NVDA, BTC, GLD…" title="Stock/ETF ticker, crypto (BTC, ETH…), or metal (GLD, GC=F, GOLDSPOT)" style={{ background:C.panel, border:`1px solid ${C.cold}`, borderRadius:9, padding:"8px 11px", color:C.ink, fontSize:12.5, outline:"none", width:130, fontFamily:"inherit", textTransform:"uppercase" }}/>
-      <button onClick={()=>{onAdd(val);setVal("");setOpen(false);}} style={{ background:C.up, border:"none", borderRadius:9, padding:"8px 13px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:600 }}>Add</button>
+    <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+      <TickerInput autoFocus placeholder="NVDA, BTC, GLD…" style={{ width:220 }}
+        inputStyle={{ border:`1px solid ${C.cold}`, textTransform:"uppercase" }}
+        onPick={(t)=>{ onAdd(t); setOpen(false); }}/>
       <button onClick={()=>setOpen(false)} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 11px", color:C.faint, cursor:"pointer" }}><X size={14}/></button>
     </div>
   );

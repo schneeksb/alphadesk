@@ -225,6 +225,16 @@ async function fetchBusinessQuality(ticker, profile = "") {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchFinancialsDetail(ticker) {
+  const r = await fetch(`${API}/financials-detail?ticker=${encodeURIComponent(ticker)}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchFilings(ticker) {
+  const r = await fetch(`${API}/filings?ticker=${encodeURIComponent(ticker)}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchScreen(params) {
   const qs = new URLSearchParams();
   Object.entries(params).forEach(([k,v])=>{ if (v!==null && v!==undefined && v!=="") qs.set(k, v); });
@@ -373,18 +383,25 @@ function Sparkline({ data, w=120, h=32, color }) {
 const rsiColor = (v) => v==null ? C.faint : v < 30 ? C.up : v > 70 ? C.down : C.amber;
 const rsiLabel = (v) => v==null ? "" : v < 30 ? "oversold" : v > 70 ? "overbought" : "neutral";
 
-// RSI(14) from a close series, same simple-rolling-mean method as the backend.
-// Returns an array aligned with `closes` (nulls where there's not enough lookback).
+// RSI(14) from a close series — Wilder's smoothing, matching the backend and
+// the standard shown on TradingView/brokers. Seeds with a simple average of
+// the first `period` moves, then smooths recursively. Returns an array aligned
+// with `closes` (nulls where there's not enough lookback).
 function calcRSI(closes, period=14) {
   if (!Array.isArray(closes) || closes.length < period + 1) return [];
   const out = new Array(closes.length).fill(null);
-  for (let i = period; i < closes.length; i++) {
-    let up = 0, dn = 0;
-    for (let j = i - period + 1; j <= i; j++) {
-      const d = closes[j] - closes[j-1];
-      if (d > 0) up += d; else dn -= d;
-    }
-    out[i] = dn === 0 ? 100 : 100 - 100 / (1 + up / dn);
+  let avgUp = 0, avgDn = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i-1];
+    if (d > 0) avgUp += d; else avgDn -= d;
+  }
+  avgUp /= period; avgDn /= period;
+  out[period] = avgDn === 0 ? 100 : 100 - 100 / (1 + avgUp / avgDn);
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i-1];
+    avgUp = (avgUp * (period - 1) + (d > 0 ?  d : 0)) / period;
+    avgDn = (avgDn * (period - 1) + (d < 0 ? -d : 0)) / period;
+    out[i] = avgDn === 0 ? 100 : 100 - 100 / (1 + avgUp / avgDn);
   }
   return out;
 }
@@ -398,9 +415,12 @@ function rsiWindow(closes, dates, take) {
   return { vals, dts };
 }
 
-// Compact RSI(14) graph on a fixed 0–100 scale with 30/70 reference bands and
-// hover-to-inspect (exact RSI value + date). Falls back to nothing if there's
-// no series (caller shows a colored number then).
+// Plain-English explainer used as the RSI tooltip everywhere.
+const RSI_HELP = "RSI = momentum on a 0-100 scale, from the last 14 bars shown. Under 30 = oversold (sellers may be exhausted — potentially cheap). Over 70 = overbought (rally may be stretched). Between = neutral.";
+
+// Compact RSI graph on a fixed 0–100 scale with 30/70 guide lines (labeled at
+// the right edge) and hover-to-inspect (exact RSI value + date). Falls back to
+// nothing if there's no series (caller shows a colored number then).
 function RsiMini({ data, dates, w=120, h=26 }) {
   const [hi, setHi] = useState(null);
   if (!Array.isArray(data) || data.length < 2) return null;
@@ -414,18 +434,24 @@ function RsiMini({ data, dates, w=120, h=26 }) {
     const rel  = (e.clientX - rect.left) / rect.width;
     setHi(Math.max(0, Math.min(data.length-1, Math.round(rel*(data.length-1)))));
   };
+  const edgeLbl = (topPct, txt, c) => (
+    <span style={{ position:"absolute", right:2, top:`calc(${topPct}% - 7px)`, fontSize:8, fontFamily:C.mono, color:c, opacity:0.75, pointerEvents:"none", lineHeight:1 }}>{txt}</span>
+  );
   return (
-    <div style={{ position:"relative" }} onMouseMove={onMove} onMouseLeave={()=>setHi(null)}>
+    <div style={{ position:"relative" }} onMouseMove={onMove} onMouseLeave={()=>setHi(null)} title={RSI_HELP}>
       <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display:"block", width:"100%" }}>
-        {/* 70 / 30 reference bands */}
+        {/* overbought (>70) and oversold (<30) tint zones + guide lines */}
         <rect x={0} y={0} width={w} height={y(70)} fill={C.down} opacity={0.05}/>
         <rect x={0} y={y(30)} width={w} height={h-y(30)} fill={C.up} opacity={0.05}/>
         <line x1={0} y1={y(70)} x2={w} y2={y(70)} stroke={C.down} strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
+        <line x1={0} y1={y(50)} x2={w} y2={y(50)} stroke={C.faint} strokeWidth={0.5} strokeDasharray="2 4" opacity={0.4}/>
         <line x1={0} y1={y(30)} x2={w} y2={y(30)} stroke={C.up}   strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
         <polyline points={line} fill="none" stroke={col} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round"/>
         {hi!=null && <line x1={x(hi)} y1={0} x2={x(hi)} y2={h} stroke={C.faint} strokeWidth={1} strokeDasharray="2 3" vectorEffect="non-scaling-stroke"/>}
         {hi!=null && <circle cx={x(hi)} cy={y(data[hi])} r={3} fill={rsiColor(data[hi])} stroke={C.bg} strokeWidth={1.5} vectorEffect="non-scaling-stroke"/>}
       </svg>
+      {h >= 34 && edgeLbl(30, "70", C.down)}
+      {h >= 34 && edgeLbl(70, "30", C.up)}
       {hi!=null && (
         <div style={{ position:"absolute", top:-6, left:`${(hi/(data.length-1))*100}%`, transform:`translateX(${hi > data.length*0.7 ? "-105%" : hi < data.length*0.3 ? "5%" : "-50%"})`, pointerEvents:"none", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"3px 7px", fontSize:10, fontFamily:C.mono, whiteSpace:"nowrap", color:C.ink, boxShadow:"0 5px 14px rgba(0,0,0,0.25)", zIndex:5 }}>
           <span style={{ fontWeight:700, color:rsiColor(data[hi]) }}>RSI {Number(data[hi]).toFixed(1)}</span>
@@ -519,12 +545,12 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
         return (
           <div style={{ marginTop:12 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
-              <span title="14-period Relative Strength Index over the bars shown" style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>RSI · 14-period</span>
+              <span title={RSI_HELP} style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", cursor:"help" }}>RSI — momentum, 0–100 ⓘ</span>
               <span style={{ fontFamily:C.mono, fontSize:12.5, fontWeight:800, color:rsiColor(cur) }}>
                 {cur.toFixed(1)} <span style={{ fontSize:9, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.03em" }}>{rsiLabel(cur)}</span>
               </span>
             </div>
-            <RsiMini data={vals} dates={dts} h={40}/>
+            <RsiMini data={vals} dates={dts} h={44}/>
           </div>
         );
       })()}
@@ -804,7 +830,7 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
         }
         const cur = (rVals && rVals.length) ? rVals[rVals.length-1] : d.rsi;
         return (
-        <div style={{ marginTop:9 }} title={`RSI(14) — 14-period Relative Strength Index over the ${sparkRange.toUpperCase()} window`}>
+        <div style={{ marginTop:9 }} title={RSI_HELP}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
             <span style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>RSI <span style={{ letterSpacing:0 }}>· {sparkRange.toUpperCase()}</span></span>
             <span style={{ fontFamily:C.mono, fontSize:12.5, fontWeight:800, color:rsiColor(cur) }}>
@@ -3379,16 +3405,20 @@ function FairValueModel({ inp }) {
 const CMP_ROWS = [
   {k:"price", label:"Price",        get:d=>d.spot,                         fmt:v=>v==null?"—":`$${v.toFixed(2)}`, best:null},
   {k:"mcap",  label:"Market Cap",   get:d=>d.marketCap,                    fmt:fmtMoney, best:null},
-  {k:"fpe",   label:"Forward P/E",  get:d=>d.valuation?.forwardPE?.value,  fmt:fmtX, best:"low"},
-  {k:"tpe",   label:"Trailing P/E", get:d=>d.valuation?.trailingPE?.value, fmt:fmtX, best:"low"},
-  {k:"peg",   label:"PEG",          get:d=>d.valuation?.peg?.value,        fmt:v=>v==null?"—":v.toFixed(2), best:"low"},
-  {k:"ps",    label:"P/S",          get:d=>d.valuation?.ps?.value,         fmt:fmtX, best:"low"},
-  {k:"ev",    label:"EV/EBITDA",    get:d=>d.valuation?.evEbitda?.value,   fmt:fmtX, best:"low"},
-  {k:"revg",  label:"Rev Growth",   get:d=>d.ttm?.revenueGrowth,           fmt:fmtPct, best:"high"},
-  {k:"gm",    label:"Gross Margin", get:d=>d.health?.grossMargin,          fmt:fmtPct, best:"high"},
-  {k:"nm",    label:"Net Margin",   get:d=>d.health?.netMargin,            fmt:fmtPct, best:"high"},
-  {k:"roe",   label:"ROE",          get:d=>d.health?.roe,                  fmt:fmtPct, best:"high"},
-  {k:"de",    label:"Debt / Equity",get:d=>d.health?.debtToEquity,         fmt:v=>v==null?"—":v.toFixed(0), best:"low"},
+  {k:"tpe",   label:"TTM P/E",      get:d=>d.valuation?.trailingPE?.value, fmt:fmtX, best:"low",  typical:"20–28x"},
+  {k:"fpe",   label:"Forward P/E",  get:d=>d.valuation?.forwardPE?.value,  fmt:fmtX, best:"low",  typical:"18–26x"},
+  {k:"fpe2",  label:"2yr Fwd P/E",  get:d=>d.advanced?.fwd2PE,             fmt:fmtX, best:"low",  typical:"16–24x"},
+  {k:"peg",   label:"PEG",          get:d=>d.valuation?.peg?.value,        fmt:v=>v==null?"—":v.toFixed(2), best:"low", typical:"1.5–2.5"},
+  {k:"ps",    label:"TTM P/S",      get:d=>d.valuation?.ps?.value,         fmt:fmtX, best:"low",  typical:"1.8–2.6x"},
+  {k:"ev",    label:"EV/EBITDA",    get:d=>d.valuation?.evEbitda?.value,   fmt:fmtX, best:"low",  typical:"10–16x"},
+  {k:"epsgt", label:"TTM EPS Growth",     get:d=>d.advanced?.epsGrowthTTM,    fmt:fmtPct, best:"high", typical:"8–12%"},
+  {k:"epsgn", label:"Next-Yr EPS G. est", get:d=>d.advanced?.epsGrowthNextYr, fmt:fmtPct, best:"high", typical:"8–12%"},
+  {k:"revg",  label:"TTM Rev Growth",     get:d=>d.ttm?.revenueGrowth,        fmt:fmtPct, best:"high", typical:"4.5–6.5%"},
+  {k:"revgn", label:"Next-Yr Rev G. est", get:d=>d.advanced?.revGrowthNextYr, fmt:fmtPct, best:"high", typical:"4.5–6.5%"},
+  {k:"gm",    label:"Gross Margin", get:d=>d.health?.grossMargin,          fmt:fmtPct, best:"high", typical:"40–48%"},
+  {k:"nm",    label:"Net Margin",   get:d=>d.health?.netMargin,            fmt:fmtPct, best:"high", typical:"8–10%"},
+  {k:"roe",   label:"ROE",          get:d=>d.health?.roe,                  fmt:fmtPct, best:"high", typical:"12–18%"},
+  {k:"de",    label:"Debt / Equity",get:d=>d.health?.debtToEquity,         fmt:v=>v==null?"—":v.toFixed(0), best:"low", typical:"<100"},
   {k:"fcf",   label:"Free Cash Flow",get:d=>d.health?.fcf,                 fmt:fmtMoney, best:"high"},
 ];
 
@@ -3400,11 +3430,12 @@ function CompareTable({ items, onRemove, onOpen }) {
     if (!vals.length) return null;
     return row.best==="low" ? Math.min(...vals) : Math.max(...vals);
   };
+  const gridCols = `minmax(110px,1.3fr) repeat(${items.length}, minmax(110px,1fr)) minmax(104px,1fr)`;
   return (
     <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch", border:`1px solid ${C.line}`, borderRadius:14, background:C.panel }}>
-      <div style={{ minWidth: 120 + items.length*130 }}>
+      <div style={{ minWidth: 230 + items.length*130 }}>
         {/* header */}
-        <div style={{ display:"grid", gridTemplateColumns:`minmax(110px,1.3fr) repeat(${items.length}, minmax(110px,1fr))`, borderBottom:`1px solid ${C.line}` }}>
+        <div style={{ display:"grid", gridTemplateColumns:gridCols, borderBottom:`1px solid ${C.line}` }}>
           <div style={{ padding:"12px 14px", fontSize:10, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>Metric</div>
           {items.map(it=>(
             <div key={it.ticker} style={{ padding:"10px 12px", textAlign:"right" }}>
@@ -3416,12 +3447,13 @@ function CompareTable({ items, onRemove, onOpen }) {
               {it.data && <div style={{ fontSize:9, color:C.faint, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:110 }}>{it.data.sector}</div>}
             </div>
           ))}
+          <div style={{ padding:"12px 12px", fontSize:9.5, color:C.faint, letterSpacing:"0.04em", textTransform:"uppercase", textAlign:"right" }}>Many stocks<br/>trade at</div>
         </div>
         {/* rows */}
         {CMP_ROWS.map(row=>{
           const best = bestForRow(row);
           return (
-            <div key={row.k} style={{ display:"grid", gridTemplateColumns:`minmax(110px,1.3fr) repeat(${items.length}, minmax(110px,1fr))`, borderTop:`1px solid ${C.panel2}` }}>
+            <div key={row.k} style={{ display:"grid", gridTemplateColumns:gridCols, borderTop:`1px solid ${C.panel2}` }}>
               <div style={{ padding:"10px 14px", fontSize:11.5, color:C.sub, fontWeight:600 }}>{row.label}</div>
               {items.map(it=>{
                 const v = it.data ? row.get(it.data) : null;
@@ -3433,10 +3465,312 @@ function CompareTable({ items, onRemove, onOpen }) {
                   </div>
                 );
               })}
+              <div style={{ padding:"10px 12px", textAlign:"right", fontFamily:C.mono, fontSize:10.5, color:C.faint }}>{row.typical || "—"}</div>
             </div>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ── 1000X-STYLE FINANCIALS SUITE ──────────────────────────────────────
+// Reference ranges: what "many stocks trade at" — the yardstick column.
+const ADV_METRICS = [
+  { label:"TTM P/E",                get:f=>f.valuation?.trailingPE?.value, fmt:fmtX,   lo:20,    hi:28,    better:"low"  },
+  { label:"Forward P/E",            get:f=>f.valuation?.forwardPE?.value,  fmt:fmtX,   lo:18,    hi:26,    better:"low"  },
+  { label:"2yr Forward P/E",        get:f=>f.advanced?.fwd2PE,             fmt:fmtX,   lo:16,    hi:24,    better:"low"  },
+  { label:"TTM EPS Growth",         get:f=>f.advanced?.epsGrowthTTM,       fmt:fmtPct, lo:0.08,  hi:0.12,  better:"high" },
+  { label:"Curr-Yr EPS Growth est", get:f=>f.advanced?.epsGrowthCurrYr,    fmt:fmtPct, lo:0.08,  hi:0.12,  better:"high" },
+  { label:"Next-Yr EPS Growth est", get:f=>f.advanced?.epsGrowthNextYr,    fmt:fmtPct, lo:0.08,  hi:0.12,  better:"high" },
+  { label:"TTM Rev Growth",         get:f=>f.advanced?.revGrowthTTM,       fmt:fmtPct, lo:0.045, hi:0.065, better:"high" },
+  { label:"Curr-Yr Rev Growth est", get:f=>f.advanced?.revGrowthCurrYr,    fmt:fmtPct, lo:0.045, hi:0.065, better:"high" },
+  { label:"Next-Yr Rev Growth est", get:f=>f.advanced?.revGrowthNextYr,    fmt:fmtPct, lo:0.045, hi:0.065, better:"high" },
+  { label:"Gross Margin",           get:f=>f.health?.grossMargin,          fmt:fmtPct, lo:0.40,  hi:0.48,  better:"high" },
+  { label:"Net Margin",             get:f=>f.health?.netMargin,            fmt:fmtPct, lo:0.08,  hi:0.10,  better:"high" },
+  { label:"TTM P/S",                get:f=>f.valuation?.ps?.value,         fmt:fmtX,   lo:1.8,   hi:2.6,   better:"low"  },
+];
+const typicalTxt = (m) => m.fmt===fmtPct ? `${(m.lo*100).toString().replace(/\.0$/,"")}–${(m.hi*100).toString().replace(/\.0$/,"")}%` : `${m.lo}–${m.hi}x`;
+const typicalColor = (v, m) => v==null ? C.faint
+  : m.better==="low"  ? (v < m.lo ? C.up : v > m.hi ? C.down : C.amber)
+  :                     (v > m.hi ? C.up : v < m.lo ? C.down : C.amber);
+
+function AdvancedMetrics({ fund }) {
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+      <div style={{ fontSize:14, fontWeight:700, color:C.ink, marginBottom:2 }}>Metrics vs the Market</div>
+      <div style={{ fontSize:11, color:C.faint, marginBottom:8 }}>Green = better than the typical stock · Amber = in the typical band · Red = worse</div>
+      {ADV_METRICS.map((m,i)=>{
+        const v = m.get(fund);
+        return (
+          <div key={i} style={{ display:"grid", gridTemplateColumns:"minmax(150px,1.7fr) minmax(70px,1fr) minmax(120px,1.3fr)", gap:8, alignItems:"center", padding:"8px 0", borderTop: i?`1px solid ${C.panel2}`:"none" }}>
+            <div style={{ fontSize:12, color:C.sub, fontWeight:600 }}>{m.label}</div>
+            <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, textAlign:"right", color:typicalColor(v, m) }}>{m.fmt(v)}</div>
+            <div style={{ fontSize:10.5, color:C.faint, textAlign:"right", fontFamily:C.mono }}>many stocks: {typicalTxt(m)}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Bar chart with solid actual bars + stacked low/avg/high analyst-estimate bars.
+function FinBarChart({ title, unit="money", past=[], est=[], note }) {
+  const [hov, setHov] = useState(null);
+  const fmtV = v => v==null ? "—" : unit==="money" ? fmtMoney(v) : unit==="pct" ? fmtPct(v) : `$${Number(v).toFixed(2)}`;
+  const all = [...past.map(p=>Math.abs(p.value||0)), ...est.map(e=>Math.abs(e.high ?? e.avg ?? 0))];
+  if (!all.length) return null;
+  const maxV = Math.max(...all) || 1;
+  const H = 140;
+  const hOf = v => Math.max(2, Math.abs(v||0)/maxV * H);
+  const cells = [...past.map(p=>({ ...p, kind:"a" })), ...est.map(e=>({ ...e, kind:"e" }))];
+  const hovTxt = hov==null ? null : cells[hov].kind==="a"
+    ? `${cells[hov].label}: ${fmtV(cells[hov].value)}`
+    : `${cells[hov].label}: avg ${fmtV(cells[hov].avg)} (${fmtV(cells[hov].low)}–${fmtV(cells[hov].high)})`;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"13px 15px", minWidth:0 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:8, marginBottom:8, flexWrap:"wrap" }}>
+        <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{title}{note && <span style={{ fontSize:9.5, color:C.faint, fontWeight:400 }}> {note}</span>}</span>
+        <span style={{ fontFamily:C.mono, fontSize:11, color:C.sub, minHeight:14 }}>{hovTxt || ""}</span>
+      </div>
+      <div style={{ display:"flex", alignItems:"flex-end", gap:2, height:H }}>
+        {cells.map((c,i)=> c.kind==="a" ? (
+          <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label}: ${fmtV(c.value)}`}
+            style={{ flex:1, minWidth:0, height:hOf(c.value), background:(c.value||0)<0?C.down:C.cold, opacity:hov===i?1:0.82,
+              borderRadius:"3px 3px 0 0", outline: i===past.length-1 ? `1.5px solid ${C.ink}` : "none", cursor:"default" }}/>
+        ) : (
+          <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label} analyst est: avg ${fmtV(c.avg)} (low ${fmtV(c.low)} · high ${fmtV(c.high)})`}
+            style={{ flex:1, minWidth:0, height:hOf(c.high ?? c.avg), display:"flex", flexDirection:"column", justifyContent:"flex-end", opacity:hov===i?1:0.85, cursor:"default" }}>
+            <div style={{ height:Math.max(1, hOf(c.high ?? c.avg)-hOf(c.avg)), background:C.up, borderRadius:"3px 3px 0 0" }}/>
+            <div style={{ height:Math.max(1, hOf(c.avg)-hOf(c.low ?? c.avg)), background:C.amber }}/>
+            <div style={{ height:hOf(c.low ?? c.avg), background:`${C.down}cc` }}/>
+          </div>
+        ))}
+      </div>
+      <div style={{ display:"flex", gap:2, marginTop:4 }}>
+        {cells.map((c,i)=>(<div key={i} style={{ flex:1, minWidth:0, fontSize:8, color:c.kind==="e"?C.amber:C.faint, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", fontFamily:C.mono }}>{c.label}</div>))}
+      </div>
+      {est.length>0 && (
+        <div style={{ fontSize:9, color:C.faint, marginTop:6 }}>
+          forward bars = analyst estimates: <span style={{ color:C.down }}>low</span> · <span style={{ color:C.amber }}>avg</span> · <span style={{ color:C.up }}>high</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FinancialsCharts({ ticker }) {
+  const [d, setD]     = useState(null);
+  const [err, setErr] = useState(null);
+  const [mode, setMode] = useState("quarterly");
+  useEffect(()=>{
+    let alive = true; setD(null); setErr(null);
+    fetchFinancialsDetail(ticker).then(x=>{ if(alive){ x.error?setErr(x.error):setD(x); } }).catch(e=>alive&&setErr(e.message));
+    return ()=>{ alive=false; };
+  },[ticker]);
+  if (err) return <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"14px 16px", color:C.down, fontSize:12.5 }}>Couldn't load statements for {ticker}: {err}</div>;
+  if (!d)  return <div style={{ padding:40, textAlign:"center", color:C.sub }}><Loader2 size={18} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:8, fontSize:12 }}>Loading statements…</div></div>;
+  const src = d[mode] || {};
+  const em = d.estimates || {}; const revE = em.revenue || {}, epsE = em.eps || {};
+  const periods = mode==="quarterly" ? [["0q","EstQ"],["+1q","EstQ+1"]] : [["0y","Est FY"],["+1y","Est FY+1"]];
+  const estRev = [], estEPS = [], estNI = [];
+  periods.forEach(([k,lbl])=>{
+    if (revE[k]?.avg != null) estRev.push({ label:lbl, ...revE[k] });
+    if (epsE[k]?.avg != null) {
+      estEPS.push({ label:lbl, ...epsE[k] });
+      if (d.shares) estNI.push({ label:lbl, low:(epsE[k].low??epsE[k].avg)*d.shares, avg:epsE[k].avg*d.shares, high:(epsE[k].high??epsE[k].avg)*d.shares });
+    }
+  });
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12, flexWrap:"wrap", gap:8 }}>
+        <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}` }}>
+          {[["quarterly","Quarterly"],["annual","Annual"]].map(([id,lab])=>(
+            <button key={id} onClick={()=>setMode(id)} style={{ padding:"6px 13px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:mode===id?C.line:"transparent", color:mode===id?C.ink:C.sub }}>{lab}</button>
+          ))}
+        </div>
+        {d.next_earnings && <span style={{ fontSize:11, color:C.violet, fontFamily:C.mono, background:`${C.violet}14`, borderRadius:6, padding:"4px 10px" }}>next earnings {String(d.next_earnings).slice(0,10)}</span>}
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(290px, 1fr))", gap:12 }}>
+        <FinBarChart title="Revenue"        past={src.revenue}     est={estRev}/>
+        <FinBarChart title="Net Income"     past={src.netIncome}   est={estNI} note="(est = EPS est × shares)"/>
+        <FinBarChart title="Free Cash Flow" past={src.fcf}/>
+        <FinBarChart title="Diluted EPS"    unit="eps" past={src.eps} est={estEPS}/>
+        <FinBarChart title="Gross Margin"   unit="pct" past={src.grossMargin}/>
+      </div>
+      <div style={{ fontSize:10, color:C.faint, marginTop:10 }}>History depth is what Yahoo provides free (~5-6 quarters, 4-5 years). Latest reported bar is outlined.</div>
+    </div>
+  );
+}
+
+// Year-by-year projection model: edit growth, margin and exit-P/E per year →
+// implied share price (low/high) and CAGR from today. Persists per ticker.
+function ProjectionsTable({ fund }) {
+  const T = fund?.ticker;
+  const spot = fund?.spot, shares = fund?.fairValueInputs?.shares, rev0 = fund?.fairValueInputs?.revenue;
+  const KEY = `alphadesk:proj:${T}`;
+  const clamp = (v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  const seed = () => {
+    const g1 = clamp(Math.round(((fund?.advanced?.revGrowthNextYr ?? fund?.ttm?.revenueGrowth ?? 0.10))*100), -20, 80);
+    const nm = clamp(Math.round((fund?.health?.netMargin ?? 0.15)*100), 1, 60);
+    const fpe = fund?.valuation?.forwardPE?.value || 24;
+    return {
+      g:   [g1, Math.round(g1*0.85), Math.round(g1*0.7), Math.round(g1*0.6)].map(x=>Math.max(x,2)),
+      m:   [nm, nm, nm, nm],
+      peLo:[1,1,1,1].map(()=>clamp(Math.round(fpe*0.7),5,60)),
+      peHi:[1,1,1,1].map(()=>clamp(Math.round(fpe*1.1),8,80)),
+    };
+  };
+  const [p, setP] = useState(null);
+  useEffect(()=>{ if(!T) return; try { const s = JSON.parse(localStorage.getItem(KEY)||"null"); setP(s?.g ? s : seed()); } catch { setP(seed()); }
+  // eslint-disable-next-line
+  },[T]);
+  useEffect(()=>{ if (p && T) try { localStorage.setItem(KEY, JSON.stringify(p)); } catch {} },[p, T]);
+  if (!fund) return null;
+  if (!spot || !shares || !rev0) return <div style={{ padding:30, textAlign:"center", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Not enough data to project {T} (needs price, shares and revenue).</div>;
+  if (!p) return null;
+  const y0 = new Date().getFullYear();
+  const ni0 = rev0 * (fund?.health?.netMargin ?? 0.15);
+  // derive the 4 future years
+  const yrs = [];
+  let rev = rev0;
+  for (let i = 0; i < 4; i++) {
+    rev = rev * (1 + (p.g[i]||0)/100);
+    const ni  = rev * (p.m[i]||0)/100;
+    const eps = ni / shares;
+    const lo  = eps * (p.peLo[i]||0), hiP = eps * (p.peHi[i]||0);
+    const n = i + 1;
+    yrs.push({ year:y0+n, rev, ni, eps, lo, hi:hiP,
+      cagrLo: lo>0 ? Math.pow(lo/spot, 1/n)-1 : null,
+      cagrHi: hiP>0 ? Math.pow(hiP/spot, 1/n)-1 : null });
+  }
+  const setCell = (key, i, v) => setP(prev => ({ ...prev, [key]: prev[key].map((x,j)=>j===i? v : x) }));
+  const inp = (key, i) => (
+    <input type="number" value={p[key][i]} onChange={e=>setCell(key, i, parseFloat(e.target.value)||0)}
+      style={{ width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"4px 6px", color:C.cold, fontSize:11.5, fontFamily:C.mono, outline:"none", textAlign:"right", fontWeight:700 }}/>
+  );
+  const cell = { padding:"7px 10px", textAlign:"right", fontFamily:C.mono, fontSize:11.5, color:C.ink, whiteSpace:"nowrap" };
+  const lblCell = { padding:"7px 10px", fontSize:10.5, color:C.sub, fontWeight:700, whiteSpace:"nowrap", textTransform:"uppercase", letterSpacing:"0.03em" };
+  const cagrFmt = v => v==null ? "—" : `${v>=0?"+":""}${(v*100).toFixed(0)}%`;
+  const rows = [
+    ["Revenue",        [fmtMoney(rev0), ...yrs.map(y=>fmtMoney(y.rev))]],
+    ["Rev growth %",   ["", ...yrs.map((_,i)=>inp("g", i))], true],
+    ["Net income",     [fmtMoney(ni0), ...yrs.map(y=>fmtMoney(y.ni))]],
+    ["Net margin %",   ["", ...yrs.map((_,i)=>inp("m", i))], true],
+    ["EPS",            [fund?.ttm?.trailingEps!=null?`$${fund.ttm.trailingEps.toFixed(2)}`:"—", ...yrs.map(y=>`$${y.eps.toFixed(2)}`)]],
+    ["P/E low est",    ["", ...yrs.map((_,i)=>inp("peLo", i))], true],
+    ["P/E high est",   ["", ...yrs.map((_,i)=>inp("peHi", i))], true],
+    ["Price low",      [`$${spot?.toFixed(2)}`, ...yrs.map(y=>`$${y.lo.toFixed(0)}`)], false, C.down],
+    ["Price high",     [`$${spot?.toFixed(2)}`, ...yrs.map(y=>`$${y.hi.toFixed(0)}`)], false, C.up],
+    ["CAGR low",       ["", ...yrs.map(y=>cagrFmt(y.cagrLo))], false, C.down],
+    ["CAGR high",      ["", ...yrs.map(y=>cagrFmt(y.cagrHi))], false, C.up],
+  ];
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
+        <div style={{ fontSize:12, color:C.sub }}>Type your assumptions (blue cells) — price targets and yearly returns recompute live. Saved per ticker.</div>
+        <button onClick={()=>setP(seed())} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:8, padding:"6px 12px", color:C.sub, cursor:"pointer", fontSize:11.5 }}>Reset to analyst-seeded</button>
+      </div>
+      <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch", border:`1px solid ${C.line}`, borderRadius:12, background:C.panel }}>
+        <div style={{ minWidth:640 }}>
+          <div style={{ display:"grid", gridTemplateColumns:`minmax(120px,1.3fr) repeat(5, minmax(88px,1fr))`, borderBottom:`1px solid ${C.line}` }}>
+            <div style={lblCell}>Year</div>
+            <div style={{ ...cell, fontWeight:800, color:C.faint }}>{y0} (TTM)</div>
+            {yrs.map(y=><div key={y.year} style={{ ...cell, fontWeight:800 }}>{y.year}</div>)}
+          </div>
+          {rows.map(([label, vals, editable, col], ri)=>(
+            <div key={ri} style={{ display:"grid", gridTemplateColumns:`minmax(120px,1.3fr) repeat(5, minmax(88px,1fr))`, borderTop:ri?`1px solid ${C.panel2}`:"none", background: editable ? `${C.cold}08` : "transparent" }}>
+              <div style={lblCell}>{label}</div>
+              {vals.map((v,ci)=><div key={ci} style={{ ...cell, color: col || cell.color }}>{v}</div>)}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ fontSize:10, color:C.faint, marginTop:8 }}>CAGR = the yearly return if the stock reaches that price by that year, from today's ${spot?.toFixed(2)}. Assumes share count stays flat. Personal research input — not financial advice.</div>
+    </div>
+  );
+}
+
+function FilingsSection({ ticker }) {
+  const [d, setD] = useState(null);
+  const [nextEarn, setNextEarn] = useState(null);
+  useEffect(()=>{
+    let alive = true; setD(null); setNextEarn(null);
+    fetchFilings(ticker).then(x=>alive&&setD(x)).catch(()=>alive&&setD({ filings:[], error:"request failed" }));
+    fetchFinancialsDetail(ticker).then(x=>{ if(alive && x.next_earnings) setNextEarn(String(x.next_earnings).slice(0,10)); }).catch(()=>{});
+    return ()=>{ alive=false; };
+  },[ticker]);
+  const FORM_COL = { "10-K":C.cold, "10-Q":C.up, "8-K":C.amber, "DEF 14A":C.violet };
+  const linkBtn = (href, label) => (
+    <a href={href} target="_blank" rel="noreferrer" style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 13px", color:C.cold, fontSize:12, fontWeight:600, textDecoration:"none" }}>{label} ↗</a>
+  );
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      {/* Earnings calls */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.ink, marginBottom:4 }}>Earnings Calls {nextEarn && <span style={{ fontSize:11, color:C.violet, fontFamily:C.mono, fontWeight:600 }}>· next: {nextEarn}</span>}</div>
+        <div style={{ fontSize:11.5, color:C.faint, marginBottom:12 }}>Full transcripts aren't in free market data — these links go straight to them.</div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          {linkBtn(`https://seekingalpha.com/symbol/${ticker}/earnings/transcripts`, "Transcripts (Seeking Alpha)")}
+          {linkBtn(`https://www.google.com/search?q=${encodeURIComponent(ticker + " investor relations earnings call webcast")}`, "Company IR / webcast")}
+          {linkBtn(`https://finance.yahoo.com/quote/${ticker}/analysis`, "Analyst estimates (Yahoo)")}
+        </div>
+      </div>
+      {/* SEC filings */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.ink, marginBottom:2 }}>SEC Filings <span style={{ fontSize:11, color:C.faint, fontWeight:400 }}>· straight from EDGAR</span></div>
+        <div style={{ fontSize:11, color:C.faint, marginBottom:10 }}>10-K = annual report · 10-Q = quarterly · 8-K = material events · DEF 14A = proxy (pay & governance)</div>
+        {!d ? <div style={{ padding:20, textAlign:"center", color:C.sub }}><Loader2 size={15} style={{ animation:"spin 1s linear infinite" }}/></div>
+        : d.error && !(d.filings||[]).length ? <div style={{ fontSize:12, color:C.amber }}>{d.error}</div>
+        : (d.filings||[]).map((f,i)=>(
+          <a key={i} href={f.url} target="_blank" rel="noreferrer"
+            style={{ display:"flex", gap:12, alignItems:"center", padding:"9px 4px", borderTop:i?`1px solid ${C.panel2}`:"none", textDecoration:"none", cursor:"pointer" }}>
+            <span style={{ fontFamily:C.mono, fontSize:10.5, fontWeight:800, color:FORM_COL[f.form]||C.sub, background:`${FORM_COL[f.form]||C.sub}14`, borderRadius:5, padding:"2px 8px", minWidth:64, textAlign:"center" }}>{f.form}</span>
+            <span style={{ fontSize:12, color:C.ink, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.desc}</span>
+            <span style={{ fontFamily:C.mono, fontSize:11, color:C.faint }}>{f.date}</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Advanced Education — plain-English glossary of every metric on this page.
+const GLOSSARY = [
+  ["P/E (TTM)","Share price ÷ last 12 months of earnings per share. How many dollars you pay for $1 of current profit. Lower = cheaper, but fast growers deserve higher."],
+  ["Forward P/E","Price ÷ analysts' expected EPS for this fiscal year — the market's price on this year's profit."],
+  ["2yr Forward P/E","Price ÷ expected EPS for next fiscal year. Much lower than TTM P/E = the market expects earnings to grow into the valuation."],
+  ["PEG","P/E ÷ growth rate. Under ~1.5 usually means you're not overpaying for the growth."],
+  ["P/S","Market cap ÷ revenue. The yardstick when earnings are small or negative."],
+  ["EV/EBITDA","Enterprise value ÷ cash operating profit. Comparable across companies with different debt loads."],
+  ["Gross margin","% of revenue left after direct costs. A read on pricing power — great software runs 70%+."],
+  ["Net margin","% of revenue that survives all the way to profit."],
+  ["Free cash flow","Cash generated after capital spending — what can actually fund buybacks, dividends, or growth."],
+  ["ROE","Profit ÷ shareholder equity: how hard the company works each dollar you own."],
+  ["EPS","Profit per share — the E in P/E."],
+  ["Dilution","Share-count change. New shares shrink your slice; buybacks grow it."],
+  ["Analyst estimates (low/avg/high)","The forecast range across Wall Street analysts. A wide range = high disagreement/uncertainty."],
+  ["RSI","Momentum, 0–100, over the last 14 bars. Under 30 = oversold, over 70 = overbought."],
+  ["CAGR","Compound annual growth rate — the smoothed per-year return between two points in time."],
+];
+function EducationPanel() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14 }}>
+      <button onClick={()=>setOpen(o=>!o)} style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"none", border:"none", padding:"14px 18px", cursor:"pointer" }}>
+        <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>📚 What do these metrics mean?</span>
+        <ChevronDown size={15} color={C.faint} style={{ transform:open?"rotate(180deg)":"none", transition:"transform .15s" }}/>
+      </button>
+      {open && (
+        <div style={{ padding:"0 18px 14px" }}>
+          {GLOSSARY.map(([t,def],i)=>(
+            <div key={i} style={{ padding:"8px 0", borderTop:`1px solid ${C.panel2}` }}>
+              <span style={{ fontSize:12, fontWeight:700, color:C.cold }}>{t}</span>
+              <span style={{ fontSize:12, color:C.sub, marginLeft:8, lineHeight:1.5 }}>{def}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -3690,8 +4024,8 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
           <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Financials</div>
           <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>Value a business at a glance · free fundamentals + valuation</div>
         </div>
-        <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}` }}>
-          {subTab("analyze","Analyze")}{subTab("compare","Compare")}{subTab("screener","Screener")}
+        <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexWrap:"wrap" }}>
+          {subTab("analyze","Analyze")}{subTab("financials","Financials")}{subTab("compare","Compare")}{subTab("projections","Projections")}{subTab("filings","Filings")}
         </div>
       </div>
 
@@ -3739,6 +4073,9 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
                   <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:11, padding:"11px 13px" }}><div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase" }}>Dilution (window)</div><div style={{ fontFamily:C.mono, fontSize:15, fontWeight:700, marginTop:3, color:(fund.dilution||0)>1?C.down:(fund.dilution||0)<-1?C.up:C.ink }}>{fund.dilution==null?"—":`${fund.dilution>=0?"+":""}${fund.dilution.toFixed(1)}%`}</div></div>
                 </div>
               </div>
+
+              {/* Metrics vs typical market ranges (1000X-style yardstick) */}
+              <AdvancedMetrics fund={fund}/>
 
               {/* Valuation snapshot */}
               <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
@@ -3789,6 +4126,9 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
                   </div>
                 ) : null}
               </div>
+
+              {/* Advanced education — plain-English glossary */}
+              <EducationPanel/>
             </div>
           )}
         </div>
@@ -3809,9 +4149,32 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
         </div>
       )}
 
-      {view==="screener" && (
-        <ScreenerPanel watchlist={watchlist} savedScreens={savedScreens} onSaveScreen={onSaveScreen} onDeleteScreen={onDeleteScreen}
-          onOpen={onOpenDetail} onFinancials={go}/>
+      {view==="financials" && (
+        <div>
+          <div style={{ marginBottom:16 }}>{searchBar(go, "Statements & estimates — e.g. PLTR, MU, SNDK")}</div>
+          <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>{displaySym(ticker)} — statements & analyst estimates</div>
+          <FinancialsCharts ticker={ticker}/>
+          <div style={{ marginTop:16 }}><EducationPanel/></div>
+        </div>
+      )}
+
+      {view==="projections" && (
+        <div>
+          <div style={{ marginBottom:16 }}>{searchBar(go, "Project any ticker — e.g. META, NVDA, PLTR")}</div>
+          <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>{displaySym(ticker)} — 4-year projection model</div>
+          {!fund ? (
+            <div style={{ padding:40, textAlign:"center", color:C.sub }}><Loader2 size={18} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:8, fontSize:12 }}>Loading {ticker} fundamentals…</div></div>
+          ) : <ProjectionsTable fund={fund}/>}
+          <div style={{ marginTop:16 }}><EducationPanel/></div>
+        </div>
+      )}
+
+      {view==="filings" && (
+        <div>
+          <div style={{ marginBottom:16 }}>{searchBar(go, "Filings & earnings calls — any ticker")}</div>
+          <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>{displaySym(ticker)} — filings & earnings calls</div>
+          <FilingsSection ticker={ticker}/>
+        </div>
       )}
     </div>
   );

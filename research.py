@@ -66,13 +66,14 @@ def technicals(ticker):
     spot = float(c.iloc[-1])
     chg  = float((spot/float(c.iloc[-2]) - 1)*100) if len(c) > 1 else 0.0
 
-    # RSI(14) — keep the rolling series so the UI can draw a mini RSI graph,
-    # not just the latest reading.
+    # RSI(14), Wilder's smoothing (the standard used by TradingView/brokers —
+    # an SMA variant here previously read ~2pts off those platforms). Keep the
+    # rolling series so the UI can draw the RSI graph, not just the last value.
     delta = c.diff()
-    up    = delta.clip(lower=0).rolling(14).mean()
-    dn    = (-delta.clip(upper=0)).rolling(14).mean()
-    rsi   = float(100 - 100/(1 + up.iloc[-1]/dn.iloc[-1])) if dn.iloc[-1] else 50.0
-    rsi_series = (100 - 100/(1 + up/dn)).where(dn != 0, 50.0)
+    up    = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    dn    = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rsi_series = (100 - 100/(1 + up/dn)).where(dn != 0, 100.0)
+    rsi   = float(rsi_series.iloc[-1]) if rsi_series.iloc[-1] == rsi_series.iloc[-1] else 50.0
     rsi_history = [round(float(x), 1) for x in rsi_series.tail(252).tolist() if x == x]  # full year, drop NaN
 
     info = {}
@@ -609,6 +610,36 @@ def fundamentals(ticker):
         "netMargin":  _num(info.get("profitMargins")),
     }
 
+    # ── Forward analyst estimates (avg/low/high per period: 0q,+1q,0y,+1y) ──
+    # Powers the forward bars on the Financials charts, 2yr-forward P/E, and
+    # the EPS/revenue growth rows in advanced metrics.
+    def _est_dict(df):
+        out = {}
+        try:
+            for period, row in df.iterrows():
+                out[str(period)] = {"avg": _num(row.get("avg")), "low": _num(row.get("low")),
+                                    "high": _num(row.get("high")), "growth": _num(row.get("growth"))}
+        except Exception:
+            pass
+        return out
+    est_rev, est_eps = {}, {}
+    try: est_rev = _est_dict(tk.revenue_estimate)
+    except Exception: pass
+    try: est_eps = _est_dict(tk.earnings_estimate)
+    except Exception: pass
+    eps_1y = (est_eps.get("+1y") or {}).get("avg")
+    eps_0y = (est_eps.get("0y") or {}).get("avg")
+    advanced = {
+        "fwd2PE":          (spot / eps_1y) if (spot and eps_1y and eps_1y > 0) else None,
+        "epsGrowthTTM":    _num(info.get("earningsGrowth")),
+        "epsGrowthCurrYr": (est_eps.get("0y") or {}).get("growth"),
+        "epsGrowthNextYr": (est_eps.get("+1y") or {}).get("growth"),
+        "revGrowthTTM":    _num(info.get("revenueGrowth")),
+        "revGrowthCurrYr": (est_rev.get("0y") or {}).get("growth"),
+        "revGrowthNextYr": (est_rev.get("+1y") or {}).get("growth"),
+        "epsCurrYrEst":    eps_0y, "epsNextYrEst": eps_1y,
+    }
+
     return _json_safe({
         "ticker": ticker,
         "name":   info.get("longName") or info.get("shortName") or ticker,
@@ -638,6 +669,8 @@ def fundamentals(ticker):
         "dilution": dilution,
         "health": health,
         "valuation": valuation,
+        "estimates": {"revenue": est_rev, "eps": est_eps},
+        "advanced": advanced,
         "verdict": verdict_line,
         # Base inputs for the editable fair-value model (frontend recomputes live)
         "fairValueInputs": {
@@ -1109,6 +1142,137 @@ try:
         """Full fundamentals + valuation bundle for the Financials page (free)."""
         t = ticker.upper().strip()
         return _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+
+    @app.get("/financials-detail")
+    def financials_detail_endpoint(ticker: str):
+        """Quarterly + annual statement series (revenue, net income, FCF, EPS,
+        gross margin) plus forward analyst estimates — powers the Financials
+        bar charts with estimate bars extending into future periods."""
+        t = ticker.upper().strip()
+        def produce():
+            try:
+                tk = yf.Ticker(t)
+                def rows(df, *names):
+                    if df is None or getattr(df, "empty", True):
+                        return None
+                    for n in names:
+                        if n in df.index:
+                            return df.loc[n]
+                    return None
+                def series(df, *names, per="Q"):
+                    r = rows(df, *names)
+                    if r is None:
+                        return []
+                    out = []
+                    for col in list(df.columns)[::-1]:                     # oldest → newest
+                        v = _num(r[col])
+                        lbl = (f"Q{col.quarter} '{str(col.year)[2:]}" if per == "Q" else str(col.year))
+                        out.append({"label": lbl, "value": v})
+                    return [o for o in out if o["value"] is not None]
+                qi, qc = None, None
+                ai_, ac = None, None
+                try: qi = tk.quarterly_income_stmt
+                except Exception: pass
+                try: qc = tk.quarterly_cashflow
+                except Exception: pass
+                try: ai_ = tk.income_stmt
+                except Exception: pass
+                try: ac = tk.cashflow
+                except Exception: pass
+                def margin_series(df, per="Q"):
+                    rev, gp = rows(df, "Total Revenue"), rows(df, "Gross Profit")
+                    if rev is None or gp is None:
+                        return []
+                    out = []
+                    for col in list(df.columns)[::-1]:
+                        r, g = _num(rev[col]), _num(gp[col])
+                        if r and g is not None:
+                            lbl = (f"Q{col.quarter} '{str(col.year)[2:]}" if per == "Q" else str(col.year))
+                            out.append({"label": lbl, "value": g / r})
+                    return out
+                def est_block(df):
+                    out = {}
+                    try:
+                        for period, row in df.iterrows():
+                            out[str(period)] = {"avg": _num(row.get("avg")), "low": _num(row.get("low")),
+                                                "high": _num(row.get("high"))}
+                    except Exception:
+                        pass
+                    return out
+                est_rev, est_eps = {}, {}
+                try: est_rev = est_block(tk.revenue_estimate)
+                except Exception: pass
+                try: est_eps = est_block(tk.earnings_estimate)
+                except Exception: pass
+                info = {}
+                try: info = tk.info or {}
+                except Exception: pass
+                next_earn = None
+                try:
+                    cal = tk.calendar or {}
+                    ed = cal.get("Earnings Date") or []
+                    if ed: next_earn = str(ed[0])
+                except Exception:
+                    pass
+                return _json_safe({
+                    "ticker": t,
+                    "quarterly": {
+                        "revenue":    series(qi, "Total Revenue", "Operating Revenue"),
+                        "netIncome":  series(qi, "Net Income", "Net Income Common Stockholders"),
+                        "eps":        series(qi, "Diluted EPS", "Basic EPS"),
+                        "fcf":        series(qc, "Free Cash Flow"),
+                        "grossMargin": margin_series(qi),
+                    },
+                    "annual": {
+                        "revenue":    series(ai_, "Total Revenue", "Operating Revenue", per="Y"),
+                        "netIncome":  series(ai_, "Net Income", "Net Income Common Stockholders", per="Y"),
+                        "eps":        series(ai_, "Diluted EPS", "Basic EPS", per="Y"),
+                        "fcf":        series(ac, "Free Cash Flow", per="Y"),
+                        "grossMargin": margin_series(ai_, per="Y"),
+                    },
+                    "estimates": {"revenue": est_rev, "eps": est_eps},
+                    "shares": _num(info.get("sharesOutstanding")),
+                    "next_earnings": next_earn,
+                })
+            except Exception as e:
+                return {"error": str(e)}
+        return _cached_swr(f"findet:{t}", produce, ttl=10800, stale_ttl=86400)
+
+    _CIK_MAP = {}
+    @app.get("/filings")
+    def filings_endpoint(ticker: str):
+        """Recent SEC filings (10-K, 10-Q, 8-K, proxies) straight from EDGAR — free."""
+        t = ticker.upper().strip()
+        def produce():
+            import urllib.request as _ur, json as _json
+            ua = {"User-Agent": "AlphaDesk personal research contact@alphadesk.local"}
+            try:
+                if not _CIK_MAP:
+                    req = _ur.Request("https://www.sec.gov/files/company_tickers.json", headers=ua)
+                    data = _json.loads(_ur.urlopen(req, timeout=20).read())
+                    for v in data.values():
+                        _CIK_MAP[str(v.get("ticker", "")).upper()] = int(v.get("cik_str", 0))
+                cik = _CIK_MAP.get(t)
+                if not cik:
+                    return {"ticker": t, "filings": [], "error": f"{t} not found on EDGAR (non-US listings and some ETFs aren't there)"}
+                req = _ur.Request(f"https://data.sec.gov/submissions/CIK{cik:010d}.json", headers=ua)
+                sub = _json.loads(_ur.urlopen(req, timeout=20).read())
+                rec = (sub.get("filings") or {}).get("recent") or {}
+                keep = {"10-K", "10-Q", "8-K", "DEF 14A", "S-1", "20-F", "6-K", "4"}
+                out = []
+                for form, date, acc, doc, desc in zip(rec.get("form", []), rec.get("filingDate", []),
+                                                      rec.get("accessionNumber", []), rec.get("primaryDocument", []),
+                                                      rec.get("primaryDocDescription", [])):
+                    if form not in keep or form == "4":   # skip insider Form 4s (too noisy)
+                        continue
+                    out.append({"form": form, "date": date, "desc": desc or form,
+                                "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc.replace('-', '')}/{doc}"})
+                    if len(out) >= 14:
+                        break
+                return _json_safe({"ticker": t, "company": sub.get("name"), "filings": out})
+            except Exception as e:
+                return {"ticker": t, "filings": [], "error": str(e)}
+        return _cached_swr(f"filings:{t}", produce, ttl=21600, stale_ttl=172800)
 
     @app.get("/business-quality")
     def business_quality_endpoint(ticker: str, profile: str = ""):

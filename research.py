@@ -309,14 +309,16 @@ def _json_safe(o):
 
 
 def _profile_ctx(profile: str) -> str:
-    """Convert profile string 'risk|goal|style|level' into an AI instruction block."""
+    """Convert profile string 'risk|goal|style|level' into an AI instruction block.
+    Goal and style segments may be comma lists (the profiler is multi-select),
+    e.g. 'moderate|growth|swing,longterm|intermediate' for a swing + long-term blend."""
     if not profile:
         return ""
     parts = profile.split("|")
-    risk  = parts[0] if len(parts) > 0 else "moderate"
-    goal  = parts[1] if len(parts) > 1 else "growth"
-    style = parts[2] if len(parts) > 2 else "swing"
-    level = parts[3] if len(parts) > 3 else "intermediate"
+    risk   = (parts[0] if len(parts) > 0 else "").strip() or "moderate"
+    goals  = [g.strip() for g in (parts[1] if len(parts) > 1 else "").split(",") if g.strip()] or ["growth"]
+    styles = [s.strip() for s in (parts[2] if len(parts) > 2 else "").split(",") if s.strip()] or ["swing"]
+    level  = (parts[3] if len(parts) > 3 else "").strip() or "intermediate"
     risk_map  = {"conservative":"Conservative — capital preservation first, prefers wide stops and low-risk setups",
                  "moderate":"Moderate — balanced risk/reward, comfortable with occasional volatility",
                  "aggressive":"Aggressive — high risk/reward seeker, comfortable with large swings",
@@ -330,11 +332,13 @@ def _profile_ctx(profile: str) -> str:
                  "options":"Options Trader — leverage and Greeks-focused",
                  "daytrader":"Day Trader — intraday moves, tight stops"}
     level_map = {"beginner":"Beginner","intermediate":"Intermediate","advanced":"Advanced","professional":"Professional"}
+    goal_txt  = " + ".join(goal_map.get(g, g) for g in goals)
+    style_txt = " + ".join(style_map.get(s, s) for s in styles)
     lines = [
         f"TRADER PROFILE (tailor ALL analysis and recommendations to this user):",
         f"  Risk Tolerance: {risk_map.get(risk, risk)}",
-        f"  Primary Goal: {goal_map.get(goal, goal)}",
-        f"  Trading Style: {style_map.get(style, style)}",
+        f"  Primary Goal{'s' if len(goals)>1 else ''}: {goal_txt}",
+        f"  Trading Style{'s' if len(styles)>1 else ''}: {style_txt}",
         f"  Experience: {level_map.get(level, level)}",
         f"",
         f"ANALYSIS FRAMEWORK — evaluate through these four lenses in strict priority order:",
@@ -349,12 +353,16 @@ def _profile_ctx(profile: str) -> str:
         lines.append("  → Prefer higher risk/reward setups, shorter DTE, further OTM strikes, concentrated bets.")
     if risk == "conservative":
         lines.append("  → Prefer LEAPS, blue chips, wide stops, defined-risk trades, smaller sizing.")
-    if goal == "income":
+    if "income" in goals:
         lines.append("  → Lean toward premium-selling ideas (covered calls, cash-secured puts, credit spreads).")
-    if style == "options":
+    if "options" in styles:
         lines.append("  → Emphasize Greeks analysis, IV rank, options structure, and theta management.")
-    if style == "daytrader":
+    if "daytrader" in styles:
         lines.append("  → Focus on intraday setups, momentum, and tight stops. Ignore long-term fundamentals.")
+    if "longterm" in styles and (set(styles) & {"swing","daytrader"}):
+        lines.append("  → BLENDED HORIZON: this user runs long-term core holdings AND shorter tactical trades. "
+                     "For every recommendation, say WHICH horizon it serves — a core-holding thesis change vs. "
+                     "a tactical entry/exit — and never apply short-term exit logic to a long-term core position.")
     lines.append("")
     lines.append(ANALYST_WEIGHT_BLOCK)
     return "\n".join(lines)
@@ -1671,6 +1679,7 @@ JSON ONLY:
         positions_in = payload.get("positions") or []
         margin = float(payload.get("margin") or 0)
         rate   = float(payload.get("margin_rate") or 0)
+        profile = str(payload.get("profile") or "")   # tunes alert thresholds/wording
         from run_daily import (layer1_data_valuation, layer2_portfolio_analytics,
                                get_macro_score, layer4_alerts)
         macro = get_macro_score()
@@ -1719,7 +1728,7 @@ JSON ONLY:
             p["rec"] = rec
         if active:
             analytics = layer2_portfolio_analytics(active)
-            alerts    = list(layer4_alerts(active, analytics, macro, {}))
+            alerts    = list(layer4_alerts(active, analytics, macro, {}, profile=profile))
         else:
             analytics, alerts = dict(_ZERO_ANALYTICS), []
         analytics = _apply_margin(analytics, margin, rate)

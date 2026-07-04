@@ -247,11 +247,11 @@ async function fetchBriefRefresh(body) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
-async function fetchValue(positions, margin = 0, margin_rate = 0) {
+async function fetchValue(positions, margin = 0, margin_rate = 0, profile = "") {
   const r = await fetch(`${API}/value`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ positions, margin, margin_rate }),
+    body: JSON.stringify({ positions, margin, margin_rate, profile }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2968,7 +2968,8 @@ const PROFILE_OPTIONS = {
     ]
   },
   goal: {
-    label: "Primary Goal",
+    label: "Goals",
+    multi: true,
     options: [
       { value:"growth",      label:"Growth",      desc:"Maximize portfolio value long term" },
       { value:"income",      label:"Income",      desc:"Generate consistent returns" },
@@ -2978,6 +2979,7 @@ const PROFILE_OPTIONS = {
   },
   style: {
     label: "Trading Style",
+    multi: true,
     options: [
       { value:"longterm",   label:"Long-Term Investor", desc:"Months to years" },
       { value:"swing",      label:"Swing Trader",       desc:"Days to weeks, technical setups" },
@@ -2997,9 +2999,18 @@ const PROFILE_OPTIONS = {
 };
 
 function TraderProfileModal({ profile, onSave, onClose }) {
-  const defaults = { riskTolerance:"moderate", goal:"growth", style:"swing", level:"intermediate" };
-  const [draft, setDraft] = useState(profile || defaults);
-  const set = (k, v) => setDraft(d => ({...d, [k]:v}));
+  const defaults = { riskTolerance:"moderate", goal:["growth"], style:["swing"], level:"intermediate" };
+  // Goals/style are multi-select (arrays); older saved profiles stored strings — normalize.
+  const norm = (p) => ({ ...defaults, ...p,
+    goal:  Array.isArray(p?.goal)  ? p.goal  : (p?.goal  ? [p.goal]  : defaults.goal),
+    style: Array.isArray(p?.style) ? p.style : (p?.style ? [p.style] : defaults.style) });
+  const [draft, setDraft] = useState(norm(profile));
+  const set = (k, v, multi) => setDraft(d => {
+    if (!multi) return { ...d, [k]: v };
+    const cur = Array.isArray(d[k]) ? d[k] : [d[k]];
+    const next = cur.includes(v) ? cur.filter(x=>x!==v) : [...cur, v];
+    return { ...d, [k]: next.length ? next : cur };   // keep at least one selected
+  });
 
   return (
     <div style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
@@ -3014,14 +3025,25 @@ function TraderProfileModal({ profile, onSave, onClose }) {
         </div>
         {Object.entries(PROFILE_OPTIONS).map(([key, section])=>(
           <div key={key} style={{ marginBottom:20 }}>
-            <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:10 }}>{section.label}</div>
+            <div style={{ fontSize:10.5, color:C.sub, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:10 }}>
+              {section.label}{section.multi && <span style={{ color:C.faint, textTransform:"none", letterSpacing:0 }}> · pick all that apply</span>}
+            </div>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
               {section.options.map(opt=>{
-                const sel = draft[key] === opt.value;
+                const sel = section.multi
+                  ? (Array.isArray(draft[key]) ? draft[key] : [draft[key]]).includes(opt.value)
+                  : draft[key] === opt.value;
                 return (
-                  <div key={opt.value} onClick={()=>set(key, opt.value)}
-                    style={{ background:sel?`${C.cold}18`:C.panel, border:`1.5px solid ${sel?C.cold:C.line}`, borderRadius:10, padding:"10px 13px", cursor:"pointer", transition:"all .15s" }}>
-                    <div style={{ fontSize:12.5, fontWeight:700, color:sel?C.cold:C.ink }}>{opt.label}</div>
+                  <div key={opt.value} onClick={()=>set(key, opt.value, section.multi)}
+                    style={{ background:sel?`${C.cold}18`:C.panel, border:`1.5px solid ${sel?C.cold:C.line}`, borderRadius:10, padding:"10px 13px", cursor:"pointer", transition:"all .15s", position:"relative" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                      {section.multi && (
+                        <span style={{ width:14, height:14, borderRadius:4, border:`1.5px solid ${sel?C.cold:C.line}`, background:sel?C.cold:"transparent", display:"inline-flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                          {sel && <Check size={10} color="#fff"/>}
+                        </span>
+                      )}
+                      <span style={{ fontSize:12.5, fontWeight:700, color:sel?C.cold:C.ink }}>{opt.label}</span>
+                    </div>
                     <div style={{ fontSize:10.5, color:C.sub, marginTop:3 }}>{opt.desc}</div>
                   </div>
                 );
@@ -3901,10 +3923,12 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
+  // Arrays (multi-select goals/styles) serialize to comma lists via template join.
+  const profileStr = profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : "";
   const valuePortfolio = useCallback((list, m=0, r=0)=>{
     setPfErr(null); setPfLoading(true);
-    fetchValue(list, m, r).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
-  },[]);
+    fetchValue(list, m, r, profileStr).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
+  },[profileStr]);
   // Re-value when positions' CONTENTS or the combined margin/rate change — not when merely reordered.
   const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis,p.stop].join("|")).sort().join(",");
   useEffect(()=>{ valuePortfolio(positionsRef.current, totalMargin, blendedRate); },[valSig, totalMargin, blendedRate, valuePortfolio]);
@@ -4054,7 +4078,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                   {({conservative:"🛡️",moderate:"⚖️",aggressive:"⚡",degen:"🔥"}[profile.riskTolerance]||"👤")}
                 </span>
                 <span style={{ fontSize:10.5, color:C.sub, whiteSpace:"nowrap", display:"none", minWidth:0 }} className="profile-label">
-                  {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"?")} · {({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day"}[profile.style]||"?")}
+                  {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"?")} · {(Array.isArray(profile.style)?profile.style:[profile.style]).map(s=>({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day"}[s]||"?")).join("+")}
                 </span>
               </div>
             )}

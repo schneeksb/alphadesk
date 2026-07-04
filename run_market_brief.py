@@ -52,8 +52,13 @@ def load_user_state(user_id=None):
     row = rows[0]
     d = row.get("data") or {}
     prof = d.get("profile") or {}
-    profile_str = (f"{prof.get('riskTolerance','moderate')}|{prof.get('goal','growth')}"
-                   f"|{prof.get('style','longterm')}|{prof.get('level','intermediate')}") if prof else ""
+    def _seg(v, default):
+        # goals/styles are arrays when saved by the multi-select profiler
+        if isinstance(v, list):
+            return ",".join(str(x) for x in v) or default
+        return str(v) if v else default
+    profile_str = (f"{_seg(prof.get('riskTolerance'),'moderate')}|{_seg(prof.get('goal'),'growth')}"
+                   f"|{_seg(prof.get('style'),'longterm')}|{_seg(prof.get('level'),'intermediate')}") if prof else ""
     return {"user_id": row["user_id"], "positions": d.get("positions") or [],
             "watchlist": d.get("watchlist") or [], "profile": profile_str}
 

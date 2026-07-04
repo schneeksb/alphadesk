@@ -254,25 +254,75 @@ def get_ai_sentiment(tickers):
     return results
 
 
-def layer4_alerts(positions, analytics, macro, sentiment):
+def _parse_profile(profile: str):
+    """'risk|goal1,goal2|style1,style2|level' → parts. Goals/styles are comma
+    lists (the profiler is multi-select); every field optional with sane defaults."""
+    parts = (profile or "").split("|")
+    seg = lambda i: (parts[i] if len(parts) > i else "").strip()
+    return {
+        "risk":   seg(0) or "moderate",
+        "goals":  {g.strip() for g in seg(1).split(",") if g.strip()} or {"growth"},
+        "styles": {s.strip() for s in seg(2).split(",") if s.strip()} or {"swing"},
+        "level":  seg(3) or "intermediate",
+    }
+
+
+def layer4_alerts(positions, analytics, macro, sentiment, profile=""):
+    """Rule alerts tuned to the trader profile: thresholds scale with risk
+    tolerance, rules filter by style, and wording matches the horizon. A
+    long-term investor shouldn't be told to 'take profits' at +50% — a swing
+    trader should. Defaults (no profile) reproduce the original behavior."""
     alerts = []; s = ALERT_SETTINGS
+    prof = _parse_profile(profile)
+    styles = prof["styles"]
+    is_long   = "longterm" in styles
+    is_trader = bool(styles & {"swing", "daytrader", "options"})
+    long_only = is_long and not is_trader
+
+    # Pain threshold scales with risk appetite; pure long-term widens further
+    # (drawdowns are noise until they're thesis-breaking).
+    stop_pct = {"conservative": -0.15, "moderate": -0.25,
+                "aggressive": -0.35, "degen": -0.45}.get(prof["risk"], s["stop_loss_pct"])
+    if long_only:
+        stop_pct = max(stop_pct * 1.4, -0.50)
+    down_msg = ("drawdown check — is the thesis intact?" if long_only else
+                "stop-loss / thesis check" if is_long else "stop-loss")
+
+    # Profit alerts: traders get exit prompts, long-term gets a thesis check much later.
+    if long_only:
+        tp_pct, tp_msg = 1.00, "thesis check — trim, or let it compound?"
+    elif is_long:
+        tp_pct, tp_msg = 0.60, "trim or let it compound?"
+    else:
+        tp_pct, tp_msg = s["take_profit_pct"], "take profits"
+
     for p in positions:
         t = p["ticker"]; pct = p["pnl_pct"]
-        if pct <= s["stop_loss_pct"]:
-            alerts.append({"ticker":t,"type":"STOP_LOSS","severity":"red","message":f"{t} down {pct*100:.1f}% — stop-loss"})
-        if pct >= s["take_profit_pct"]:
-            alerts.append({"ticker":t,"type":"TAKE_PROFIT","severity":"green","message":f"{t} up {pct*100:.1f}% — take profits"})
+        if pct <= stop_pct:
+            alerts.append({"ticker":t,"type":"STOP_LOSS","severity":"red","message":f"{t} down {pct*100:.1f}% — {down_msg}"})
+        if pct >= tp_pct:
+            alerts.append({"ticker":t,"type":"TAKE_PROFIT","severity":"green","message":f"{t} up {pct*100:.1f}% — {tp_msg}"})
+        # Expiry/IV are objective properties of options actually held — always relevant.
         dte = p.get("dte")
         if dte and 0 < dte < s["dte_warning"]:
             alerts.append({"ticker":t,"type":"DTE_WARNING","severity":"yellow","message":f"{t} {dte} DTE — consider roll"})
         iv = p.get("iv")
         if iv and iv > s["iv_high"]:
             alerts.append({"ticker":t,"type":"HIGH_IV","severity":"yellow","message":f"{t} IV {iv*100:.0f}% — elevated"})
-    if abs(analytics["daily_theta"]) > s["theta_daily_max"]:
+
+    # Theta nagging is for options-focused traders; others only hear about real bleed.
+    theta_max = s["theta_daily_max"] if "options" in styles else s["theta_daily_max"] * 2
+    if abs(analytics["daily_theta"]) > theta_max:
         alerts.append({"ticker":"PORTFOLIO","type":"THETA_BLEED","severity":"yellow",
                        "message":f"Daily theta ${analytics['daily_theta']:.2f}"})
+
+    # VIX framing depends on horizon: threat to a trader, sale to a long-term buyer.
     if macro["vix"] > s["vix_high"]:
-        alerts.append({"ticker":"MACRO","type":"HIGH_VIX","severity":"red","message":f"VIX {macro['vix']} — hedge"})
+        vix_msg = (f"VIX {macro['vix']} — volatility discount: quality names going on sale" if long_only else
+                   f"VIX {macro['vix']} — tighten risk on swings; discount window for long-term adds" if is_long else
+                   f"VIX {macro['vix']} — hedge")
+        alerts.append({"ticker":"MACRO","type":"HIGH_VIX",
+                       "severity": "yellow" if long_only else "red", "message": vix_msg})
     return alerts
 
 

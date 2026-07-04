@@ -3,7 +3,7 @@ import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight
 import { DndContext, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDroppable, closestCorners } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { authEnabled, supabase } from "./lib/supabase";
+import { authEnabled, supabase, authHeaders } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
 
 
@@ -175,7 +175,9 @@ function mergeAlerts(existing, fresh) {
 
 // ── BACKEND CALLS ─────────────────────────────────────────────────────
 async function fetchResearch(ticker, ai = false, profile = "") {
-  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${ai ? 1 : 0}&profile=${encodeURIComponent(profile||"")}`);
+  // AI mode needs the login token (backend gates AI on a verified session).
+  const r = await fetch(`${API}/research?ticker=${encodeURIComponent(ticker)}&ai=${ai ? 1 : 0}&profile=${encodeURIComponent(profile||"")}`,
+    ai ? { headers: authHeaders() } : undefined);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -195,7 +197,7 @@ async function fetchSectors() {
   return r.json();
 }
 async function fetchSector(name) {
-  const r = await fetch(`${API}/sector?name=${encodeURIComponent(name)}`);
+  const r = await fetch(`${API}/sector?name=${encodeURIComponent(name)}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -221,7 +223,7 @@ async function fetchFundamentals(ticker) {
   return r.json();
 }
 async function fetchBusinessQuality(ticker, profile = "") {
-  const r = await fetch(`${API}/business-quality?ticker=${encodeURIComponent(ticker)}&profile=${encodeURIComponent(profile||"")}`);
+  const r = await fetch(`${API}/business-quality?ticker=${encodeURIComponent(ticker)}&profile=${encodeURIComponent(profile||"")}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -244,7 +246,7 @@ async function fetchScreen(params) {
 }
 async function fetchChat(body) {
   const r = await fetch(`${API}/chat`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -252,7 +254,7 @@ async function fetchChat(body) {
 async function fetchBriefRefresh(body) {
   // Agent loop server-side — expect 1-4 minutes.
   const r = await fetch(`${API}/brief/refresh`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -292,14 +294,14 @@ async function fetchSectorRotation() {
   return r.json();
 }
 async function fetchOutlook() {
-  const r = await fetch(`${API}/outlook`);
+  const r = await fetch(`${API}/outlook`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
 async function fetchPortfolioAnalysis(positions, analytics, cash, profile) {
   const r = await fetch(`${API}/portfolio-analysis`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ positions, analytics, cash, profile }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -975,7 +977,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
   const fetchWhyNow = useCallback(async () => {
     setWhyLoading(true); setWhyNow(null);
     try {
-      const r = await fetch(`${API}/why-now?ticker=${ticker}&profile=${encodeURIComponent(profile||"")}`);
+      const r = await fetch(`${API}/why-now?ticker=${ticker}&profile=${encodeURIComponent(profile||"")}`, { headers: authHeaders() });
       const j = await r.json();
       setWhyNow(j.error ? null : j.take);
     } catch { setWhyNow(null); }

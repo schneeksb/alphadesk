@@ -1168,7 +1168,7 @@ _ECO_CALENDAR = [
 
 
 try:
-    from fastapi import FastAPI, Body
+    from fastapi import FastAPI, Body, Header, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
 
     _ZERO_ANALYTICS = {"total_value":0, "total_cost":0, "total_pnl":0, "total_pnl_pct":0,
@@ -1188,14 +1188,50 @@ try:
     app.add_middleware(CORSMiddleware, allow_origins=_origins,
                        allow_methods=["*"], allow_headers=["*"])
 
+    # ── Auth gate for the paid AI endpoints ──────────────────────────────────
+    # Only signed-in users may trigger Claude calls, so nobody can bypass the
+    # login screen and burn the API budget. Enforced automatically on Render
+    # (RENDER is set there) or when REQUIRE_AUTH=1; OPEN on localhost dev (no
+    # session token there). Verifies the caller's Supabase access token by asking
+    # Supabase who it belongs to — no extra secret needed (reuses SUPABASE_ANON_KEY).
+    _AUTH_REQUIRED = (os.getenv("REQUIRE_AUTH", "").lower() in ("1", "true", "yes")
+                      or bool(os.getenv("RENDER")))
+
+    def require_user(authorization: str = Header(None)):
+        if not _AUTH_REQUIRED:
+            return None
+        sb_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        sb_key = (os.getenv("SUPABASE_ANON_KEY") or "").strip()
+        if not sb_url or not sb_key:
+            # Auth required but backend can't verify → fail closed.
+            raise HTTPException(status_code=503, detail="auth not configured")
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Sign in to use AI features")
+        token = authorization.split(" ", 1)[1].strip()
+        import urllib.request as _ur
+        req = _ur.Request(f"{sb_url}/auth/v1/user",
+                          headers={"apikey": sb_key, "Authorization": f"Bearer {token}"})
+        try:
+            with _ur.urlopen(req, timeout=8) as r:
+                u = json.loads(r.read())
+            uid = u.get("id")
+            if not uid:
+                raise ValueError("no user")
+            return uid
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid or expired session — sign in again")
+
     @app.get("/health")
     def health():
         return {"ok": True, "time": datetime.datetime.now().isoformat()}
 
     @app.get("/research")
-    def research_endpoint(ticker: str, ai: int = 0, profile: str = ""):
+    def research_endpoint(ticker: str, ai: int = 0, profile: str = "", authorization: str = Header(None)):
         t = ticker.upper().strip()
         if not _valid_ticker(t): return {"ticker": t, "error": "invalid ticker"}
+        if ai: require_user(authorization)   # AI conviction/stage needs a login
         return _cached(f"research:{t}:{ai}:{profile}", lambda: research(t, ai=bool(ai), profile=profile))
 
     @app.get("/fundamentals")
@@ -1339,9 +1375,11 @@ try:
         return _cached_swr(f"filings:{t}", produce, ttl=21600, stale_ttl=172800)
 
     @app.get("/business-quality")
-    def business_quality_endpoint(ticker: str, profile: str = ""):
+    def business_quality_endpoint(ticker: str, profile: str = "", authorization: str = Header(None)):
         """AI business-quality read for a long-term holding. Costs a Claude call."""
+        require_user(authorization)
         t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "ai_error": "invalid ticker"}
         def produce():
             try:
                 fund = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
@@ -1387,8 +1425,9 @@ try:
         })
 
     @app.post("/chat")
-    def chat_endpoint(body: dict = Body(...)):
+    def chat_endpoint(body: dict = Body(...), authorization: str = Header(None)):
         """Grounded research-assistant chat. Costs a Claude call — frontend gates on AI Insights."""
+        require_user(authorization)
         if not os.getenv("ANTHROPIC_API_KEY"):
             return {"reply": "AI is off — enable AI Insights (and set the API key) to chat.", "ai_error": "no_key"}
         msg = (body.get("message") or "").strip()
@@ -1406,11 +1445,12 @@ try:
             return {"reply": f"Sorry — I hit an error answering that ({str(e)[:80]}). Try again.", "ai_error": str(e)}
 
     @app.post("/brief/refresh")
-    def brief_refresh_endpoint(body: dict = Body(...)):
+    def brief_refresh_endpoint(body: dict = Body(...), authorization: str = Header(None)):
         """On-demand Market Brief: values the posted positions, runs the agent
         (tool-use loop, ~1-4 min), returns {brief, tool_log, ...}. The frontend
         persists the result (Supabase when signed in, localStorage otherwise) —
         this service never holds the Supabase service key."""
+        require_user(authorization)
         if not os.getenv("ANTHROPIC_API_KEY"):
             return {"error": "ANTHROPIC_API_KEY not set on the backend."}
         try:
@@ -1678,7 +1718,8 @@ try:
         return _cached("sectors_rotation", produce)
 
     @app.get("/outlook")
-    def outlook_endpoint(profile: str = ""):
+    def outlook_endpoint(profile: str = "", authorization: str = Header(None)):
+        require_user(authorization)
         def produce():
             try:
                 from scanner import _lenient_json, fetch_climate, fetch_sectors
@@ -1712,9 +1753,11 @@ Be directional and specific. No hedging."""
         return _cached_swr("outlook", produce, ttl=3600, stale_ttl=14400)
 
     @app.get("/why-now")
-    def why_now_endpoint(ticker: str, profile: str = ""):
+    def why_now_endpoint(ticker: str, profile: str = "", authorization: str = Header(None)):
         """Fresh AI take on today's specific price action — no caching."""
+        require_user(authorization)
         ticker = ticker.upper().strip()
+        if not _valid_ticker(ticker): return {"error": "invalid ticker"}
         tech = technicals(ticker)
         if tech is None:
             return {"error": "No data found"}
@@ -1746,8 +1789,9 @@ Be direct. Specific numbers. No hedging. No "it could go either way." Take a pos
             return {"error":str(e)}
 
     @app.post("/portfolio-analysis")
-    def portfolio_analysis_endpoint(payload: dict = Body(default={})):
+    def portfolio_analysis_endpoint(payload: dict = Body(default={}), authorization: str = Header(None)):
         """AI analysis of the full portfolio as a book. Not cached — always fresh."""
+        require_user(authorization)
         positions_in = payload.get("positions") or []
         analytics    = payload.get("analytics") or {}
         cash_val     = float(payload.get("cash") or 0)
@@ -1837,8 +1881,9 @@ Be direct, specific, and personalized. Do NOT flag concentration as a problem fo
             return {"error": str(e)}
 
     @app.get("/sector")
-    def sector_endpoint(name: str):
+    def sector_endpoint(name: str, authorization: str = Header(None)):
         # Drill-down: AI explanation of what's driving a sector + 30-90 day forecast.
+        require_user(authorization)
         def produce():
             try:
                 from scanner import fetch_sectors, SECTOR_ETFS, _lenient_json

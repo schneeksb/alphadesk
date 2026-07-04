@@ -9,3 +9,15 @@ const isLocalhost = typeof window !== "undefined" && window.location.hostname ==
 
 export const authEnabled = Boolean(url && key) && !isLocalhost;
 export const supabase = (url && key) ? createClient(url, key) : null;
+
+// Cache the current access token so requests to the backend AI endpoints can
+// attach it synchronously. The backend verifies it (only signed-in users may
+// trigger paid Claude calls). Kept fresh via the auth state listener.
+let _accessToken = null;
+if (supabase) {
+  supabase.auth.getSession().then(({ data }) => { _accessToken = data.session?.access_token || null; });
+  supabase.auth.onAuthStateChange((_e, s) => { _accessToken = s?.access_token || null; });
+}
+export function authHeaders() {
+  return _accessToken ? { Authorization: `Bearer ${_accessToken}` } : {};
+}

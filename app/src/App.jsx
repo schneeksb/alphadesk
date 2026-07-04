@@ -408,7 +408,7 @@ const RANGES = [
 // 1D, which needs a live intraday fetch (5-min bars via /chart) since the daily
 // research history has no sub-day resolution.
 const SPARK_RANGES = [
-  { key:"1d", days:null }, { key:"1w", days:5 }, { key:"1m", days:21 }, { key:"3m", days:63 }, { key:"6m", days:126 },
+  { key:"1d", days:null }, { key:"1w", days:5 }, { key:"1m", days:21 }, { key:"3m", days:63 }, { key:"6m", days:126 }, { key:"1y", days:252 },
 ];
 
 function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="3m" }) {
@@ -461,7 +461,7 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
             </button>
           ))}
         </div>
-        {!fetching && <span style={{ fontSize:10.5, color:C.faint }}>hover to inspect</span>}
+        {!fetching && <span style={{ fontSize:10.5, color:C.faint }}>hover to inspect · tap two dates to measure gain/loss</span>}
         {fetching && <span style={{ fontSize:10.5, color:C.faint, display:"flex", alignItems:"center", gap:4 }}><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> Loading…</span>}
       </div>
       <InteractiveChart data={chartData} dates={chartDates} color={color}/>
@@ -475,9 +475,15 @@ const convictionColor = (c) => c==="Strong Setup"?C.up:c==="Risky Setup"?C.down:
 const convictionToRec = (c) => c==="Strong Setup"?"BUY":c==="Risky Setup"?"SELL":"HOLD";
 const recColor = (r) => r==="BUY"?C.up : r==="SELL"?C.down : C.amber;
 
-// Hover-to-inspect price chart: crosshair + dot + floating price/date label
+// Hover-to-inspect + click-to-measure price chart. Hover shows crosshair, dot
+// and price/date label; clicking one point then another measures the exact
+// gain/loss between those two dates (live-previews to the cursor after the
+// first click, locks on the second, third click starts a new measurement).
 function InteractiveChart({ data, dates, color, h=130 }) {
   const [hi, setHi] = useState(null);
+  const [sel, setSel] = useState({ a:null, b:null });
+  const dataKey = `${dates?.[0] ?? ""}|${data?.length ?? 0}`;
+  useEffect(()=>{ setSel({ a:null, b:null }); },[dataKey]);   // range switch → clear measurement
   if (!Array.isArray(data) || data.length < 2) return null;
   const W = 1000, PAD = 6;
   const min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
@@ -485,25 +491,73 @@ function InteractiveChart({ data, dates, color, h=130 }) {
   const y = (v) => h - PAD - ((v - min)/range) * (h - 2*PAD);
   const line = data.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const col  = color || (data[data.length-1] >= data[0] ? C.up : C.down);
-  const onMove = (e) => {
+  const idxFromEvent = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const rel  = (e.clientX - rect.left) / rect.width;
-    setHi(Math.max(0, Math.min(data.length-1, Math.round(rel*(data.length-1)))));
+    return Math.max(0, Math.min(data.length-1, Math.round(rel*(data.length-1))));
+  };
+  const onMove  = (e) => setHi(idxFromEvent(e));
+  const onClick = (e) => {
+    const i = idxFromEvent(e);
+    setSel(s => (s.a==null || s.b!=null) ? { a:i, b:null } : (i===s.a ? s : { a:s.a, b:i }));
   };
   const pctFromStart = hi!=null ? ((data[hi]/data[0]-1)*100) : 0;
+
+  // Measurement: fixed second point, or live-follow the cursor while picking it
+  const mB = sel.b ?? (sel.a!=null ? hi : null);
+  const measure = (sel.a!=null && mB!=null && mB!==sel.a) ? (() => {
+    const [i1, i2] = sel.a < mB ? [sel.a, mB] : [mB, sel.a];
+    const p1 = data[i1], p2 = data[i2];
+    const chg = p2 - p1, pct = p1 ? (p2/p1 - 1)*100 : 0;
+    let daysTxt = "";
+    if (dates?.[i1] && dates?.[i2]) {
+      const d1 = new Date(dates[i1]), d2 = new Date(dates[i2]);
+      const nd = Math.round((d2 - d1)/86400000);
+      if (!isNaN(nd) && nd > 0) daysTxt = `${nd}d`;
+    }
+    return { i1, i2, p1, p2, chg, pct, daysTxt };
+  })() : null;
+  const mCol = measure ? (measure.chg>=0?C.up:C.down) : col;
+
   return (
-    <div style={{ position:"relative" }} onMouseMove={onMove} onMouseLeave={()=>setHi(null)}>
-      <svg width="100%" height={h} viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none" style={{ display:"block", overflow:"visible" }}>
-        <polygon points={`${line} ${W},${h} 0,${h}`} fill={col} opacity={0.09}/>
-        <polyline points={line} fill="none" stroke={col} strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round"/>
-        {hi!=null && <line x1={x(hi)} y1={0} x2={x(hi)} y2={h} stroke={C.faint} strokeWidth={1} strokeDasharray="3 4" vectorEffect="non-scaling-stroke"/>}
-        {hi!=null && <circle cx={x(hi)} cy={y(data[hi])} r={4} fill={col} stroke={C.bg} strokeWidth={2} vectorEffect="non-scaling-stroke"/>}
-      </svg>
-      {hi!=null && (
-        <div style={{ position:"absolute", top:-2, left:`${(hi/(data.length-1))*100}%`, transform:`translateX(${hi > data.length*0.7 ? "-105%" : hi < data.length*0.3 ? "5%" : "-50%"})`, pointerEvents:"none", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:7, padding:"5px 9px", fontSize:11, fontFamily:C.mono, whiteSpace:"nowrap", color:C.ink, boxShadow:"0 6px 18px rgba(0,0,0,0.25)" }}>
-          <span style={{ fontWeight:700 }}>${data[hi]}</span>
-          <span style={{ color: pctFromStart>=0?C.up:C.down, marginLeft:7 }}>{pctFromStart>=0?"+":""}{pctFromStart.toFixed(1)}%</span>
-          {dates && dates[hi] && <span style={{ color:C.faint, marginLeft:7 }}>{dates[hi]}</span>}
+    <div>
+      <div style={{ position:"relative", cursor:"crosshair" }} onMouseMove={onMove} onMouseLeave={()=>setHi(null)} onClick={onClick}>
+        <svg width="100%" height={h} viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none" style={{ display:"block", overflow:"visible" }}>
+          <polygon points={`${line} ${W},${h} 0,${h}`} fill={col} opacity={0.09}/>
+          <polyline points={line} fill="none" stroke={col} strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round"/>
+          {measure && <rect x={x(measure.i1)} y={0} width={Math.max(0, x(measure.i2)-x(measure.i1))} height={h} fill={mCol} opacity={0.07}/>}
+          {measure && <line x1={x(measure.i1)} y1={y(measure.p1)} x2={x(measure.i2)} y2={y(measure.p2)} stroke={mCol} strokeWidth={1.5} strokeDasharray="6 4" vectorEffect="non-scaling-stroke"/>}
+          {hi!=null && <line x1={x(hi)} y1={0} x2={x(hi)} y2={h} stroke={C.faint} strokeWidth={1} strokeDasharray="3 4" vectorEffect="non-scaling-stroke"/>}
+          {hi!=null && <circle cx={x(hi)} cy={y(data[hi])} r={4} fill={col} stroke={C.bg} strokeWidth={2} vectorEffect="non-scaling-stroke"/>}
+          {sel.a!=null && <circle cx={x(sel.a)} cy={y(data[sel.a])} r={4.5} fill={C.bg} stroke={mCol} strokeWidth={2.5} vectorEffect="non-scaling-stroke"/>}
+          {sel.b!=null && <circle cx={x(sel.b)} cy={y(data[sel.b])} r={4.5} fill={C.bg} stroke={mCol} strokeWidth={2.5} vectorEffect="non-scaling-stroke"/>}
+        </svg>
+        {hi!=null && (
+          <div style={{ position:"absolute", top:-2, left:`${(hi/(data.length-1))*100}%`, transform:`translateX(${hi > data.length*0.7 ? "-105%" : hi < data.length*0.3 ? "5%" : "-50%"})`, pointerEvents:"none", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:7, padding:"5px 9px", fontSize:11, fontFamily:C.mono, whiteSpace:"nowrap", color:C.ink, boxShadow:"0 6px 18px rgba(0,0,0,0.25)" }}>
+            <span style={{ fontWeight:700 }}>${data[hi]}</span>
+            <span style={{ color: pctFromStart>=0?C.up:C.down, marginLeft:7 }}>{pctFromStart>=0?"+":""}{pctFromStart.toFixed(1)}%</span>
+            {dates && dates[hi] && <span style={{ color:C.faint, marginLeft:7 }}>{dates[hi]}</span>}
+          </div>
+        )}
+      </div>
+      {measure && (
+        <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap", marginTop:8, background:C.panel, border:`1px solid ${C.line}`, borderLeft:`3px solid ${mCol}`, borderRadius:9, padding:"8px 12px", fontFamily:C.mono, fontSize:12 }}>
+          <span style={{ color:C.sub }}>
+            {dates?.[measure.i1] ?? `pt ${measure.i1+1}`} → {dates?.[measure.i2] ?? `pt ${measure.i2+1}`}
+            {measure.daysTxt && <span style={{ color:C.faint }}> · {measure.daysTxt}</span>}
+          </span>
+          <span style={{ color:C.ink }}>${measure.p1.toFixed(2)} → ${measure.p2.toFixed(2)}</span>
+          <span style={{ color:mCol, fontWeight:800 }}>
+            {measure.chg>=0?"+":"−"}${Math.abs(measure.chg).toFixed(2)} ({measure.pct>=0?"+":""}{measure.pct.toFixed(1)}%)
+          </span>
+          {sel.b==null ? (
+            <span style={{ color:C.faint, fontSize:10.5 }}>click to lock the end point</span>
+          ) : (
+            <button onClick={(e)=>{ e.stopPropagation(); setSel({ a:null, b:null }); }}
+              style={{ marginLeft:"auto", background:"none", border:`1px solid ${C.line}`, borderRadius:6, padding:"3px 9px", color:C.sub, cursor:"pointer", fontSize:10.5 }}>
+              × clear
+            </button>
+          )}
         </div>
       )}
     </div>

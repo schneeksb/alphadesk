@@ -291,10 +291,16 @@ def sb_request(method, path, body=None):
 
 
 def save_to_supabase(rows):
-    # Full refresh: wipe the table, then insert the fresh snapshot.
-    sb_request("DELETE", "market_pulse?weight=gte.0")        # PostgREST needs a filter; weight is always >= 0
-    if rows:
-        sb_request("POST", "market_pulse", rows)
+    """Per-analyst merge, not a full wipe. YouTube's IP block often cuts a run
+    short partway down the trust list — replacing only the analysts this run
+    actually fetched means a partial run can never erase another analyst's
+    still-good insights from a previous run."""
+    if not rows:
+        return
+    fetched_ids = sorted({r["analyst_id"] for r in rows})
+    id_list = ",".join(f'"{i}"' for i in fetched_ids)
+    sb_request("DELETE", f"market_pulse?analyst_id=in.({id_list})")
+    sb_request("POST", "market_pulse", rows)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -354,12 +360,11 @@ def main():
         summary.append((a["name"], found))
 
     total = sum(n for _, n in summary)
-    # Don't wipe existing good data on a fully-blocked/empty run.
-    if all_rows or not _IP_BLOCKED:
-        print("\nSaving to Supabase …")
+    if all_rows:
+        print(f"\nSaving to Supabase … (merging {len({r['analyst_id'] for r in all_rows})} analyst(s); others keep prior insights)")
         save_to_supabase(all_rows)
     else:
-        print("\nSkipping save — IP-blocked run with 0 insights (kept existing data).")
+        print("\nNothing fetched — existing Market Pulse data left untouched.")
 
     print("\n" + "=" * 48)
     print("MARKET PULSE — fetch complete")

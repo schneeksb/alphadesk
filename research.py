@@ -76,6 +76,42 @@ def technicals(ticker):
     rsi   = float(rsi_series.iloc[-1]) if rsi_series.iloc[-1] == rsi_series.iloc[-1] else 50.0
     rsi_history = [round(float(x), 1) for x in rsi_series.tail(252).tolist() if x == x]  # full year, drop NaN
 
+    # ── Moving averages (SMA 20/50/200) + trend read ────────────────────────
+    def _sma_last(n):
+        return float(c.rolling(n).mean().iloc[-1]) if len(c) >= n else None
+    ma20, ma50, ma200 = _sma_last(20), _sma_last(50), _sma_last(200)
+    def _pct(v):   # price vs a MA, as a signed %
+        return round((spot / v - 1) * 100, 2) if (v and spot) else None
+    # 50/200 cross within the last ~15 sessions → golden / death cross
+    cross = None
+    if len(c) >= 200:
+        s50, s200 = c.rolling(50).mean(), c.rolling(200).mean()
+        diff = (s50 - s200).dropna()
+        if len(diff) >= 16:
+            recent = diff.iloc[-15:]
+            now_pos = recent.iloc[-1] > 0
+            was_pos = recent.iloc[0] > 0
+            if now_pos and not was_pos:   cross = "golden"   # 50 crossed above 200 (bullish)
+            elif not now_pos and was_pos: cross = "death"    # 50 crossed below 200 (bearish)
+    # Trend read from the stack of price vs 50 vs 200
+    above50  = ma50  is not None and spot >  ma50
+    above200 = ma200 is not None and spot >  ma200
+    if ma50 and ma200:
+        if above50 and above200 and ma50 > ma200:      ma_trend = "uptrend"      # bullish stack
+        elif not above50 and not above200 and ma50 < ma200: ma_trend = "downtrend"
+        else:                                          ma_trend = "mixed"
+    elif ma50 is not None:
+        ma_trend = "uptrend" if above50 else "downtrend"
+    else:
+        ma_trend = "n/a"
+    ma_block = {
+        "ma20": round(ma20, 2) if ma20 else None,
+        "ma50": round(ma50, 2) if ma50 else None,
+        "ma200": round(ma200, 2) if ma200 else None,
+        "vs20": _pct(ma20), "vs50": _pct(ma50), "vs200": _pct(ma200),
+        "trend": ma_trend, "cross": cross,
+    }
+
     info = {}
     try: info = tk.info
     except Exception: pass
@@ -194,6 +230,7 @@ def technicals(ticker):
         "chg":        round(chg, 2),
         "rsi":        round(rsi, 1),
         "rsi_history": rsi_history,
+        "ma": ma_block,
         "iv":         round(iv, 1)         if iv         else None,
         "pcRatio":    pc_ratio,
         "relVol":     rel_vol,

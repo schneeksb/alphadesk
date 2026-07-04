@@ -415,6 +415,26 @@ function rsiWindow(closes, dates, take) {
   return { vals, dts };
 }
 
+// Simple moving average aligned to `closes` (null until enough lookback).
+function calcSMA(closes, n) {
+  if (!Array.isArray(closes) || closes.length < n) return new Array((closes||[]).length).fill(null);
+  const out = new Array(closes.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < closes.length; i++) {
+    sum += closes[i];
+    if (i >= n) sum -= closes[i-n];
+    if (i >= n-1) out[i] = sum / n;
+  }
+  return out;
+}
+// Moving-average overlay definitions: 20/50/200-day SMAs, theme colors.
+const MA_DEFS = [
+  { n:20,  color:"#f59e0b", label:"MA20"  },
+  { n:50,  color:"#3b82f6", label:"MA50"  },
+  { n:200, color:"#a855f7", label:"MA200" },
+];
+const MA_HELP = "Moving averages smooth price to show trend. Price above a rising MA = uptrend; the 50-day above the 200-day is a bullish 'golden cross', below is a bearish 'death cross'. Longer MAs (200d) mark the big-picture trend; shorter (20d) the near-term.";
+
 // Plain-English explainer used as the RSI tooltip everywhere.
 const RSI_HELP = "RSI = momentum on a 0-100 scale, from the last 14 bars shown. Under 30 = oversold (sellers may be exhausted — potentially cheap). Over 70 = overbought (rally may be stretched). Between = neutral.";
 
@@ -479,10 +499,11 @@ const SPARK_RANGES = [
   { key:"1d", days:null }, { key:"1w", days:5 }, { key:"1m", days:21 }, { key:"3m", days:63 }, { key:"6m", days:126 }, { key:"1y", days:252 },
 ];
 
-function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="3m" }) {
+function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="3m", ma }) {
   const [range, setRange] = useState(defaultRange);
   const [extras, setExtras] = useState({});
   const [fetching, setFetching] = useState(false);
+  const [maOn, setMaOn] = useState({ 20:true, 50:true, 200:false });   // which MA overlays are shown
 
   const rConf = RANGES.find(r => r.key === range);
   let chartData, chartDates;
@@ -499,6 +520,18 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
     chartData  = (history || []).slice(-63);
     chartDates = (history_dates || []).slice(-63);
   }
+
+  // Moving-average overlays. Only meaningful on daily-bar ranges; for the sliced
+  // ranges we compute the SMA over the FULL year of history then tail-slice so
+  // the line is continuous (not restarted inside the window). YTD (daily fetch)
+  // computes on its own series. Weekly/intraday ranges (2Y/5Y/1D/1W) are skipped.
+  const dailyBars = rConf?.days != null || range === "ytd";
+  const overlays = dailyBars ? MA_DEFS.filter(m => maOn[m.n]).map(m => {
+    const vals = rConf?.days != null
+      ? calcSMA(history || [], m.n).slice(-rConf.days)
+      : calcSMA(chartData, m.n);
+    return { label:m.label, color:m.color, values:vals };
+  }).filter(o => o.values.some(v => v!=null)) : [];
 
   const handleRange = async (key) => {
     setRange(key);
@@ -532,7 +565,31 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
         {!fetching && <span style={{ fontSize:10.5, color:C.faint }}>hover to inspect · tap two dates to measure gain/loss</span>}
         {fetching && <span style={{ fontSize:10.5, color:C.faint, display:"flex", alignItems:"center", gap:4 }}><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> Loading…</span>}
       </div>
-      <InteractiveChart data={chartData} dates={chartDates} color={color}/>
+      {/* Moving-average overlay toggles + trend read */}
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap" }} title={MA_HELP}>
+        <span style={{ fontSize:10, color:C.faint, letterSpacing:"0.05em" }}>MA</span>
+        {MA_DEFS.map(m => {
+          const on = dailyBars && maOn[m.n];
+          return (
+            <button key={m.n} onClick={()=> dailyBars && setMaOn(s=>({ ...s, [m.n]: !s[m.n] }))}
+              disabled={!dailyBars}
+              style={{ display:"flex", alignItems:"center", gap:5, background:on?`${m.color}1c`:C.panel, border:`1px solid ${on?m.color:C.line}`,
+                borderRadius:20, padding:"3px 10px", cursor:dailyBars?"pointer":"not-allowed", opacity:dailyBars?1:0.4, fontSize:11, fontWeight:600, color:on?m.color:C.sub }}>
+              <span style={{ width:9, height:2.5, borderRadius:2, background:m.color, display:"inline-block" }}/>{m.label}
+            </button>
+          );
+        })}
+        {!dailyBars && <span style={{ fontSize:9.5, color:C.faint }}>daily-bar ranges only (1M–1Y, YTD)</span>}
+        {ma?.trend && ma.trend!=="n/a" && (
+          <span style={{ marginLeft:"auto", fontSize:11, fontFamily:C.mono, fontWeight:700,
+            color: ma.trend==="uptrend"?C.up : ma.trend==="downtrend"?C.down : C.amber }}>
+            {ma.trend==="uptrend"?"▲ uptrend" : ma.trend==="downtrend"?"▼ downtrend" : "→ mixed"}
+            {ma.cross==="golden" && <span style={{ color:C.up, marginLeft:6 }}>· golden cross</span>}
+            {ma.cross==="death"  && <span style={{ color:C.down, marginLeft:6 }}>· death cross</span>}
+          </span>
+        )}
+      </div>
+      <InteractiveChart data={chartData} dates={chartDates} color={color} overlays={overlays}/>
       {/* RSI(14) computed over the SAME series the chart shows, so it follows
           the timeframe: daily RSI for 1M-1Y, bar-level RSI for intraday/weekly. */}
       {(() => {
@@ -569,17 +626,26 @@ const recColor = (r) => r==="BUY"?C.up : r==="SELL"?C.down : C.amber;
 // gain/loss between those two dates (live-previews to the cursor after the
 // first click, locks on the second, third click clears). measure=false gives
 // hover-only (used on the compact watchlist cards).
-function InteractiveChart({ data, dates, color, h=130, measure: measureEnabled=true }) {
+function InteractiveChart({ data, dates, color, h=130, measure: measureEnabled=true, overlays=[] }) {
   const [hi, setHi] = useState(null);
   const [sel, setSel] = useState({ a:null, b:null });
   const dataKey = `${dates?.[0] ?? ""}|${data?.length ?? 0}`;
   useEffect(()=>{ setSel({ a:null, b:null }); },[dataKey]);   // range switch → clear measurement
   if (!Array.isArray(data) || data.length < 2) return null;
   const W = 1000, PAD = 6;
-  const min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
+  // Include overlay (MA) values in the vertical scale so lines never clip.
+  const ov = (overlays||[]).flatMap(o => (o.values||[]).filter(v => v!=null && isFinite(v)));
+  const min = Math.min(...data, ...ov), max = Math.max(...data, ...ov), range = (max - min) || 1;
   const x = (i) => (i/(data.length-1)) * W;
   const y = (v) => h - PAD - ((v - min)/range) * (h - 2*PAD);
   const line = data.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  // MA overlay paths — break the line wherever the series is null (lookback gap).
+  const overlayPath = (vals) => {
+    let d = "", pen = false;
+    vals.forEach((v,i)=>{ if (v==null || !isFinite(v)) { pen=false; return; }
+      d += `${pen?"L":"M"}${x(i).toFixed(1)},${y(v).toFixed(1)} `; pen=true; });
+    return d.trim();
+  };
   const col  = color || (data[data.length-1] >= data[0] ? C.up : C.down);
   const idxFromEvent = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -618,6 +684,9 @@ function InteractiveChart({ data, dates, color, h=130, measure: measureEnabled=t
         <svg width="100%" height={h} viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none" style={{ display:"block", overflow:"visible" }}>
           <polygon points={`${line} ${W},${h} 0,${h}`} fill={col} opacity={0.09}/>
           <polyline points={line} fill="none" stroke={col} strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round"/>
+          {(overlays||[]).map(o => (
+            <path key={o.label} d={overlayPath(o.values||[])} fill="none" stroke={o.color} strokeWidth={1.4} strokeOpacity={0.9} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round"/>
+          ))}
           {measure && <rect x={x(measure.i1)} y={0} width={Math.max(0, x(measure.i2)-x(measure.i1))} height={h} fill={mCol} opacity={0.07}/>}
           {measure && <line x1={x(measure.i1)} y1={y(measure.p1)} x2={x(measure.i2)} y2={y(measure.p2)} stroke={mCol} strokeWidth={1.5} strokeDasharray="6 4" vectorEffect="non-scaling-stroke"/>}
           {hi!=null && <line x1={x(hi)} y1={0} x2={x(hi)} y2={h} stroke={C.faint} strokeWidth={1} strokeDasharray="3 4" vectorEffect="non-scaling-stroke"/>}
@@ -630,6 +699,9 @@ function InteractiveChart({ data, dates, color, h=130, measure: measureEnabled=t
             <span style={{ fontWeight:700 }}>${data[hi]}</span>
             <span style={{ color: pctFromStart>=0?C.up:C.down, marginLeft:7 }}>{pctFromStart>=0?"+":""}{pctFromStart.toFixed(1)}%</span>
             {dates && dates[hi] && <span style={{ color:C.faint, marginLeft:7 }}>{dates[hi]}</span>}
+            {(overlays||[]).map(o => o.values?.[hi]!=null && isFinite(o.values[hi]) && (
+              <span key={o.label} style={{ color:o.color, marginLeft:7 }}>{o.label} ${o.values[hi].toFixed(2)}</span>
+            ))}
           </div>
         )}
       </div>
@@ -1009,7 +1081,7 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
       {/* ── Price Chart ────────────────────────────────────── */}
       {d.history && (
         <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px 12px", marginBottom:14 }}>
-          <ChartWithRanges ticker={ticker} history={d.history} history_dates={d.history_dates} color={d.chg>=0?C.up:C.down}/>
+          <ChartWithRanges ticker={ticker} history={d.history} history_dates={d.history_dates} color={d.chg>=0?C.up:C.down} ma={d.ma}/>
         </div>
       )}
 
@@ -1070,6 +1142,41 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
           ))}
         </div>
       )}
+
+      {/* ── Moving-average / trend analysis ────────────────── */}
+      {d.ma && (d.ma.ma50 || d.ma.ma200) && (() => {
+        const M = d.ma;
+        const trendCol = M.trend==="uptrend"?C.up : M.trend==="downtrend"?C.down : C.amber;
+        const rows = [["20-day", M.ma20, M.vs20],["50-day", M.ma50, M.vs50],["200-day", M.ma200, M.vs200]];
+        return (
+          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"14px 16px", marginBottom:14 }} title={MA_HELP}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8, marginBottom:10 }}>
+              <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>Moving Averages & Trend</span>
+              <span style={{ fontFamily:C.mono, fontSize:12, fontWeight:800, color:trendCol }}>
+                {M.trend==="uptrend"?"▲ UPTREND" : M.trend==="downtrend"?"▼ DOWNTREND" : "→ MIXED"}
+                {M.cross==="golden" && <span style={{ color:C.up, marginLeft:7, fontSize:10.5 }}>GOLDEN CROSS ✦</span>}
+                {M.cross==="death"  && <span style={{ color:C.down, marginLeft:7, fontSize:10.5 }}>DEATH CROSS ✦</span>}
+              </span>
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:10 }}>
+              {rows.map(([lbl, val, vs]) => (
+                <div key={lbl} style={{ background:C.panel2, borderRadius:9, padding:"9px 11px" }}>
+                  <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>{lbl} SMA</div>
+                  <div style={{ fontFamily:C.mono, fontSize:13.5, fontWeight:700, color:C.ink, marginTop:3 }}>{val!=null?`$${val.toFixed(2)}`:"—"}</div>
+                  {vs!=null && <div style={{ fontFamily:C.mono, fontSize:10.5, fontWeight:700, color:vs>=0?C.up:C.down, marginTop:1 }}>
+                    price {vs>=0?"+":""}{vs.toFixed(1)}% {vs>=0?"above":"below"}
+                  </div>}
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize:10.5, color:C.faint, marginTop:9, lineHeight:1.5 }}>
+              {M.trend==="uptrend"   && "Price sits above a rising 50 > 200-day stack — the classic bullish alignment."}
+              {M.trend==="downtrend" && "Price is below both key averages with 50 < 200-day — a bearish alignment."}
+              {M.trend==="mixed"     && "Price and the averages aren't cleanly stacked — trend is transitioning or rangebound."}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── AI error banner ────────────────────────────────── */}
       {aiFail && (

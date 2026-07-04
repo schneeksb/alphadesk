@@ -68,11 +68,14 @@ def _t_ticker_snapshot(inp):
     w52h, w52l, spot = d.get("week52High"), d.get("week52Low"), d.get("spot")
     pos52 = round((spot - w52l) / (w52h - w52l) * 100, 1) if (spot and w52h and w52l and w52h != w52l) else None
     an = d.get("analyst") or {}
+    ma = d.get("ma") or {}
     return {"ticker": t, "name": d.get("name"), "sector": d.get("sector"), "mktCap": d.get("mktCap"),
             "spot": spot, "chg_today_pct": d.get("chg"), "move_5d_pct": move_5d,
             "rsi14": d.get("rsi"), "iv_pct": d.get("iv"), "put_call_ratio": d.get("pcRatio"),
             "rel_volume": d.get("relVol"), "pct_of_52wk_range": pos52,
             "days_to_earnings": d.get("daysToEarn"),
+            "ma_trend": ma.get("trend"), "ma_cross": ma.get("cross"),
+            "pct_vs_50dma": ma.get("vs50"), "pct_vs_200dma": ma.get("vs200"),
             "analyst_target_mean": an.get("targetMean"), "analyst_rec": an.get("recKey")}
 
 def _t_ticker_fundamentals(inp):

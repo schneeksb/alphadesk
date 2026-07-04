@@ -1077,20 +1077,19 @@ def _cached_swr(key, producer, ttl=600, stale_ttl=7200):
     return val
 
 
-# ── PERSISTENT POSITIONS (server-side store so the portfolio syncs across browsers) ──
-_POSITIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "positions.json")
+# NOTE: the old server-side positions.json / settings.json store and its
+# /positions & /settings endpoints were REMOVED for security — they were an
+# unauthenticated, single-shared-file read/write surface (any caller could read
+# or overwrite whatever was there, and two anonymous users would collide).
+# Real persistence is per-user Supabase (RLS-protected) for signed-in users and
+# browser localStorage for the local/anonymous path.
 
-def _read_positions():
-    try:
-        with open(_POSITIONS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else data.get("positions", [])
-    except Exception:
-        return []
-
-def _write_positions(positions):
-    with open(_POSITIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(positions, f, indent=2)
+def _valid_ticker(t):
+    """Defensive symbol allowlist — letters/digits and the few punctuation marks
+    real symbols use (BRK-B, GC=F, ^VIX, BTC-USD, 9988.HK). Rejects junk before
+    it ever reaches an outbound request."""
+    import re
+    return bool(t) and bool(re.fullmatch(r"[A-Za-z0-9.\-=^:]{1,15}", t))
 
 
 def _recommend(score, pnl_pct, dte, conviction=None):
@@ -1115,19 +1114,6 @@ def _recommend(score, pnl_pct, dte, conviction=None):
     return "HOLD"
 
 
-# ── PORTFOLIO SETTINGS (margin, etc.) — persisted server-side like positions ──
-_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-
-def _read_settings():
-    try:
-        with open(_SETTINGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _write_settings(s):
-    with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(s, f, indent=2)
 
 
 def _apply_margin(analytics, margin, rate):
@@ -1192,7 +1178,14 @@ try:
 
     app = FastAPI(title="AlphaDesk")
     app.add_middleware(GZipMiddleware, minimum_size=500)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"],
+    # Lock the API to the frontend origin(s). Set CORS_ORIGINS in the Render
+    # dashboard to your Vercel URL(s), comma-separated, e.g.
+    #   CORS_ORIGINS=https://alphadesk.vercel.app,https://www.yourdomain.com
+    # Defaults to "*" only if unset (all endpoints serve public market data or
+    # process the caller's own posted data — no stored per-user data is exposed).
+    _cors = os.getenv("CORS_ORIGINS", "").strip()
+    _origins = [o.strip() for o in _cors.split(",") if o.strip()] or ["*"]
+    app.add_middleware(CORSMiddleware, allow_origins=_origins,
                        allow_methods=["*"], allow_headers=["*"])
 
     @app.get("/health")
@@ -1202,12 +1195,14 @@ try:
     @app.get("/research")
     def research_endpoint(ticker: str, ai: int = 0, profile: str = ""):
         t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "error": "invalid ticker"}
         return _cached(f"research:{t}:{ai}:{profile}", lambda: research(t, ai=bool(ai), profile=profile))
 
     @app.get("/fundamentals")
     def fundamentals_endpoint(ticker: str):
         """Full fundamentals + valuation bundle for the Financials page (free)."""
         t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "error": "invalid ticker"}
         return _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
 
     @app.get("/financials-detail")
@@ -1216,6 +1211,7 @@ try:
         gross margin) plus forward analyst estimates — powers the Financials
         bar charts with estimate bars extending into future periods."""
         t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "error": "invalid ticker"}
         def produce():
             try:
                 tk = yf.Ticker(t)
@@ -1310,6 +1306,7 @@ try:
     def filings_endpoint(ticker: str):
         """Recent SEC filings (10-K, 10-Q, 8-K, proxies) straight from EDGAR — free."""
         t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "filings": [], "error": "invalid ticker"}
         def produce():
             import urllib.request as _ur, json as _json
             ua = {"User-Agent": "AlphaDesk personal research contact@alphadesk.local"}
@@ -1441,6 +1438,7 @@ try:
     def chart_endpoint(ticker: str, range: str = "3m"):
         """Price history for any timeframe with correct yfinance params per range."""
         t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"error": "invalid ticker"}
         # (period, interval, date_format, cache_ttl_s, stale_ttl_s)
         RANGE_MAP = {
             "1d":  ("1d",  "5m",  "%H:%M",       300,   900),
@@ -1970,26 +1968,6 @@ JSON ONLY:
         return _json_safe({"generated_at": datetime.datetime.now().isoformat(),
                            "positions": active, "expired": expired, "errored": errored,
                            "analytics": analytics, "macro": macro, "alerts": alerts})
-
-    @app.get("/positions")
-    def get_positions():
-        return {"positions": _read_positions()}
-
-    @app.put("/positions")
-    def put_positions(payload: dict = Body(default={})):
-        positions = payload.get("positions") or []
-        _write_positions(positions)
-        return {"ok": True, "count": len(positions)}
-
-    @app.get("/settings")
-    def get_settings():
-        return {"settings": _read_settings()}
-
-    @app.put("/settings")
-    def put_settings(payload: dict = Body(default={})):
-        s = payload.get("settings") or {}
-        _write_settings(s)
-        return {"ok": True}
 
     @app.get("/indicator")
     def indicator_endpoint(symbol: str, label: str = ""):

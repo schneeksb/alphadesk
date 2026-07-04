@@ -266,39 +266,21 @@ async function fetchValue(positions, margin = 0, margin_rate = 0, profile = "") 
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
-async function fetchSettings() {
-  const r = await fetch(`${API}/settings`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-async function saveSettingsServer(settings) {
-  try {
-    await fetch(`${API}/settings`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ settings }),
-    });
-  } catch { /* offline */ }
-}
+// Settings (margin) persistence: Supabase for signed-in users, localStorage
+// otherwise. Server-side /settings store removed — these are no-ops now.
+async function fetchSettings() { return { settings: {} }; }
+async function saveSettingsServer() { /* localStorage only */ }
 async function fetchIndicator(symbol, label) {
   const r = await fetch(`${API}/indicator?symbol=${encodeURIComponent(symbol)}&label=${encodeURIComponent(label||"")}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
-async function fetchPositions() {
-  const r = await fetch(`${API}/positions`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-async function savePositionsServer(positions) {
-  try {
-    await fetch(`${API}/positions`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ positions }),
-    });
-  } catch { /* offline / backend down — localStorage still holds the copy */ }
-}
+// The server-side /positions & /settings store was removed (it was an
+// unauthenticated shared file). Persistence is Supabase (signed-in, per-user +
+// RLS) or localStorage (local/anonymous). These are now localStorage-only no-ops
+// so the anonymous path never sends holdings to the server.
+async function fetchPositions() { return { positions: [] }; }
+async function savePositionsServer() { /* localStorage only — see saveWL/savePositions */ }
 async function fetchCalendar() {
   const r = await fetch(`${API}/calendar`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);

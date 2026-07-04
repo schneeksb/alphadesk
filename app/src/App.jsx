@@ -373,24 +373,66 @@ function Sparkline({ data, w=120, h=32, color }) {
 const rsiColor = (v) => v==null ? C.faint : v < 30 ? C.up : v > 70 ? C.down : C.amber;
 const rsiLabel = (v) => v==null ? "" : v < 30 ? "oversold" : v > 70 ? "overbought" : "neutral";
 
-// Compact RSI(14) graph on a fixed 0–100 scale with 30/70 reference bands.
-// Falls back to nothing if there's no series (caller shows a colored number then).
-function RsiMini({ data, w=120, h=26 }) {
+// RSI(14) from a close series, same simple-rolling-mean method as the backend.
+// Returns an array aligned with `closes` (nulls where there's not enough lookback).
+function calcRSI(closes, period=14) {
+  if (!Array.isArray(closes) || closes.length < period + 1) return [];
+  const out = new Array(closes.length).fill(null);
+  for (let i = period; i < closes.length; i++) {
+    let up = 0, dn = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      const d = closes[j] - closes[j-1];
+      if (d > 0) up += d; else dn -= d;
+    }
+    out[i] = dn === 0 ? 100 : 100 - 100 / (1 + up / dn);
+  }
+  return out;
+}
+// RSI series windowed to a display range: drop the null lookback head, keep
+// dates aligned, then take the last `take` points (null take = everything).
+function rsiWindow(closes, dates, take) {
+  const full = calcRSI(closes || []);
+  const start = Math.max(full.findIndex(v => v != null), 0);
+  let vals = full.slice(start), dts = (dates || []).slice(start);
+  if (take != null) { vals = vals.slice(-take); dts = dts.slice(-take); }
+  return { vals, dts };
+}
+
+// Compact RSI(14) graph on a fixed 0–100 scale with 30/70 reference bands and
+// hover-to-inspect (exact RSI value + date). Falls back to nothing if there's
+// no series (caller shows a colored number then).
+function RsiMini({ data, dates, w=120, h=26 }) {
+  const [hi, setHi] = useState(null);
   if (!Array.isArray(data) || data.length < 2) return null;
   const last = data[data.length-1];
   const col  = rsiColor(last);
   const x = (i) => (i/(data.length-1)) * w;
   const y = (v) => h - (Math.max(0,Math.min(100,v))/100) * h;
   const line = data.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const onMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const rel  = (e.clientX - rect.left) / rect.width;
+    setHi(Math.max(0, Math.min(data.length-1, Math.round(rel*(data.length-1)))));
+  };
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display:"block", width:"100%" }}>
-      {/* 70 / 30 reference bands */}
-      <rect x={0} y={0} width={w} height={y(70)} fill={C.down} opacity={0.05}/>
-      <rect x={0} y={y(30)} width={w} height={h-y(30)} fill={C.up} opacity={0.05}/>
-      <line x1={0} y1={y(70)} x2={w} y2={y(70)} stroke={C.down} strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
-      <line x1={0} y1={y(30)} x2={w} y2={y(30)} stroke={C.up}   strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
-      <polyline points={line} fill="none" stroke={col} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round"/>
-    </svg>
+    <div style={{ position:"relative" }} onMouseMove={onMove} onMouseLeave={()=>setHi(null)}>
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display:"block", width:"100%" }}>
+        {/* 70 / 30 reference bands */}
+        <rect x={0} y={0} width={w} height={y(70)} fill={C.down} opacity={0.05}/>
+        <rect x={0} y={y(30)} width={w} height={h-y(30)} fill={C.up} opacity={0.05}/>
+        <line x1={0} y1={y(70)} x2={w} y2={y(70)} stroke={C.down} strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
+        <line x1={0} y1={y(30)} x2={w} y2={y(30)} stroke={C.up}   strokeWidth={0.6} strokeDasharray="3 3" opacity={0.5}/>
+        <polyline points={line} fill="none" stroke={col} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round"/>
+        {hi!=null && <line x1={x(hi)} y1={0} x2={x(hi)} y2={h} stroke={C.faint} strokeWidth={1} strokeDasharray="2 3" vectorEffect="non-scaling-stroke"/>}
+        {hi!=null && <circle cx={x(hi)} cy={y(data[hi])} r={3} fill={rsiColor(data[hi])} stroke={C.bg} strokeWidth={1.5} vectorEffect="non-scaling-stroke"/>}
+      </svg>
+      {hi!=null && (
+        <div style={{ position:"absolute", top:-6, left:`${(hi/(data.length-1))*100}%`, transform:`translateX(${hi > data.length*0.7 ? "-105%" : hi < data.length*0.3 ? "5%" : "-50%"})`, pointerEvents:"none", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"3px 7px", fontSize:10, fontFamily:C.mono, whiteSpace:"nowrap", color:C.ink, boxShadow:"0 5px 14px rgba(0,0,0,0.25)", zIndex:5 }}>
+          <span style={{ fontWeight:700, color:rsiColor(data[hi]) }}>RSI {Number(data[hi]).toFixed(1)}</span>
+          {dates?.[hi] && <span style={{ color:C.faint, marginLeft:6 }}>{dates[hi]}</span>}
+        </div>
+      )}
+    </div>
   );
 }
 const RANGES = [
@@ -465,6 +507,27 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
         {fetching && <span style={{ fontSize:10.5, color:C.faint, display:"flex", alignItems:"center", gap:4 }}><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> Loading…</span>}
       </div>
       <InteractiveChart data={chartData} dates={chartDates} color={color}/>
+      {/* RSI(14) computed over the SAME series the chart shows, so it follows
+          the timeframe: daily RSI for 1M-1Y, bar-level RSI for intraday/weekly. */}
+      {(() => {
+        const src   = rConf?.days != null ? (history || []) : (extras[range]?.history || null);
+        const sdate = rConf?.days != null ? (history_dates || []) : (extras[range]?.history_dates || []);
+        if (!src || src.length < 20) return null;
+        const { vals, dts } = rsiWindow(src, sdate, rConf?.days ?? null);
+        if (vals.length < 2) return null;
+        const cur = vals[vals.length - 1];
+        return (
+          <div style={{ marginTop:12 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
+              <span title="14-period Relative Strength Index over the bars shown" style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>RSI · 14-period</span>
+              <span style={{ fontFamily:C.mono, fontSize:12.5, fontWeight:800, color:rsiColor(cur) }}>
+                {cur.toFixed(1)} <span style={{ fontSize:9, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.03em" }}>{rsiLabel(cur)}</span>
+              </span>
+            </div>
+            <RsiMini data={vals} dates={dts} h={40}/>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -478,8 +541,9 @@ const recColor = (r) => r==="BUY"?C.up : r==="SELL"?C.down : C.amber;
 // Hover-to-inspect + click-to-measure price chart. Hover shows crosshair, dot
 // and price/date label; clicking one point then another measures the exact
 // gain/loss between those two dates (live-previews to the cursor after the
-// first click, locks on the second, third click starts a new measurement).
-function InteractiveChart({ data, dates, color, h=130 }) {
+// first click, locks on the second, third click clears). measure=false gives
+// hover-only (used on the compact watchlist cards).
+function InteractiveChart({ data, dates, color, h=130, measure: measureEnabled=true }) {
   const [hi, setHi] = useState(null);
   const [sel, setSel] = useState({ a:null, b:null });
   const dataKey = `${dates?.[0] ?? ""}|${data?.length ?? 0}`;
@@ -498,8 +562,11 @@ function InteractiveChart({ data, dates, color, h=130 }) {
   };
   const onMove  = (e) => setHi(idxFromEvent(e));
   const onClick = (e) => {
+    if (!measureEnabled) return;
     const i = idxFromEvent(e);
-    setSel(s => (s.a==null || s.b!=null) ? { a:i, b:null } : (i===s.a ? s : { a:s.a, b:i }));
+    setSel(s => s.a==null ? { a:i, b:null }                                  // 1st click: start
+             : s.b==null ? (i===s.a ? s : { a:s.a, b:i })                    // 2nd click: lock
+             : { a:null, b:null });                                          // 3rd click: clear
   };
   const pctFromStart = hi!=null ? ((data[hi]/data[0]-1)*100) : 0;
 
@@ -521,7 +588,7 @@ function InteractiveChart({ data, dates, color, h=130 }) {
 
   return (
     <div>
-      <div style={{ position:"relative", cursor:"crosshair" }} onMouseMove={onMove} onMouseLeave={()=>setHi(null)} onClick={onClick}>
+      <div style={{ position:"relative", cursor:"crosshair" }} onMouseMove={onMove} onMouseLeave={()=>setHi(null)} onClick={measureEnabled ? onClick : undefined}>
         <svg width="100%" height={h} viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none" style={{ display:"block", overflow:"visible" }}>
           <polygon points={`${line} ${W},${h} 0,${h}`} fill={col} opacity={0.09}/>
           <polyline points={line} fill="none" stroke={col} strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round"/>
@@ -669,9 +736,13 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
       </div>
       {d.history && (() => {
         const isIntraday = sparkRange === "1d";
+        const sparkDays = SPARK_RANGES.find(r=>r.key===sparkRange)?.days || 21;
         const slice = isIntraday
           ? (intraday?.history || [])
-          : d.history.slice(-(SPARK_RANGES.find(r=>r.key===sparkRange)?.days||21));
+          : d.history.slice(-sparkDays);
+        const sliceDates = isIntraday
+          ? (intraday?.history_dates || [])
+          : (d.history_dates || []).slice(-sparkDays);
         // % change over the selected timeframe. 1D uses the server's daily % change
         // (accurate prior-close comparison) rather than first-vs-last intraday bar,
         // since the first 5-min bar isn't necessarily yesterday's close.
@@ -695,11 +766,11 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
             )}
           </div>
           {isIntraday && intradayLoading && !intraday ? (
-            <div style={{ height:30, display:"flex", alignItems:"center", justifyContent:"center", color:C.faint }}>
+            <div style={{ height:34, display:"flex", alignItems:"center", justifyContent:"center", color:C.faint }}>
               <Loader2 size={12} style={{ animation:"spin 1s linear infinite" }}/>
             </div>
           ) : (
-            <Sparkline data={slice} h={30} color={tfCol}/>
+            <InteractiveChart data={slice} dates={sliceDates} h={34} color={tfCol} measure={false}/>
           )}
         </div>
         );
@@ -720,18 +791,28 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
         </div>
       )}
 
-      {/* RSI(14) — mini graph with 30/70 bands when history is available,
-          otherwise a readable colored 0–100 gauge. */}
-      {d.rsi != null && (
-        <div style={{ marginTop:9 }} title={`RSI ${d.rsi} · ${rsiLabel(d.rsi)}`}>
+      {/* RSI — mini graph with 30/70 bands, windowed to the card's selected
+          timeframe (intraday bars for 1D), otherwise a colored 0–100 gauge. */}
+      {d.rsi != null && (() => {
+        const rDays = SPARK_RANGES.find(r=>r.key===sparkRange)?.days;
+        let rVals = null, rDts = null;
+        if (sparkRange === "1d" && (intraday?.history?.length || 0) >= 20) {
+          ({ vals: rVals, dts: rDts } = rsiWindow(intraday.history, intraday.history_dates, null));
+        } else if (Array.isArray(d.rsi_history) && d.rsi_history.length > 1) {
+          const rh = d.rsi_history, rd = (d.history_dates || []).slice(-rh.length);
+          rVals = rh.slice(-(rDays ?? 5)); rDts = rd.slice(-(rDays ?? 5));
+        }
+        const cur = (rVals && rVals.length) ? rVals[rVals.length-1] : d.rsi;
+        return (
+        <div style={{ marginTop:9 }} title={`RSI(14) — 14-period Relative Strength Index over the ${sparkRange.toUpperCase()} window`}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
-            <span style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>RSI 14</span>
-            <span style={{ fontFamily:C.mono, fontSize:12.5, fontWeight:800, color:rsiColor(d.rsi) }}>
-              {d.rsi} <span style={{ fontSize:9, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.03em" }}>{rsiLabel(d.rsi)}</span>
+            <span style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase" }}>RSI <span style={{ letterSpacing:0 }}>· {sparkRange.toUpperCase()}</span></span>
+            <span style={{ fontFamily:C.mono, fontSize:12.5, fontWeight:800, color:rsiColor(cur) }}>
+              {Number(cur).toFixed(1)} <span style={{ fontSize:9, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.03em" }}>{rsiLabel(cur)}</span>
             </span>
           </div>
-          {Array.isArray(d.rsi_history) && d.rsi_history.length > 1 ? (
-            <RsiMini data={d.rsi_history} h={24}/>
+          {rVals && rVals.length > 1 ? (
+            <RsiMini data={rVals} dates={rDts} h={24}/>
           ) : (
             <div style={{ height:6, background:C.line, borderRadius:3, position:"relative" }}>
               <div style={{ position:"absolute", left:"30%", top:0, bottom:0, width:1, background:`${C.up}66` }}/>
@@ -740,7 +821,8 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* Chips */}
       <div style={{ display:"flex", gap:6, marginTop:9, flexWrap:"wrap" }}>

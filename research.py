@@ -73,7 +73,7 @@ def technicals(ticker):
     dn    = (-delta.clip(upper=0)).rolling(14).mean()
     rsi   = float(100 - 100/(1 + up.iloc[-1]/dn.iloc[-1])) if dn.iloc[-1] else 50.0
     rsi_series = (100 - 100/(1 + up/dn)).where(dn != 0, 50.0)
-    rsi_history = [round(float(x), 1) for x in rsi_series.tail(63).tolist() if x == x]  # last ~3M, drop NaN
+    rsi_history = [round(float(x), 1) for x in rsi_series.tail(252).tolist() if x == x]  # full year, drop NaN
 
     info = {}
     try: info = tk.info

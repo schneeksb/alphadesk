@@ -23,7 +23,7 @@ Env (.env in this folder):
     (plus the YT_*_CHANNEL_ID overrides, optional — defaults are baked into research.py)
 """
 
-import os, sys, json, datetime, urllib.request, urllib.parse
+import os, sys, json, time, datetime, urllib.request, urllib.parse
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 import anthropic
@@ -45,6 +45,9 @@ ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
 MAX_SCAN = 4        # how many recent videos to try per analyst before giving up
 TRANSCRIPT_CAP = 5000   # chars of transcript sent to Claude
+# Pause between transcript downloads. YouTube's IP block triggers on BURSTS of
+# caption requests — pacing them out is what lets a proxy-less run survive.
+THROTTLE_S = float(os.getenv("YT_THROTTLE_S", "12"))
 
 _YT_NS = {
     "atom":  "http://www.w3.org/2005/Atom",
@@ -304,6 +307,7 @@ def main():
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     all_rows, summary = [], []
+    _fetches = 0   # transcript downloads so far (drives the inter-request throttle)
 
     for a in ANALYSTS:  # already in trust/weight order
         print(f"\n[{a['weight']}] {a['name']} …")
@@ -321,6 +325,9 @@ def main():
         for v in entries[:MAX_SCAN]:
             if found >= target:
                 break
+            if _fetches:
+                time.sleep(THROTTLE_S)   # pace requests so the run doesn't trip the burst detector
+            _fetches += 1
             transcript = get_transcript(v["vid"])
             if not transcript or len(transcript) < 120:
                 print(f"    - no transcript: {v['title'][:60]}")

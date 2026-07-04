@@ -62,6 +62,16 @@ const loadWL = () => {
   catch { return DEFAULT_WATCHLIST; }
 };
 const saveWL = (l) => { try { localStorage.setItem(WL_KEY, JSON.stringify(l)); } catch {} };
+// Two-tier watchlist: `watchlist` = CONVICTION (know it deeply — gets
+// change-from-baseline alerts); `radar` = interesting but not yet known well
+// (gets educational context). Baselines snapshot a conviction name's state so
+// the card can flag what CHANGED since you last "checked in" on it.
+const RADAR_KEY = "alphadesk:radar";
+const loadRadar = () => { try { return JSON.parse(localStorage.getItem(RADAR_KEY)) || []; } catch { return []; } };
+const saveRadar = (l) => { try { localStorage.setItem(RADAR_KEY, JSON.stringify(l)); } catch {} };
+const BASE_KEY = "alphadesk:baselines";
+const loadBaselines = () => { try { return JSON.parse(localStorage.getItem(BASE_KEY)) || {}; } catch { return {}; } };
+const saveBaselines = (m) => { try { localStorage.setItem(BASE_KEY, JSON.stringify(m)); } catch {} };
 
 // Portfolio positions — manually entered, persisted locally (starts empty)
 const POS_KEY = "alphadesk:positions";
@@ -239,6 +249,11 @@ async function fetchFilings(ticker) {
 }
 async function fetchEarningsPrep(ticker, profile = "") {
   const r = await fetch(`${API}/earnings-prep?ticker=${encodeURIComponent(ticker)}&profile=${encodeURIComponent(profile||"")}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchBusinessPrimer(ticker) {
+  const r = await fetch(`${API}/business-primer?ticker=${encodeURIComponent(ticker)}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -814,9 +829,12 @@ function InteractiveChart({ data, dates, color, h=130, measure: measureEnabled=t
 
 
 // ── WATCHLIST CARD (fetches its own data) ─────────────────────────────
-function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range="1m", onFinancials }) {
+function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range="1m", onFinancials,
+  tier="conviction", baseline, onSetBaseline, onMove }) {
   const [d, setD]       = useState(null);
   const [err, setErr]   = useState(false);
+  const [primer, setPrimer] = useState(null);
+  const [primerLoading, setPrimerLoading] = useState(false);
   // Sparkline timeframe is driven by the shared watchlist control (range prop)
   // but can still be overridden per-card; resyncs whenever the master changes.
   const [sparkRange, setSparkRange] = useState(range);
@@ -845,6 +863,34 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
     return ()=>{ alive=false; };
   },[sparkRange, ticker, intraday]);
 
+  // Conviction tier: snapshot a baseline on first sight so future loads can
+  // flag what CHANGED since you last checked in on this name.
+  const snapOf = (x) => ({ spot:x.spot, trend:x.ma?.trend, tactical:x.tactical?.key, rsi:x.rsi });
+  useEffect(()=>{
+    if (tier==="conviction" && d && !baseline && onSetBaseline) onSetBaseline(ticker, snapOf(d));
+  // eslint-disable-next-line
+  },[tier, d, baseline, ticker]);
+  const deltas = (tier==="conviction" && d && baseline) ? (() => {
+    const out = [];
+    if (baseline.trend && d.ma?.trend && baseline.trend !== d.ma.trend)
+      out.push({ txt:`trend ${baseline.trend} → ${d.ma.trend}`, col: d.ma.trend==="uptrend"?C.up:d.ma.trend==="downtrend"?C.down:C.amber });
+    if (d.ma?.cross) out.push({ txt: d.ma.cross==="golden"?"golden cross":"death cross", col: d.ma.cross==="golden"?C.up:C.down });
+    const bZone = rsiLabel(baseline.rsi), nZone = rsiLabel(d.rsi);
+    if (bZone && nZone && bZone !== nZone) out.push({ txt:`RSI ${bZone} → ${nZone}`, col: rsiColor(d.rsi) });
+    if ((d.tactical?.key||"neutral") !== (baseline.tactical||"neutral") && d.tactical && d.tactical.key!=="neutral")
+      out.push({ txt: d.tactical.label.toLowerCase(), col: tacticalCol(d.tactical) });
+    if (baseline.spot && d.spot) {
+      const mv = d.spot/baseline.spot - 1;
+      if (Math.abs(mv) >= 0.10) out.push({ txt:`${mv>=0?"+":""}${(mv*100).toFixed(0)}% since check-in`, col: mv>=0?C.up:C.down });
+    }
+    return out;
+  })() : [];
+  const loadPrimer = (e) => {
+    e.stopPropagation();
+    setPrimerLoading(true);
+    fetchBusinessPrimer(ticker).then(setPrimer).catch(()=>setPrimer({ ai_error:"failed" })).finally(()=>setPrimerLoading(false));
+  };
+
   if (err) return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 17px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
       <div><span style={{ fontWeight:700, color:C.ink }}>{displaySym(ticker)}</span>
@@ -871,6 +917,14 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
           <div style={{ fontSize:11, color:C.faint, marginTop:2, maxWidth:150, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{d.name}</div>
         </div>
         <div style={{ display:"flex", gap:4, alignItems:"center", flexShrink:0 }}>
+          {onMove && (
+            <button onClick={(e)=>{e.stopPropagation();onMove(ticker, tier==="radar");}}
+              title={tier==="radar" ? "Promote to Conviction (starts change tracking)" : "Demote to Radar"}
+              style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}
+              onMouseEnter={e=>e.currentTarget.style.color=C.violet} onMouseLeave={e=>e.currentTarget.style.color=C.faint}>
+              {tier==="radar" ? <ArrowUp size={14}/> : <ArrowDown size={14}/>}
+            </button>
+          )}
           {onFinancials && (
             <button onClick={(e)=>{e.stopPropagation();onFinancials(ticker);}} title="Financials" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}
               onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Activity size={14}/></button>
@@ -1015,6 +1069,55 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
           </div>
         );
       })()}
+
+      {/* CONVICTION: what changed since your last check-in on this name */}
+      {tier==="conviction" && baseline && (
+        deltas.length > 0 ? (
+          <div style={{ marginTop:9, background:`${C.amber}0e`, border:`1px solid ${C.amber}45`, borderRadius:8, padding:"7px 10px" }} onClick={e=>e.stopPropagation()}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
+              <span style={{ fontSize:9, fontWeight:800, color:C.amber, letterSpacing:"0.06em" }}>CHANGED SINCE CHECK-IN {baseline.ts && `· ${baseline.ts}`}</span>
+              <button onClick={()=>onSetBaseline && onSetBaseline(ticker, snapOf(d))} title="Mark reviewed — resets the baseline to now"
+                style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:5, padding:"1px 7px", color:C.sub, cursor:"pointer", fontSize:9.5, fontWeight:600 }}>✓ reviewed</button>
+            </div>
+            <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+              {deltas.map((x,i)=>(
+                <span key={i} style={{ fontSize:10, fontWeight:700, color:x.col, background:`${x.col}14`, borderRadius:5, padding:"2px 7px", fontFamily:C.mono }}>{x.txt}</span>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginTop:9, fontSize:9.5, color:C.faint }} title="Nothing meaningful has changed since your last check-in on this name">
+            ✓ steady since check-in{baseline.ts && ` · ${baseline.ts}`}
+          </div>
+        )
+      )}
+
+      {/* RADAR: educational primer — what actually drives this business */}
+      {tier==="radar" && (
+        <div style={{ marginTop:9 }} onClick={e=>e.stopPropagation()}>
+          {!primer && !primerLoading && (
+            <button onClick={loadPrimer} disabled={!aiEnabled} title={aiEnabled ? "AI primer — cached, costs ~a cent once per ticker" : "Turn on AI Insights in Settings"}
+              style={{ width:"100%", background:`${C.violet}0e`, border:`1px solid ${C.violet}40`, borderRadius:8, padding:"7px 10px", color:aiEnabled?C.violet:C.faint, cursor:aiEnabled?"pointer":"default", fontSize:11, fontWeight:700, textAlign:"left" }}>
+              🎓 What drives this business?
+            </button>
+          )}
+          {primerLoading && <div style={{ fontSize:10.5, color:C.faint, display:"flex", gap:6, alignItems:"center" }}><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> reading up on {ticker}…</div>}
+          {primer && !primer.ai_error && (
+            <div style={{ background:`${C.violet}0a`, border:`1px solid ${C.violet}30`, borderRadius:8, padding:"9px 11px", fontSize:11, color:C.sub, lineHeight:1.55 }}>
+              {primer.what_they_do && <div style={{ marginBottom:6 }}>{primer.what_they_do}</div>}
+              {(primer.drivers||[]).length>0 && (
+                <div style={{ marginBottom:6 }}>
+                  <span style={{ fontSize:8.5, color:C.violet, fontWeight:800, letterSpacing:"0.06em" }}>MOVES THE STOCK</span>
+                  {primer.drivers.map((x,i)=><div key={i}>• {x}</div>)}
+                </div>
+              )}
+              {primer.watch_metric && <div style={{ marginBottom:4 }}><b style={{ color:C.ink }}>Watch:</b> {primer.watch_metric}</div>}
+              {primer.newbie_trap && <div style={{ color:C.amber }}><b>Trap:</b> {primer.newbie_trap}</div>}
+            </div>
+          )}
+          {primer?.ai_error && <div style={{ fontSize:10, color:C.amber }}>primer failed — {String(primer.ai_error).slice(0,60)}</div>}
+        </div>
+      )}
 
       {/* Chips */}
       <div style={{ display:"flex", gap:6, marginTop:9, flexWrap:"wrap" }}>
@@ -1453,7 +1556,7 @@ const Badge = ({ text, col }) => (
     color:col, background:`${col}16`, border:`1px solid ${col}40`, borderRadius:5, padding:"2px 8px", whiteSpace:"nowrap" }}>{text}</span>
 );
 
-function MarketBriefSection({ userId, positions, watchlist, profile, aiEnabled }) {
+function MarketBriefSection({ userId, positions, watchlist, radar=[], profile, aiEnabled }) {
   const [row, setRow]           = useState(null);     // {brief, tool_log, generated_at, source}
   const [loading, setLoading]   = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1483,7 +1586,7 @@ function MarketBriefSection({ userId, positions, watchlist, profile, aiEnabled }
     if (refreshing) return;
     setRefreshing(true); setErr(null); setElapsed(0);
     try {
-      const out = await fetchBriefRefresh({ positions, watchlist, profile });
+      const out = await fetchBriefRefresh({ positions, conviction: watchlist, radar, profile });
       if (out.error) { setErr(out.error); }
       else {
         const r = { brief: out.brief, tool_log: out.tool_log, generated_at: out.generated_at,
@@ -2470,6 +2573,84 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
 }
 
 // ── PORTFOLIO (manual positions, Greeks, P&L; expired in an envelope) ───
+// ── PORTFOLIO × MARKET ALIGNMENT ──────────────────────────────────────
+// Joins what you OWN (sector allocation) with where money is FLOWING (rotation
+// quadrants vs SPY) into one decision-first read: is your book riding the
+// rotation or fighting it? Deterministic — no AI cost.
+const ROT_MAP = {
+  "Technology":"Technology",
+  "Communication":"Communication", "Communication Services":"Communication",
+  "Financials":"Financials", "Financial Services":"Financials",
+  "Health Care":"Health Care", "Healthcare":"Health Care",
+  "Industrials":"Industrials",
+  "Materials":"Materials", "Basic Materials":"Materials",
+  "Real Estate":"Real Estate", "Energy":"Energy", "Utilities":"Utilities",
+  "Staples":"Staples", "Consumer Defensive":"Staples",
+  "Discretionary":"Discretionary", "Consumer Cyclical":"Discretionary",
+};
+const QUAD_COL = { Leading:()=>C.up, Improving:()=>C.cold, Weakening:()=>C.amber, Lagging:()=>C.down };
+
+function PortfolioMarketAlignment({ analytics }) {
+  const [rot, setRot]   = useState(null);
+  const [open, setOpen] = useState(false);
+  useEffect(()=>{ fetchSectorRotation().then(d=>{ if(!d.error) setRot(d.sectors||[]); }).catch(()=>{}); },[]);
+  const alloc = analytics?.sector_alloc || {};
+  const total = Object.values(alloc).reduce((s,v)=>s+v, 0);
+  if (!rot || !rot.length || !total) return null;
+  const rotBy = {}; rot.forEach(s => { rotBy[s.sector] = s; });
+  const rows = Object.entries(alloc)
+    .map(([name, val]) => ({ name, pct: val/total, r: rotBy[ROT_MAP[name]] || null }))
+    .sort((a,b)=>b.pct-a.pct);
+  const headPct = rows.filter(x=>x.r && (x.r.quadrant==="Lagging"||x.r.quadrant==="Weakening")).reduce((s,x)=>s+x.pct,0);
+  const tailPct = rows.filter(x=>x.r && (x.r.quadrant==="Leading"||x.r.quadrant==="Improving")).reduce((s,x)=>s+x.pct,0);
+  const tone = headPct > 0.5 ? "head" : tailPct > 0.5 ? "tail" : "mixed";
+  const col  = tone==="head" ? C.down : tone==="tail" ? C.up : C.amber;
+  const big  = rows.find(x => x.r && x.pct >= 0.25);   // the concentration callout
+  const takeaway =
+    tone==="head" ? `${(headPct*100).toFixed(0)}% of your holdings sit in sectors losing relative strength — your book is fighting the current rotation.`
+    : tone==="tail" ? `${(tailPct*100).toFixed(0)}% of your holdings sit in sectors gaining relative strength — your book is riding the rotation.`
+    : `Your book is split: ${(tailPct*100).toFixed(0)}% in sectors gaining strength, ${(headPct*100).toFixed(0)}% in sectors losing it.`;
+  return (
+    <div style={{ marginBottom:16, background:C.panel, border:`1px solid ${C.line}`, borderLeft:`4px solid ${col}`, borderRadius:12, padding:"14px 18px" }}>
+      <div onClick={()=>setOpen(o=>!o)} style={{ cursor:"pointer" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.08em", marginBottom:5 }}>YOUR BOOK vs THE ROTATION</div>
+            <div style={{ fontSize:13.5, color:C.ink, fontWeight:600, lineHeight:1.5 }}>{takeaway}</div>
+            {big && (
+              <div style={{ fontSize:12, color:C.sub, marginTop:5, lineHeight:1.5 }}>
+                Biggest exposure: <b style={{ color:C.ink }}>{(big.pct*100).toFixed(0)}% {big.name}</b> — currently{" "}
+                <b style={{ color:(QUAD_COL[big.r.quadrant]||(()=>C.sub))() }}>{big.r.quadrant.toUpperCase()}</b>{" "}
+                vs SPY (RS {big.r.rs > 0 ? "+" : ""}{big.r.rs}, momentum {big.r.rs_mom > 0 ? "+" : ""}{big.r.rs_mom}).
+              </div>
+            )}
+          </div>
+          <ChevronDown size={15} color={C.faint} style={{ flexShrink:0, transform: open?"rotate(180deg)":"none", transition:"transform .15s" }}/>
+        </div>
+      </div>
+      {open && (
+        <div style={{ marginTop:11, borderTop:`1px solid ${C.panel2}`, paddingTop:9 }}>
+          {rows.map((x,i)=>(
+            <div key={x.name} style={{ display:"grid", gridTemplateColumns:"minmax(110px,1.5fr) minmax(52px,0.8fr) minmax(86px,1.1fr) minmax(120px,1.4fr)", gap:8, alignItems:"center", padding:"6px 0", borderTop: i?`1px solid ${C.panel2}`:"none" }}>
+              <span style={{ fontSize:12, color:C.sub, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{x.name}</span>
+              <span style={{ fontFamily:C.mono, fontSize:12, fontWeight:700, color:C.ink, textAlign:"right" }}>{(x.pct*100).toFixed(0)}%</span>
+              <span style={{ textAlign:"right" }}>
+                {x.r ? (
+                  <span style={{ fontSize:9.5, fontWeight:800, letterSpacing:"0.04em", color:(QUAD_COL[x.r.quadrant]||(()=>C.sub))(), background:`${(QUAD_COL[x.r.quadrant]||(()=>C.sub))()}14`, borderRadius:5, padding:"2px 7px" }}>{x.r.quadrant.toUpperCase()}</span>
+                ) : <span style={{ fontSize:9.5, color:C.faint }}>no rotation read</span>}
+              </span>
+              <span style={{ fontFamily:C.mono, fontSize:10.5, color:C.faint, textAlign:"right" }}>
+                {x.r ? `RS ${x.r.rs>0?"+":""}${x.r.rs} · mom ${x.r.rs_mom>0?"+":""}${x.r.rs_mom}` : "crypto/metals/other"}
+              </span>
+            </div>
+          ))}
+          <div style={{ fontSize:9.5, color:C.faint, marginTop:7 }}>Quadrants = 20-day relative strength vs SPY and its momentum (same engine as the Map tab). Leading/Improving = money flowing in · Weakening/Lagging = money flowing out.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash,
   totalCash=0, totalMargin=0, blendedRate=0, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
   accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onReorderPositions, onReorderAccounts, onSetFunds }) {
@@ -2609,6 +2790,9 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         <div style={{ padding:50, textAlign:"center", color:C.sub }}><Loader2 size={20} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:10 }}>Valuing positions & computing Greeks…</div></div>
       ) : (
         <>
+          {/* Decision-first: how the book sits against the market rotation */}
+          <PortfolioMarketAlignment analytics={a}/>
+
           <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:16 }}>
             <Stat label="TOTAL VALUE"  value={`$${(a.total_value||0).toLocaleString()}`} sub={`cost $${(a.total_cost||0).toLocaleString()}`}/>
             <Stat label="TODAY'S CHANGE"
@@ -4651,7 +4835,9 @@ function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
 // ── MAIN ──────────────────────────────────────────────────────────────
 export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [tab, setTab]             = useState("watchlist");
-  const [watchlist, setWatchlist] = useState(loadWL);
+  const [watchlist, setWatchlist] = useState(loadWL);        // CONVICTION tier
+  const [radar, setRadar]         = useState(loadRadar);     // RADAR tier
+  const [baselines, setBaselines] = useState(loadBaselines); // conviction check-in snapshots
   const [detail, setDetail]       = useState(null);
   const [positions, setPositions] = useState(loadPositions);
   const [portfolio, setPortfolio] = useState(null);
@@ -4674,6 +4860,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
   // localStorage fallback (instant load on first paint)
   useEffect(()=>{ saveWL(watchlist); },[watchlist]);
+  useEffect(()=>{ saveRadar(radar); },[radar]);
+  useEffect(()=>{ saveBaselines(baselines); },[baselines]);
   useEffect(()=>{ savePositions(positions); },[positions]);
   useEffect(()=>{ saveAlerts(alertHistory); },[alertHistory]);
   useEffect(()=>{ saveAI(aiEnabled); },[aiEnabled]);
@@ -4702,6 +4890,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         }
         if (data.positions?.length)  setPositions(data.positions);
         if (data.watchlist?.length)  setWatchlist(data.watchlist);
+        if (data.radar?.length)      setRadar(data.radar);
+        if (data.baselines)          setBaselines(data.baselines);
         if (data.margin    != null)  setMargin(data.margin);
         if (data.marginRate != null) setMarginRate(data.marginRate);
         if (data.cash      != null)  setCash(data.cash);
@@ -4724,13 +4914,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens };
+  sbState.current = { positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, userId]);
+  },[positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, userId]);
 
   // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
   // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
@@ -4855,9 +5045,21 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Reorder the account folders themselves.
   const onReorderAccounts = (nextAccounts) => setAccounts(nextAccounts);
 
-  const addTicker    = (t)=>{ const T=normalizeTicker(t); if(T) setWatchlist(w=>w.includes(T)?w:[...w,T]); };
+  const addTicker    = (t)=>{ const T=normalizeTicker(t); if(T){ setWatchlist(w=>w.includes(T)?w:[...w,T]); setRadar(r=>r.filter(x=>x!==T)); } };
   const removeTicker = (t)=> setWatchlist(w=>w.filter(x=>x!==t));
   const toggleWatch  = (t)=>{ const T=normalizeTicker(t); setWatchlist(w=>w.includes(T)?w.filter(x=>x!==T):[...w,T]); };
+  const addRadar     = (t)=>{ const T=normalizeTicker(t); if(T){ setRadar(r=>r.includes(T)?r:[...r,T]); setWatchlist(w=>w.filter(x=>x!==T)); } };
+  const removeRadar  = (t)=> setRadar(r=>r.filter(x=>x!==t));
+  // Promote (radar → conviction, sets a fresh baseline) or demote (conviction → radar)
+  const moveTier = (t, toConviction)=>{
+    if (toConviction) { setRadar(r=>r.filter(x=>x!==t)); setWatchlist(w=>w.includes(t)?w:[...w,t]); }
+    else { setWatchlist(w=>w.filter(x=>x!==t)); setRadar(r=>r.includes(t)?r:[...r,t]);
+           setBaselines(b=>{ const n={...b}; delete n[t]; return n; }); }
+  };
+  // Baseline "check-in": snapshot the state you last reviewed, so the card can
+  // flag what changed since. Set automatically on first load of a conviction
+  // card; reset manually via the card's check-in button.
+  const setBaseline = useCallback((t, snap)=> setBaselines(b=>({ ...b, [t]: { ...snap, ts: new Date().toISOString().slice(0,10) } })), []);
   const openFinancials = (t) => { const T=normalizeTicker(t); if(T){ setDetail(null); setFinancialsTicker(T); setTab("financials"); } };
   const saveScreen   = ({ name, mode, filters }) => setSavedScreens(s => [...s.filter(x=>x.name!==name), { name, mode, filters }]);
   const deleteScreen = (name) => setSavedScreens(s => s.filter(x=>x.name!==name));
@@ -4924,11 +5126,11 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
                 <div>
                   <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>My Watchlist</div>
-                  <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>{watchlist.length} stocks · live data · tap to open · drag to reorder</div>
+                  <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>{watchlist.length} conviction · {radar.length} radar · live data · tap to open</div>
                 </div>
                 <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
                   {/* Master timeframe — sets the sparkline range on every card at once */}
-                  {watchlist.length>0 && (
+                  {(watchlist.length>0 || radar.length>0) && (
                     <div style={{ display:"flex", alignItems:"center", gap:6 }}>
                       <span style={{ fontSize:10, color:C.faint, letterSpacing:"0.05em" }}>CHART</span>
                       <div style={{ display:"flex", gap:1, background:C.panel, borderRadius:8, padding:2, border:`1px solid ${C.line}` }}>
@@ -4943,15 +5145,15 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                       </div>
                     </div>
                   )}
-                  <AddInline onAdd={addTicker}/>
                 </div>
               </div>
 
               {/* Tactical setups strip — mean reversion filtered by trend.
                   Dips-in-uptrend (buy-the-dip) first, then falling-knife warnings. */}
               {(()=>{
-                const dips  = watchlist.filter(t => cardCache[t]?.tactical?.key === "dip_in_uptrend");
-                const knives= watchlist.filter(t => cardCache[t]?.tactical?.key === "falling_knife");
+                const all = [...watchlist, ...radar];
+                const dips  = all.filter(t => cardCache[t]?.tactical?.key === "dip_in_uptrend");
+                const knives= all.filter(t => cardCache[t]?.tactical?.key === "falling_knife");
                 if (!dips.length && !knives.length) return null;
                 const pill = (t, col, tip) => (
                   <div key={t} onClick={()=>setDetail(t)} title={tip} style={{ cursor:"pointer", display:"flex", alignItems:"center", gap:7, background:`${col}12`, border:`1px solid ${col}40`, borderRadius:7, padding:"5px 12px" }}>
@@ -4972,7 +5174,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
               {/* Upcoming earnings strip */}
               {(()=>{
-                const soon = watchlist
+                const soon = [...watchlist, ...radar]
                   .filter(t => cardCache[t]?.daysToEarn != null && cardCache[t].daysToEarn <= 14)
                   .sort((a,b) => cardCache[a].daysToEarn - cardCache[b].daysToEarn);
                 if (!soon.length) return null;
@@ -4991,10 +5193,18 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                 );
               })()}
 
+              {/* CONVICTION — names you know deeply; tracked against your last check-in */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", margin:"4px 0 10px" }}>
+                <div title="Names you know deeply. Each card tracks changes since your last check-in: trend flips, crosses, RSI zone shifts, new tactical setups, ±10% moves.">
+                  <span style={{ fontSize:12.5, fontWeight:800, color:C.ink, letterSpacing:"0.05em" }}>🎯 CONVICTION</span>
+                  <span style={{ fontSize:11, color:C.faint, marginLeft:8 }}>know it deeply · flags what changed since check-in</span>
+                </div>
+                <AddInline onAdd={addTicker}/>
+              </div>
               {watchlist.length===0 ? (
-                <div style={{ textAlign:"center", padding:"50px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Empty — search or add a ticker to start.</div>
+                <div style={{ textAlign:"center", padding:"26px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12, marginBottom:20 }}>No conviction names yet — add one, or promote from Radar with ↑.</div>
               ) : (
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:12 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:12, marginBottom:24 }}>
                   {watchlist.map((t,i)=>(
                     <div key={t} draggable
                       onDragStart={()=>setWlDrag(i)}
@@ -5002,7 +5212,31 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                       onDrop={e=>{ e.preventDefault(); if(wlDrag!=null && wlDrag!==i) reorderWatch(wlDrag,i); setWlDrag(null); }}
                       onDragEnd={()=>setWlDrag(null)}
                       style={{ opacity: wlDrag===i?0.35:1, transition:"opacity .12s" }}>
-                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData} range={wlRange} onFinancials={openFinancials} profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
+                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeTicker} aiEnabled={aiEnabled} onData={handleCardData} range={wlRange} onFinancials={openFinancials}
+                        tier="conviction" baseline={baselines[t]} onSetBaseline={setBaseline} onMove={moveTier}
+                        profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* RADAR — interesting, still learning it; gets educational context */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", margin:"4px 0 10px", borderTop:`2px solid ${C.line}`, paddingTop:16 }}>
+                <div title="Interesting but you don't know it well yet. Cards focus on learning: what the business does and what actually moves the stock.">
+                  <span style={{ fontSize:12.5, fontWeight:800, color:C.violet, letterSpacing:"0.05em" }}>📡 RADAR</span>
+                  <span style={{ fontSize:11, color:C.faint, marginLeft:8 }}>interesting · still learning it · promote with ↑ when you know it</span>
+                </div>
+                <AddInline onAdd={addRadar}/>
+              </div>
+              {radar.length===0 ? (
+                <div style={{ textAlign:"center", padding:"26px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Nothing on the radar — park names here while you research them.</div>
+              ) : (
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:12 }}>
+                  {radar.map(t=>(
+                    <div key={t}>
+                      <WatchCard ticker={t} onOpen={setDetail} onRemove={removeRadar} aiEnabled={aiEnabled} onData={handleCardData} range={wlRange} onFinancials={openFinancials}
+                        tier="radar" onMove={moveTier}
+                        profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
                     </div>
                   ))}
                 </div>
@@ -5016,7 +5250,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           {tab==="brief" && (
             <div>
               {/* Decision first: the agent's brief. Evidence below: the full market intelligence. */}
-              <MarketBriefSection userId={userId} positions={positions} watchlist={watchlist} aiEnabled={aiEnabled}
+              <MarketBriefSection userId={userId} positions={positions} watchlist={watchlist} radar={radar} aiEnabled={aiEnabled}
                 profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
               <BriefingRoom/>
             </div>

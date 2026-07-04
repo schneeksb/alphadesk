@@ -1422,6 +1422,38 @@ try:
                 return {"ticker": t, "filings": [], "error": str(e)}
         return _cached_swr(f"filings:{t}", produce, ttl=21600, stale_ttl=172800)
 
+    @app.get("/business-primer")
+    def business_primer_endpoint(ticker: str, authorization: str = Header(None)):
+        """Educational primer for RADAR watchlist names — what the business does,
+        what actually drives it, and the one metric to watch. Cached a week and
+        shared across users (nothing personal in it), so the Claude cost per
+        ticker is paid roughly once. Login required (AI)."""
+        require_user(authorization)
+        t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "ai_error": "invalid ticker"}
+        def produce():
+            try:
+                fund = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+                h = fund.get("health") or {}
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""Explain {fund.get('name') or t} ({t}) to an investor who finds it interesting but
+doesn't know it well yet. Sector: {fund.get('sector')} / {fund.get('industry')}.
+Context: gross margin {h.get('grossMargin')}, net margin {h.get('netMargin')}, TTM revenue growth
+{(fund.get('ttm') or {}).get('revenueGrowth')}, FCF {h.get('fcf')}.
+
+Educational, plain-English, specific to THIS company. JSON only, no markdown:
+{{"what_they_do": "<2 sentences: how this company actually makes money>",
+"drivers": ["<the #1 thing that moves this stock>", "<#2>", "<#3>"],
+"watch_metric": "<the ONE metric to track each quarter and why>",
+"newbie_trap": "<the most common mistake newcomers make analyzing this name>"}}"""
+                r = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=500,
+                                           messages=[{"role": "user", "content": prompt}])
+                from scanner import _lenient_json
+                return _json_safe({"ticker": t, **(_lenient_json(r.content[0].text) or {})})
+            except Exception as e:
+                return {"ticker": t, "ai_error": str(e)}
+        return _cached_swr(f"primer:{t}", produce, ttl=604800, stale_ttl=2592000)
+
     @app.get("/symbol-search")
     def symbol_search_endpoint(q: str = ""):
         """Ticker autocomplete: proxy Yahoo's symbol search (equities/ETFs/crypto),

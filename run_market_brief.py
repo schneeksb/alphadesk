@@ -60,7 +60,8 @@ def load_user_state(user_id=None):
     profile_str = (f"{_seg(prof.get('riskTolerance'),'moderate')}|{_seg(prof.get('goal'),'growth')}"
                    f"|{_seg(prof.get('style'),'longterm')}|{_seg(prof.get('level'),'intermediate')}") if prof else ""
     return {"user_id": row["user_id"], "positions": d.get("positions") or [],
-            "watchlist": d.get("watchlist") or [], "profile": profile_str}
+            "watchlist": d.get("watchlist") or [], "radar": d.get("radar") or [],
+            "profile": profile_str}
 
 
 def main():
@@ -87,11 +88,11 @@ def main():
         if ok:
             analytics = layer2_portfolio_analytics(ok)
 
-    # Run the agent (flat watchlist = conviction until tiers ship in Phase 2)
     from market_brief_agent import run_market_brief
     print("\nRunning Market Brief agent …\n" + "-" * 60)
     out = run_market_brief(positions=valued, analytics=analytics,
-                           conviction=state["watchlist"], radar=[], profile=state["profile"])
+                           conviction=state["watchlist"], radar=state["radar"],
+                           profile=state["profile"])
 
     # Tool-call log
     print(f"{'#':>2}  {'tool':<26} {'ms':>6}  input")

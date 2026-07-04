@@ -76,6 +76,7 @@ def _t_ticker_snapshot(inp):
             "days_to_earnings": d.get("daysToEarn"),
             "ma_trend": ma.get("trend"), "ma_cross": ma.get("cross"),
             "pct_vs_50dma": ma.get("vs50"), "pct_vs_200dma": ma.get("vs200"),
+            "tactical_setup": (d.get("tactical") or {}).get("key"),
             "analyst_target_mean": an.get("targetMean"), "analyst_rec": an.get("recKey")}
 
 def _t_ticker_fundamentals(inp):

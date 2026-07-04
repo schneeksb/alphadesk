@@ -382,6 +382,8 @@ function Sparkline({ data, w=120, h=32, color }) {
 // overbought = red, neutral = amber.
 const rsiColor = (v) => v==null ? C.faint : v < 30 ? C.up : v > 70 ? C.down : C.amber;
 const rsiLabel = (v) => v==null ? "" : v < 30 ? "oversold" : v > 70 ? "overbought" : "neutral";
+// Tactical setup (mean reversion × trend) tone → color.
+const tacticalCol = (t) => t?.tone==="bullish"?C.up : t?.tone==="bearish"?C.down : t?.tone==="caution"?C.amber : C.faint;
 
 // RSI(14) from a close series — Wilder's smoothing, matching the backend and
 // the standard shown on TradingView/brokers. Seeds with a simple average of
@@ -922,6 +924,17 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
         );
       })()}
 
+      {/* Tactical setup — reversion filtered by trend (only when actionable) */}
+      {d.tactical && d.tactical.key!=="neutral" && (() => {
+        const col = tacticalCol(d.tactical);
+        return (
+          <div title={d.tactical.note} style={{ marginTop:9, display:"flex", alignItems:"center", gap:6, background:`${col}12`, border:`1px solid ${col}38`, borderRadius:7, padding:"6px 10px" }}>
+            <span style={{ fontSize:11, fontWeight:800, color:col }}>{d.tactical.label}</span>
+            <span style={{ fontSize:9.5, color:C.faint, fontFamily:C.mono, marginLeft:"auto" }}>RSI {d.rsi} · {d.ma?.trend}</span>
+          </div>
+        );
+      })()}
+
       {/* Chips */}
       <div style={{ display:"flex", gap:6, marginTop:9, flexWrap:"wrap" }}>
         {d.iv   && <span style={{ fontFamily:C.mono, fontSize:10, color:C.amber,  background:`${C.amber}14`,  padding:"2px 7px", borderRadius:4 }}>IV {d.iv}%</span>}
@@ -1174,6 +1187,16 @@ function DetailPage({ ticker, onBack, inWatchlist, onToggleWatch, aiEnabled, pro
               {M.trend==="downtrend" && "Price is below both key averages with 50 < 200-day — a bearish alignment."}
               {M.trend==="mixed"     && "Price and the averages aren't cleanly stacked — trend is transitioning or rangebound."}
             </div>
+            {/* Tactical setup: RSI × trend */}
+            {d.tactical && d.tactical.key!=="neutral" && (() => {
+              const col = tacticalCol(d.tactical);
+              return (
+                <div style={{ marginTop:11, paddingTop:11, borderTop:`1px solid ${C.panel2}`, display:"flex", gap:11, alignItems:"flex-start" }}>
+                  <span style={{ fontSize:11, fontWeight:800, color:col, background:`${col}14`, border:`1px solid ${col}40`, borderRadius:6, padding:"4px 9px", whiteSpace:"nowrap", flexShrink:0 }}>{d.tactical.label}</span>
+                  <span style={{ fontSize:11.5, color:C.sub, lineHeight:1.5 }}>{d.tactical.note}</span>
+                </div>
+              );
+            })()}
           </div>
         );
       })()}
@@ -4728,6 +4751,29 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                   <AddInline onAdd={addTicker}/>
                 </div>
               </div>
+
+              {/* Tactical setups strip — mean reversion filtered by trend.
+                  Dips-in-uptrend (buy-the-dip) first, then falling-knife warnings. */}
+              {(()=>{
+                const dips  = watchlist.filter(t => cardCache[t]?.tactical?.key === "dip_in_uptrend");
+                const knives= watchlist.filter(t => cardCache[t]?.tactical?.key === "falling_knife");
+                if (!dips.length && !knives.length) return null;
+                const pill = (t, col, tip) => (
+                  <div key={t} onClick={()=>setDetail(t)} title={tip} style={{ cursor:"pointer", display:"flex", alignItems:"center", gap:7, background:`${col}12`, border:`1px solid ${col}40`, borderRadius:7, padding:"5px 12px" }}>
+                    <span style={{ fontWeight:700, fontSize:12.5, color:C.ink }}>{displaySym(t)}</span>
+                    <span style={{ fontFamily:C.mono, fontSize:10.5, color:col, fontWeight:700 }}>RSI {cardCache[t].rsi}</span>
+                  </div>
+                );
+                return (
+                  <div style={{ marginBottom:14, background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"12px 18px", display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+                    <span title="Oversold names, split by trend: buy-the-dip = still above the 200-day; falling knife = below it." style={{ fontSize:11, fontWeight:600, color:C.sub, letterSpacing:"0.06em", flexShrink:0, cursor:"help" }}>TACTICAL SETUPS ⓘ</span>
+                    {dips.length>0 && <span style={{ fontSize:10.5, color:C.up, fontWeight:700 }}>BUY-THE-DIP</span>}
+                    {dips.map(t=>pill(t, C.up, cardCache[t].tactical.note))}
+                    {knives.length>0 && <span style={{ fontSize:10.5, color:C.down, fontWeight:700, marginLeft:dips.length?6:0 }}>FALLING KNIFE</span>}
+                    {knives.map(t=>pill(t, C.down, cardCache[t].tactical.note))}
+                  </div>
+                );
+              })()}
 
               {/* Upcoming earnings strip */}
               {(()=>{

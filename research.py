@@ -112,6 +112,35 @@ def technicals(ticker):
         "trend": ma_trend, "cross": cross,
     }
 
+    # ── Tactical setup: mean reversion filtered by trend ────────────────────
+    # The edge isn't "oversold" alone — it's WHERE the oversold reading happens.
+    # Oversold inside an uptrend (still above the 200-day) is a high-odds
+    # buy-the-dip; oversold in a downtrend is a falling knife. This deterministic
+    # read is always available (no AI), from RSI × the 200-day trend filter.
+    tactical = None
+    rsi_v = rsi
+    vs200 = ma_block.get("vs200")
+    if rsi_v is not None and vs200 is not None:
+        uptrend = vs200 > 0
+        if rsi_v < 35 and uptrend:
+            tactical = {"key": "dip_in_uptrend", "label": "Buy-the-Dip Setup", "tone": "bullish",
+                        "note": "Oversold, but price is still above its 200-day — a pullback within an intact "
+                                "uptrend. The higher-odds side of mean reversion."}
+        elif rsi_v < 35 and not uptrend:
+            tactical = {"key": "falling_knife", "label": "Falling-Knife Risk", "tone": "bearish",
+                        "note": "Oversold AND below the 200-day — a downtrend, where cheap often gets cheaper. "
+                                "The low-odds side of mean reversion."}
+        elif rsi_v > 70 and uptrend:
+            tactical = {"key": "extended", "label": "Extended / Overbought", "tone": "caution",
+                        "note": "Strong uptrend but stretched — momentum is real, though chasing here risks "
+                                "buying a near-term top. Wait for a pullback."}
+        elif rsi_v > 70 and not uptrend:
+            tactical = {"key": "bounce_fading", "label": "Counter-Trend Bounce", "tone": "bearish",
+                        "note": "Overbought inside a downtrend — a relief rally into resistance that often fades."}
+        else:
+            tactical = {"key": "neutral", "label": "No Setup", "tone": "neutral",
+                        "note": "RSI mid-range — no tactical mean-reversion edge right now."}
+
     info = {}
     try: info = tk.info
     except Exception: pass
@@ -231,6 +260,7 @@ def technicals(ticker):
         "rsi":        round(rsi, 1),
         "rsi_history": rsi_history,
         "ma": ma_block,
+        "tactical": tactical,
         "iv":         round(iv, 1)         if iv         else None,
         "pcRatio":    pc_ratio,
         "relVol":     rel_vol,

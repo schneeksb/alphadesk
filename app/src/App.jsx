@@ -4941,6 +4941,9 @@ const RE_GLOSSARY = [
   ["Depreciation recapture","On sale, the IRS taxes the depreciation you deducted (up to 25%) on top of capital gains. A 1031 exchange defers both."],
   ["1031 exchange","Sell and roll the proceeds into another investment property within strict deadlines → defer capital gains AND recapture tax."],
   ["Price per unit / per SF","The multifamily and commercial comps: what you're paying per apartment or per square foot vs recent sales."],
+  ["Break-even occupancy","The % of gross rent you must actually collect to cover operating costs AND the mortgage. Under ~85% leaves a cushion; over 100% means even full occupancy loses money."],
+  ["Acquisition Score","0–100 across deal math (60), property quality (25) and risk (15). Transparent weights — 70+ worth pursuing, 45–70 needs negotiation, below 45 walk unless the price moves."],
+  ["Risk Watch","Deterministic alerts from YOUR inputs: under-market rent, expiring leases, insurance/tax jumps, thin DSCR, aging roof/HVAC. Update value, market rent and premiums monthly — even Zillow/assessor data lags weeks to months."],
 ];
 
 // Small labeled number input used across all RE calculators.
@@ -4993,6 +4996,7 @@ function calcIncomeDeal(i, type) {
   const ads=pmt*12, cf=noi-ads;
   const basis=price+rehab;
   const cap=basis?noi/basis:null;
+  const beOcc=gsi>0?(opex+ads)/gsi:null;   // occupancy needed to break even
   // 5-yr hold: value appreciates, cash flow grows with rents, loan amortizes.
   const value5=basis*Math.pow(1+n_(i.apprPct)/100,5);
   const bal5=loanBalAfter(loan, n_(i.ratePct), n_(i.termYrs)||30, 60);
@@ -5003,7 +5007,7 @@ function calcIncomeDeal(i, type) {
   const totRet5=cashIn>0?profit5/cashIn:null;
   const ann5=(totRet5!=null && totRet5>-1)?Math.pow(1+totRet5,1/5)-1:null;
   return {
-    loan, pmt, ads, cashIn, gsi, egi, opex, noi, cf, cfMo:cf/12, cap,
+    loan, pmt, ads, cashIn, gsi, egi, opex, noi, cf, cfMo:cf/12, cap, beOcc,
     coc: cashIn>0?cf/cashIn:null,
     dscr: ads>0?noi/ads:null,
     grm: gsi>0?price/gsi:null,
@@ -5044,6 +5048,50 @@ function reBuyVerdict(type, m) {
   if ((m.coc??-1)>=0.08 && (m.dscr??0)>=1.25 && m.cf>0) return { tag:"STRONG DEAL", col:C.up, note:"Cash-on-cash and debt coverage both clear the classic underwriting bars." };
   if ((m.coc??-1)>=0.04 && (m.dscr??0)>=1.1 && m.cf>0) return { tag:"WORKABLE", col:C.amber, note:"Positive but thin — push price, rents or terms toward CoC ≥ 8% and DSCR ≥ 1.25." };
   return { tag:"THIN / PASS", col:C.down, note:"Negative or fragile cash flow — needs a lower basis, higher income, or better debt." };
+}
+
+// Small labeled select, sibling of REIn.
+function RESel({ label, value, onChange, options }) {
+  return (
+    <div style={{ minWidth:0 }}>
+      <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{label}</div>
+      <select value={value} onChange={e=>onChange(e.target.value)}
+        style={{ width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 8px", color:C.ink, fontSize:12, outline:"none" }}>
+        {options.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+      </select>
+    </div>
+  );
+}
+
+const RE_QUALITY_DEFAULT = { location:"B", condition:"light", roofAge:10, hvacAge:8, deferredMaint:0, insRisk:"low", regRisk:"low", tenantConcPct:0 };
+// Acquisition Score 0-100: deal math (60) + property quality (25) + risk (15).
+// Fully deterministic and shown with its component breakdown — no black box.
+function acquisitionScore(type, m, q) {
+  let deal = 0;
+  if (type === "flip") {
+    deal += Math.max(0, Math.min(25, (m.roi ?? 0) * 100 * (25/30)));        // 30% cash ROI = full 25
+    deal += m.passes70 ? 15 : 0;                                            // under the 70%-rule offer
+    deal += Math.max(0, Math.min(20, (m.margin ?? 0) * 100 * (20/12)));     // 12% of ARV = full 20
+  } else {
+    deal += Math.max(0, Math.min(25, (m.coc ?? 0) * 100 * (25/8)));         // 8% CoC = full 25
+    deal += Math.max(0, Math.min(15, ((m.dscr ?? 0) - 0.9) * (15/0.6)));    // 1.5 DSCR = full 15
+    deal += Math.max(0, Math.min(10, (m.cap ?? 0) * 100 * (10/6)));         // 6% cap = full 10
+    deal += m.beOcc != null ? Math.max(0, Math.min(10, (1 - m.beOcc) * 50)) : 5;  // 80% break-even = full 10
+  }
+  const locPts  = { A:10, B:7.5, C:4, D:1 }[q.location] ?? 5;
+  const condPts = { turnkey:8, light:6, moderate:3.5, heavy:1 }[q.condition] ?? 4;
+  const sysPts  = Math.max(0, 7 - Math.max(0, n_(q.roofAge)-15)*0.5 - Math.max(0, n_(q.hvacAge)-12)*0.5);
+  const quality = Math.min(25, locPts + condPts + sysPts);
+  let risk = 15;
+  risk -= { low:0, medium:3, high:6 }[q.insRisk] ?? 1.5;
+  risk -= { low:0, medium:3, high:6 }[q.regRisk] ?? 1.5;
+  if (m.cashIn > 0) risk -= Math.min(3, (n_(q.deferredMaint)/m.cashIn) * 10); // hidden rehab vs cash in
+  if (n_(q.tenantConcPct) > 30) risk -= Math.min(3, (n_(q.tenantConcPct)-30)/20);
+  risk = Math.max(0, risk);
+  const total = Math.round(Math.max(0, Math.min(100, deal + quality + risk)));
+  return { total, deal: Math.round(deal), quality: Math.round(quality), risk: Math.round(risk),
+    col: total>=70?C.up:total>=45?C.amber:C.down,
+    read: total>=70?"Worth pursuing":total>=45?"Needs negotiation":"Walk unless the price moves" };
 }
 
 // Generic AI underwriter panel used by all three RE sub-tabs.
@@ -5127,11 +5175,14 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
   const memory = useRef({});                       // preserve edits per type when switching
   const [inp, setInp] = useState(RE_DEFAULTS.rental);
   const [dealName, setDealName] = useState("");
+  const [q, setQ] = useState(RE_QUALITY_DEFAULT);
   const pick = (t) => { memory.current[type]=inp; setType(t); setInp(memory.current[t] || RE_DEFAULTS[t]); };
   const set = (k) => (v) => setInp(s=>({ ...s, [k]: v }));
+  const setQk = (k) => (v) => setQ(s=>({ ...s, [k]: v }));
   const isFlip = type==="flip";
   const m = isFlip ? calcFlipDeal(inp) : calcIncomeDeal(inp, type);
   const v = reBuyVerdict(type, m);
+  const score = acquisitionScore(type, m, q);
   const saveDeal = () => {
     const name = dealName.trim() || `${RE_TYPES.find(([k])=>k===type)?.[1]} @ ${fmt$(n_(inp.price))}`;
     onSaveDeals([{ id:newId(), name, type, inputs:{...inp}, savedAt:new Date().toISOString().slice(0,10) }, ...deals].slice(0,30));
@@ -5194,10 +5245,33 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
         )}
       </div>
 
-      {/* Verdict + metrics */}
-      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderLeft:`4px solid ${v.col}`, borderRadius:12, padding:"13px 16px" }}>
-        <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.05em", color:v.col }}>{v.tag}</span>
-        <span style={{ fontSize:12.5, color:C.ink, marginLeft:10 }}>{v.note}</span>
+      {/* Property quality & risk checklist → feeds the Acquisition Score + AI review */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+        <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:10 }}>Property quality & risk <span style={{ fontSize:10, color:C.faint, fontWeight:400 }}>· what the numbers can't see — scores the deal and briefs the AI</span></div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(130px, 1fr))", gap:10 }}>
+          <RESel label="Location grade" value={q.location} onChange={setQk("location")} options={[["A","A — prime"],["B","B — solid"],["C","C — workforce"],["D","D — rough"]]}/>
+          <RESel label="Condition" value={q.condition} onChange={setQk("condition")} options={[["turnkey","Turnkey"],["light","Light cosmetic"],["moderate","Moderate rehab"],["heavy","Heavy / gut"]]}/>
+          <REIn label="Roof age" suffix="yrs" value={q.roofAge} onChange={setQk("roofAge")}/>
+          <REIn label="HVAC age" suffix="yrs" value={q.hvacAge} onChange={setQk("hvacAge")}/>
+          <REIn label="Deferred maintenance" prefix="$" value={q.deferredMaint} onChange={setQk("deferredMaint")}/>
+          <RESel label="Insurance risk (flood/wind/fire)" value={q.insRisk} onChange={setQk("insRisk")} options={[["low","Low"],["medium","Medium"],["high","High"]]}/>
+          <RESel label="Regulatory risk (rent control...)" value={q.regRisk} onChange={setQk("regRisk")} options={[["low","Low"],["medium","Medium"],["high","High"]]}/>
+          {(type==="multifamily"||type==="commercial") && <REIn label="Largest tenant (% of rent)" suffix="%" value={q.tenantConcPct} onChange={setQk("tenantConcPct")}/>}
+        </div>
+      </div>
+
+      {/* Acquisition Score + verdict */}
+      <div style={{ display:"flex", gap:12, flexWrap:"wrap", alignItems:"stretch" }}>
+        <div style={{ flex:"0 0 auto", background:C.panel, border:`1px solid ${score.col}55`, borderRadius:12, padding:"12px 18px", textAlign:"center", minWidth:150 }}>
+          <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.07em" }}>ACQUISITION SCORE</div>
+          <div style={{ fontFamily:C.mono, fontSize:30, fontWeight:800, color:score.col, lineHeight:1.15 }}>{score.total}</div>
+          <div style={{ fontSize:10, color:score.col, fontWeight:700 }}>{score.read}</div>
+          <div style={{ fontSize:9, color:C.faint, marginTop:3, fontFamily:C.mono }}>deal {score.deal}/60 · quality {score.quality}/25 · risk {score.risk}/15</div>
+        </div>
+        <div style={{ flex:"1 1 260px", background:C.panel, borderTop:`1px solid ${C.line}`, borderRight:`1px solid ${C.line}`, borderBottom:`1px solid ${C.line}`, borderLeft:`4px solid ${v.col}`, borderRadius:12, padding:"13px 16px", display:"flex", alignItems:"center", flexWrap:"wrap", gap:6 }}>
+          <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.05em", color:v.col }}>{v.tag}</span>
+          <span style={{ fontSize:12.5, color:C.ink }}>{v.note}</span>
+        </div>
       </div>
       {isFlip ? (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:10 }}>
@@ -5218,6 +5292,7 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
             <REMetric label="1% rule" value={fmtPc(m.onePct, 2)} col={(m.onePct??0)>=0.01?C.up:C.amber} sub="rent ÷ price"/>
             <REMetric label="GRM" value={m.grm==null?"—":m.grm.toFixed(1)} sub="price ÷ gross rents"/>
             <REMetric label="Expense ratio" value={fmtPc(m.expRatio)} sub="opex ÷ collected rent"/>
+            <REMetric label="Break-even occupancy" value={fmtPc(m.beOcc)} col={(m.beOcc??1)<=0.85?C.up:(m.beOcc??1)<=1?C.amber:C.down} sub="of gross rent to cover everything"/>
             <REMetric label="P&I payment" value={`${fmt$(m.pmt)}/mo`} sub={`${fmt$(m.loan)} loan`}/>
             {type==="multifamily" && <REMetric label="Price / unit" value={fmt$(m.perUnit)}/>}
             {type==="commercial" && <REMetric label="Price / SF" value={fmt$(m.perSF, 0)}/>}
@@ -5257,8 +5332,8 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
         )}
       </div>
 
-      <REAIPanel mode="buy" dealType={type} inputs={inp} computed={m} aiEnabled={aiEnabled} profile={profile}
-        subtitle="grades your numbers vs underwriting norms + what to negotiate"/>
+      <REAIPanel mode="buy" dealType={type} inputs={{ ...inp, qualityChecklist:q }} computed={{ ...m, acquisitionScore:score.total }}
+        aiEnabled={aiEnabled} profile={profile} subtitle="grades your numbers vs underwriting norms + what to negotiate"/>
     </div>
   );
 }
@@ -5281,7 +5356,40 @@ function calcOwned(p) {
     roeCash: equity>0?cf/equity:null,
     appr: n_(p.purchasePrice)>0?(value/n_(p.purchasePrice)-1):null };
 }
-const RE_PROP_DEFAULT = { name:"", type:"rental", purchasePrice:250000, purchaseDate:"", value:300000, loanBalance:180000, ratePct:6, termYrs:30, pmtMo:0, rentMo:2000, otherMo:0, vacancyPct:5, taxesYr:3000, insYr:1200, maintPct:5, mgmtPct:0, utilitiesMo:0, hoaMo:0 };
+const RE_PROP_DEFAULT = { name:"", type:"rental", purchasePrice:250000, purchaseDate:"", value:300000, loanBalance:180000, ratePct:6, termYrs:30, pmtMo:0, rentMo:2000, otherMo:0, vacancyPct:5, taxesYr:3000, insYr:1200, maintPct:5, mgmtPct:0, utilitiesMo:0, hoaMo:0,
+  marketRentMo:0, leaseEnd:"", taxesPrevYr:0, insPrevYr:0, roofAgeYrs:0, hvacAgeYrs:0 };
+
+// Health alerts for an owned property — the "Risk Watch": everything computable
+// from the user's own inputs, no external feed. sev: red = act now, amber = watch.
+function propHealth(p, m) {
+  const out = [];
+  const rent=n_(p.rentMo), mkt=n_(p.marketRentMo);
+  if (rent>0 && mkt>rent*1.05)
+    out.push({ sev:"amber", act:"raise", txt:`Rent ~${((mkt/rent-1)*100).toFixed(0)}% under market — ${fmt$((mkt-rent)*12)}/yr on the table` });
+  if (p.leaseEnd) {
+    const d=Math.round((new Date(p.leaseEnd+"T12:00:00") - Date.now())/86400000);
+    if (d<0) out.push({ sev:"red", txt:`Lease expired ${-d} days ago — renew or re-list` });
+    else if (d<=120) out.push({ sev:"amber", txt:`Lease expires in ${d} days — start renewal talks` });
+  }
+  if (n_(p.insPrevYr)>0 && n_(p.insYr)>n_(p.insPrevYr)*1.10)
+    out.push({ sev:"red", txt:`Insurance up ${((n_(p.insYr)/n_(p.insPrevYr)-1)*100).toFixed(0)}% YoY — compressing cash flow` });
+  if (n_(p.taxesPrevYr)>0 && n_(p.taxesYr)>n_(p.taxesPrevYr)*1.10)
+    out.push({ sev:"amber", txt:`Property taxes up ${((n_(p.taxesYr)/n_(p.taxesPrevYr)-1)*100).toFixed(0)}% YoY` });
+  if (m.cfMo<0) out.push({ sev:"red", act:"fix", txt:`Negative cash flow (${fmt$(m.cfMo)}/mo)` });
+  if ((m.dscr??99)<1) out.push({ sev:"red", act:"fix", txt:`DSCR ${m.dscr.toFixed(2)} — rent doesn't cover the mortgage` });
+  else if ((m.dscr??99)<1.2) out.push({ sev:"amber", txt:`DSCR ${m.dscr.toFixed(2)} — thin coverage, no room for surprises` });
+  if ((m.ltv??0)>0.8) out.push({ sev:"amber", txt:`LTV ${fmtPc(m.ltv,0)} — highly levered` });
+  if (n_(p.roofAgeYrs)>=20) out.push({ sev:"amber", txt:`Roof is ${p.roofAgeYrs} yrs old — budget replacement (~$8-15k)` });
+  if (n_(p.hvacAgeYrs)>=15) out.push({ sev:"amber", txt:`HVAC is ${p.hvacAgeYrs} yrs old — nearing end of life` });
+  return out;
+}
+// One action tag per property: the "hold / raise rents / fix / lazy equity" call.
+function propAction(m, health) {
+  if (health.some(h=>h.act==="fix")) return { tag:"FIX CASH FLOW", col:C.down };
+  if (health.some(h=>h.act==="raise")) return { tag:"RAISE RENTS", col:C.cold };
+  if ((m.roeCash??1)<0.03 && m.equity>75000) return { tag:"LAZY EQUITY — RUN SELL vs KEEP", col:C.amber };
+  return { tag:"HOLD", col:C.up };
+}
 
 function REPropertyForm({ initial, onSubmit, onClose }) {
   const [p, setP] = useState(initial || RE_PROP_DEFAULT);
@@ -5321,6 +5429,19 @@ function REPropertyForm({ initial, onSubmit, onClose }) {
         <REIn label="Utilities / mo" prefix="$" value={p.utilitiesMo} onChange={set("utilitiesMo")}/>
         <REIn label="HOA / mo" prefix="$" value={p.hoaMo} onChange={set("hoaMo")}/>
       </div>
+      <div style={{ fontSize:11, fontWeight:700, color:C.sub, margin:"14px 0 8px" }}>Health & market inputs <span style={{ fontWeight:400, color:C.faint }}>(optional — powers Risk Watch alerts)</span></div>
+      <div style={inGrid}>
+        <REIn label="Market rent / mo" prefix="$" value={p.marketRentMo} onChange={set("marketRentMo")}/>
+        <div style={{ minWidth:0 }}>
+          <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase" }}>Lease ends</div>
+          <input type="date" value={p.leaseEnd||""} onChange={e=>setP(s=>({ ...s, leaseEnd:e.target.value }))}
+            style={{ width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"7px 8px", color:C.sub, fontSize:12, outline:"none" }}/>
+        </div>
+        <REIn label="Taxes LAST yr" prefix="$" value={p.taxesPrevYr} onChange={set("taxesPrevYr")}/>
+        <REIn label="Insurance LAST yr" prefix="$" value={p.insPrevYr} onChange={set("insPrevYr")}/>
+        <REIn label="Roof age" suffix="yrs" value={p.roofAgeYrs} onChange={set("roofAgeYrs")}/>
+        <REIn label="HVAC age" suffix="yrs" value={p.hvacAgeYrs} onChange={set("hvacAgeYrs")}/>
+      </div>
       <div style={{ display:"flex", gap:8, marginTop:12 }}>
         <button onClick={()=>{ onSubmit(p); onClose(); }} style={{ background:C.up, border:"none", borderRadius:8, padding:"8px 16px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:700 }}>{initial?"Save changes":"Add property"}</button>
         <button onClick={onClose} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 14px", color:C.sub, cursor:"pointer", fontSize:12 }}>Cancel</button>
@@ -5332,17 +5453,20 @@ function REPropertyForm({ initial, onSubmit, onClose }) {
 function REProperties({ properties, onSaveProperties, aiEnabled, profile }) {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing]   = useState(null);
-  const rows = properties.map(p=>({ p, m: calcOwned(p) }));
+  const rows = properties.map(p=>{ const m=calcOwned(p); const health=propHealth(p,m); return { p, m, health, action:propAction(m,health) }; });
   const tot = rows.reduce((s,{p,m})=>({
     value:s.value+n_(p.value), debt:s.debt+n_(p.loanBalance), equity:s.equity+m.equity,
     cfMo:s.cfMo+m.cfMo, noi:s.noi+m.noi }), { value:0, debt:0, equity:0, cfMo:0, noi:0 });
+  const watch = rows.flatMap(({p,health})=>health.map(h=>({ ...h, name:p.name||"Unnamed" })))
+    .sort((a,b)=>(a.sev==="red"?0:1)-(b.sev==="red"?0:1));
   const submit = (p) => {
     if (editing) onSaveProperties(properties.map(x=>x.id===editing.id?{ ...p, id:editing.id }:x));
     else onSaveProperties([...properties, { ...p, id:newId() }]);
     setEditing(null);
   };
   const aiComputed = { totals:{ ...tot, portfolioCap: tot.value>0?tot.noi/tot.value:null, portfolioROE: tot.equity>0?(tot.cfMo*12)/tot.equity:null },
-    properties: rows.map(({p,m})=>({ name:p.name||"unnamed", type:p.type, value:n_(p.value), equity:m.equity, cfMo:Math.round(m.cfMo), cap:m.cap, dscr:m.dscr, roeCash:m.roeCash, ltv:m.ltv })) };
+    properties: rows.map(({p,m,health,action})=>({ name:p.name||"unnamed", type:p.type, value:n_(p.value), equity:m.equity, cfMo:Math.round(m.cfMo), cap:m.cap, dscr:m.dscr, roeCash:m.roeCash, ltv:m.ltv,
+      marketRentMo:n_(p.marketRentMo)||null, leaseEnd:p.leaseEnd||null, alerts:health.map(h=>h.txt), action:action.tag })) };
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
@@ -5364,15 +5488,28 @@ function REProperties({ properties, onSaveProperties, aiEnabled, profile }) {
             <REMetric label="Portfolio cap rate" value={fmtPc(tot.value>0?tot.noi/tot.value:null)} sub="NOI ÷ current value"/>
             <REMetric label="Cash ROE" value={fmtPc(tot.equity>0?(tot.cfMo*12)/tot.equity:null)} sub="cash flow ÷ equity"/>
           </div>
+          {watch.length>0 && (
+            <div style={{ background:C.panel, borderTop:`1px solid ${C.amber}44`, borderRight:`1px solid ${C.amber}44`, borderBottom:`1px solid ${C.amber}44`, borderLeft:`4px solid ${C.amber}`, borderRadius:12, padding:"13px 16px" }}>
+              <div style={{ fontSize:11, fontWeight:800, color:C.amber, letterSpacing:"0.06em", marginBottom:7 }}>⚠️ RISK WATCH <span style={{ fontWeight:400, color:C.faint, letterSpacing:0, textTransform:"none" }}>· what's getting worse, from your latest inputs</span></div>
+              {watch.map((h,i)=>(
+                <div key={i} style={{ display:"flex", gap:8, alignItems:"baseline", padding:"4px 0", borderTop:i?`1px solid ${C.panel2}`:"none" }}>
+                  <span style={{ width:7, height:7, borderRadius:"50%", background:h.sev==="red"?C.down:C.amber, flexShrink:0, position:"relative", top:-1 }}/>
+                  <span style={{ fontSize:11, fontWeight:700, color:C.ink, whiteSpace:"nowrap" }}>{h.name}</span>
+                  <span style={{ fontSize:11.5, color:C.sub, lineHeight:1.5 }}>{h.txt}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(290px, 1fr))", gap:12 }}>
-            {rows.map(({p,m})=>(
+            {rows.map(({p,m,health,action})=>(
               <div key={p.id} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"14px 16px" }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
                   <div style={{ minWidth:0 }}>
                     <div style={{ fontSize:13, fontWeight:700, color:C.ink, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name || "Unnamed property"}</div>
                     <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginTop:2 }}>{RE_TYPES.find(([k])=>k===p.type)?.[1]||p.type}{p.purchaseDate && ` · bought ${p.purchaseDate}`}{m.appr!=null && ` · ${m.appr>=0?"+":""}${(m.appr*100).toFixed(0)}% since`}</div>
                   </div>
-                  <div style={{ display:"flex", gap:8, flexShrink:0 }}>
+                  <div style={{ display:"flex", gap:8, alignItems:"center", flexShrink:0 }}>
+                    <span style={{ fontSize:8.5, fontWeight:800, color:action.col, background:`${action.col}14`, borderRadius:5, padding:"3px 8px", letterSpacing:"0.03em", whiteSpace:"nowrap" }}>{action.tag}</span>
                     <button onClick={()=>{ setShowForm(false); setEditing(p); }} title="Edit" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2 }}><Pencil size={12}/></button>
                     <button onClick={()=>onSaveProperties(properties.filter(x=>x.id!==p.id))} title="Remove" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2 }}><Trash2 size={13}/></button>
                   </div>
@@ -5385,6 +5522,12 @@ function REProperties({ properties, onSaveProperties, aiEnabled, profile }) {
                   <div><div style={{ fontSize:8.5, color:C.faint }}>DSCR</div><div style={{ fontFamily:C.mono, fontSize:12.5, color:(m.dscr??0)>=1.25?C.up:(m.dscr??0)>=1?C.amber:C.down }}>{m.dscr==null?"—":m.dscr.toFixed(2)}</div></div>
                   <div><div style={{ fontSize:8.5, color:C.faint }} title="Annual cash flow ÷ current equity — low means lazy equity">CASH ROE</div><div style={{ fontFamily:C.mono, fontSize:12.5, color:(m.roeCash??0)>=0.06?C.up:(m.roeCash??0)>=0.03?C.amber:C.down }}>{fmtPc(m.roeCash)}</div></div>
                 </div>
+                {health.length>0 && (
+                  <div style={{ marginTop:9, paddingTop:8, borderTop:`1px solid ${C.panel2}`, display:"flex", flexDirection:"column", gap:3 }}>
+                    {health.slice(0,4).map((h,i)=>(<div key={i} style={{ fontSize:10, color:h.sev==="red"?C.down:C.amber, lineHeight:1.45 }}>• {h.txt}</div>))}
+                    {health.length>4 && <div style={{ fontSize:9.5, color:C.faint }}>+{health.length-4} more in Risk Watch</div>}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -5400,7 +5543,7 @@ function REProperties({ properties, onSaveProperties, aiEnabled, profile }) {
 // the equity earns if you KEEP vs what redeployed proceeds could earn.
 function RESellAnalyzer({ properties, aiEnabled, profile }) {
   const [propId, setPropId] = useState("");
-  const [inp, setInp] = useState({ value:400000, sellCostPct:7, loanBalance:220000, basis:280000, depTaken:40000, capGainsPct:15, recapturePct:25, stateTaxPct:0, cfYr:6000, paydownYr:4500, apprPct:3, altReturnPct:8 });
+  const [inp, setInp] = useState({ value:400000, sellCostPct:7, loanBalance:220000, basis:280000, depTaken:40000, capGainsPct:15, recapturePct:25, stateTaxPct:0, cfYr:6000, paydownYr:4500, apprPct:3, altReturnPct:8, rentUpMo:0 });
   const set = (k) => (v) => setInp(s=>({ ...s, [k]: v }));
   const pickProp = (id) => {
     setPropId(id);
@@ -5409,7 +5552,8 @@ function RESellAnalyzer({ properties, aiEnabled, profile }) {
     const m = calcOwned(p);
     const balNow=n_(p.loanBalance);
     const paydown = Math.max(0, balNow - loanBalAfter(balNow, n_(p.ratePct), n_(p.termYrs)||30, 12));
-    setInp(s=>({ ...s, value:n_(p.value), loanBalance:balNow, basis:n_(p.purchasePrice), cfYr:Math.round(m.cf), paydownYr:Math.round(paydown) }));
+    const rentGap = Math.max(0, n_(p.marketRentMo) - n_(p.rentMo));   // achievable raise from your market-rent input
+    setInp(s=>({ ...s, value:n_(p.value), loanBalance:balNow, basis:n_(p.purchasePrice), cfYr:Math.round(m.cf), paydownYr:Math.round(paydown), rentUpMo:Math.round(rentGap) }));
   };
   const value=n_(inp.value), sellCosts=value*n_(inp.sellCostPct)/100, netSale=value-sellCosts;
   const adjBasis=Math.max(0, n_(inp.basis)-n_(inp.depTaken));
@@ -5424,7 +5568,10 @@ function RESellAnalyzer({ properties, aiEnabled, profile }) {
   const roe=equityNow>0?keepYr/equityNow:null;
   const redeployYr=netProceeds*n_(inp.altReturnPct)/100;
   const lazy = roe!=null && redeployYr>keepYr;
-  const computed={ sellCosts, netSale, gain, recaptureTax:recapture, capGainsTax:capTax, totalTax, netProceeds, equityNow, keepReturnYr:keepYr, roeKeep:roe, redeployReturnYr:redeployYr };
+  // The 4th option: a realistic rent raise can un-lazy the equity without selling.
+  const keepRaisedYr=keepYr+n_(inp.rentUpMo)*12;
+  const raiseFixesIt = lazy && n_(inp.rentUpMo)>0 && keepRaisedYr>redeployYr;
+  const computed={ sellCosts, netSale, gain, recaptureTax:recapture, capGainsTax:capTax, totalTax, netProceeds, equityNow, keepReturnYr:keepYr, roeKeep:roe, redeployReturnYr:redeployYr, keepWithRentRaiseYr:keepRaisedYr, rentRaiseMo:n_(inp.rentUpMo) };
   const inGrid = { display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(118px, 1fr))", gap:10 };
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
@@ -5453,12 +5600,15 @@ function RESellAnalyzer({ properties, aiEnabled, profile }) {
           <REIn label="Principal paydown / yr" prefix="$" value={inp.paydownYr} onChange={set("paydownYr")}/>
           <REIn label="Appreciation / yr" suffix="%" value={inp.apprPct} onChange={set("apprPct")}/>
           <REIn label="Redeployed return" suffix="%" value={inp.altReturnPct} onChange={set("altReturnPct")}/>
+          <REIn label="Achievable rent raise / mo" prefix="$" value={inp.rentUpMo} onChange={set("rentUpMo")}/>
         </div>
       </div>
-      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderLeft:`4px solid ${lazy?C.amber:C.up}`, borderRadius:12, padding:"13px 16px" }}>
-        <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.05em", color:lazy?C.amber:C.up }}>{lazy?"EQUITY IS LAZY":"KEEPING WINS"}</span>
+      <div style={{ background:C.panel, borderTop:`1px solid ${C.line}`, borderRight:`1px solid ${C.line}`, borderBottom:`1px solid ${C.line}`, borderLeft:`4px solid ${raiseFixesIt?C.cold:lazy?C.amber:C.up}`, borderRadius:12, padding:"13px 16px" }}>
+        <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.05em", color:raiseFixesIt?C.cold:lazy?C.amber:C.up }}>{raiseFixesIt?"RAISE RENTS FIRST":lazy?"EQUITY IS LAZY":"KEEPING WINS"}</span>
         <span style={{ fontSize:12.5, color:C.ink, marginLeft:10 }}>
-          {lazy
+          {raiseFixesIt
+            ? `At today's rent, keeping earns ${fmt$(keepYr)}/yr vs ${fmt$(redeployYr)}/yr redeployed — but a ${fmt$(n_(inp.rentUpMo))}/mo raise lifts keeping to ${fmt$(keepRaisedYr)}/yr, which beats selling. Fix the rent before you give up ${fmt$(totalTax+sellCosts)} in taxes and selling costs.`
+            : lazy
             ? `Keeping earns ${fmt$(keepYr)}/yr on ${fmt$(equityNow)} equity (${fmtPc(roe)}) — redeploying the ${fmt$(netProceeds)} net proceeds at ${inp.altReturnPct}% would earn ${fmt$(redeployYr)}/yr. Consider selling, a cash-out refi, or a 1031 into a better-yielding asset.`
             : `Keeping earns ${fmt$(keepYr)}/yr (${fmtPc(roe)} on equity) vs ${fmt$(redeployYr)}/yr if you sold and redeployed at ${inp.altReturnPct}% — the property is still working harder than the alternative.`}
         </span>

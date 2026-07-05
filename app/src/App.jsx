@@ -2418,27 +2418,53 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
 }
 
 // Shared grid + number formatter for the portfolio position rows / folders.
-const POS_GRID = "minmax(140px,2fr) minmax(60px,1fr) minmax(76px,1.1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
+const POS_GRID = "minmax(140px,2fr) minmax(62px,0.9fr) minmax(84px,1.2fr) minmax(60px,1fr) minmax(76px,1.1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
 // Sum of the grid's min column widths. Rows carry this as minWidth and the folder
 // body scrolls horizontally below it — so on a phone the full P&L/Signal/actions
 // columns stay reachable by swiping instead of being clipped off-screen.
-const POS_MINW = 720;
+const POS_MINW = 866;
 const fmtNum = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
 const POS_COLS = [
-  {label:"Position", align:"left"},  {label:"Spot", align:"right"}, {label:"Today", align:"right"},
+  {label:"Position", align:"left"},  {label:"Qty", align:"right"},  {label:"Cost Basis", align:"right"},
+  {label:"Spot", align:"right"},     {label:"Today", align:"right"},
   {label:"P&L", align:"right"},      {label:"P&L %", align:"right"},{label:"DTE", align:"right"},
   {label:"Stop", align:"right"},     {label:"Signal", align:"right"},
 ];
 
 // A single draggable position row. The drag handle (six-dots) is the only grab
 // point, so clicking elsewhere on the row still opens the ticker detail.
-function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff }) {
+// Qty and Cost Basis are click-to-edit in place (Enter/blur saves, Esc cancels)
+// so tweaking a position doesn't require the top edit form.
+function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEdit }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: p.id, data:{ type:"position", account: groupId } });
   const [tip, setTip] = useState(false);
+  const [editCell, setEditCell] = useState(null);   // "qty" | "cost_basis"
+  const [draft, setDraft] = useState("");
   const isOpt = p.type === "CALL" || p.type === "PUT";
   const isCry = p.type === "CRYPTO" || isCrypto(p.ticker);
   const label = isOpt ? `${displaySym(p.ticker)} $${p.strike}${(p.type||"")[0]}` : displaySym(p.ticker);
+  const commitEdit = () => {
+    const v = parseFloat(draft);
+    if (editCell && onQuickEdit && !isNaN(v) && v > 0 && v !== p[editCell]) onQuickEdit(p.id, { [editCell]: v });
+    setEditCell(null);
+  };
+  // Plain render helper (NOT a nested component — that would remount the input
+  // and drop focus on every keystroke).
+  const editableCell = (field, cur, display, sub) => editCell === field ? (
+    <input autoFocus type="number" step="any" value={draft}
+      onClick={e=>e.stopPropagation()} onChange={e=>setDraft(e.target.value)}
+      onKeyDown={e=>{ if (e.key==="Enter") commitEdit(); if (e.key==="Escape") setEditCell(null); }}
+      onBlur={commitEdit}
+      style={{ width:"100%", background:C.panel, border:`1px solid ${C.cold}88`, borderRadius:6, padding:"4px 6px", color:C.ink, fontSize:11.5, fontFamily:C.mono, outline:"none", textAlign:"right" }}/>
+  ) : (
+    <div onClick={(e)=>{ e.stopPropagation(); setDraft(cur != null ? String(cur) : ""); setEditCell(field); }}
+      title="Click to edit — saves instantly" style={{ textAlign:"right", cursor:"text", lineHeight:1.25 }}>
+      <span style={{ borderBottom:`1px dashed ${C.line}` }}>{display}</span>
+      {sub && <div style={{ fontSize:8.5, color:C.faint, marginTop:1 }}>{sub}</div>}
+    </div>
+  );
+  const unitDiv = (Number(p.qty) || 1) * (isOpt ? 100 : 1);
   return (
     <div ref={setNodeRef} className="pos-row"
       onClick={()=>onOpen&&onOpen(p.ticker)}
@@ -2453,9 +2479,15 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff }) {
         </span>
         <div style={{ display:"flex", flexDirection:"column", gap:2, minWidth:0 }}>
           <span style={{ fontWeight:700, fontFamily:"inherit" }}>{label}</span>
-          <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>{isOpt ? `${p.qty}x · exp ${p.expiry}` : isCry ? `${p.qty} units` : `${p.qty} shares`}</span>
+          {isOpt && <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>exp {p.expiry}</span>}
         </div>
       </div>
+      {editableCell("qty", p.qty,
+        Number(p.qty||0).toLocaleString(undefined,{maximumFractionDigits:6}),
+        isOpt ? "contracts" : isCry ? "units" : "shares")}
+      {editableCell("cost_basis", p.cost_basis,
+        `$${Number(p.cost_basis||0).toLocaleString(undefined,{maximumFractionDigits:0})}`,
+        p.qty ? `@ $${(Number(p.cost_basis||0)/unitDiv).toLocaleString(undefined,{maximumFractionDigits:2})}${isOpt?"/sh":""}` : null)}
       <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }}>${fmtNum(p.spot)}</div>
       <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12 }} title="Today's change">
         {p.day_change==null ? <span style={{ color:C.faint }}>—</span> : (
@@ -2799,7 +2831,8 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
     if (act.data.current?.type==="account") handleAccountReorder(act.data.current.accountId, over.id);
     else movePosition(act.id, over.id);
   };
-  const rowProps = { onOpen, onEdit:(p)=>{ setEditing(p); setShowForm(false); }, onRemove, onPayoff:setPayoff };
+  const rowProps = { onOpen, onEdit:(p)=>{ setEditing(p); setShowForm(false); }, onRemove, onPayoff:setPayoff,
+    onQuickEdit:(id, patch)=>onUpdate(id, patch) };
 
   const Stat = ({ label, value, sub, col }) => (
     <div style={{ flex:"1 1 180px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 18px" }}>

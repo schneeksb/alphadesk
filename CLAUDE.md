@@ -18,8 +18,8 @@ Market Brief). Recommendations are research input, not financial advice.
   Pulse YouTube pipeline), `supabase/*.sql` (schema; run manually in SQL editor).
 
 ## Persistence & auth (CRITICAL rules)
-- Per-user state (positions, watchlist+radar, baselines, profile, screens, briefs) lives in
-  Supabase with RLS (`auth.uid() = user_id`). Frontend also mirrors to localStorage (anonymous/
+- Per-user state (positions, watchlist+radar, baselines, profile, screens, projection
+  scenarios, briefs) lives in Supabase with RLS (`auth.uid() = user_id`). Frontend also mirrors to localStorage (anonymous/
   localhost mode is localStorage-only; auth disabled on localhost).
 - `SUPABASE_SERVICE_ROLE_KEY`: local `.env` + GitHub Actions secrets ONLY. NEVER frontend, NEVER
   the Render web service. Render gets SUPABASE_URL + SUPABASE_ANON_KEY only.
@@ -30,7 +30,11 @@ Market Brief). Recommendations are research input, not financial advice.
 ## Gotchas (learned the hard way)
 - **Yahoo blocks its info/quoteSummary + analyst-estimates APIs from datacenter IPs (Render).**
   Statements + price history still work there. `fundamentals()` derives metrics from statements
-  as fallback; forward-estimate fields are simply absent in prod. Works fully on localhost.
+  as fallback (incl. EV/EBITDA from EV/EBITDA components and forward P/E from trailing EPS ×
+  latest YoY growth); true analyst-estimate bars still need the API. Optional fix: set `YF_PROXY`
+  (residential proxy URL) on Render to route yfinance and restore estimates in prod.
+  The `perf` block (returns/vol/drawdown/beta/div yield) is price-history-only → works everywhere,
+  including for ETFs.
 - YouTube blocks transcript downloads (IP-level) → Market Pulse runs locally, throttled
   (`YT_THROTTLE_S`), merges per-analyst into `market_pulse` (public-read table). Optional proxy:
   `WEBSHARE_USER/PASS` or `YT_PROXY`.

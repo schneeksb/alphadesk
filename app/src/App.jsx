@@ -94,6 +94,24 @@ const saveAccountCollapsed = (m) => { try { localStorage.setItem(ACCT_COLLAPSE_K
 const SCREENS_KEY = "alphadesk:savedScreens";
 const loadSavedScreens = () => { try { return JSON.parse(localStorage.getItem(SCREENS_KEY)) || []; } catch { return []; } };
 const saveSavedScreens = (l) => { try { localStorage.setItem(SCREENS_KEY, JSON.stringify(l)); } catch {} };
+
+// Projection scenarios (4-year model inputs per ticker): one map { ticker: {g,ng,peLo,peHi} }.
+// Migrates the legacy per-ticker alphadesk:proj2:<T> keys written before cloud sync.
+const PROJ_KEY = "alphadesk:projections";
+const loadProjections = () => {
+  try {
+    const m = JSON.parse(localStorage.getItem(PROJ_KEY)) || {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith("alphadesk:proj2:")) continue;
+      const t = k.slice("alphadesk:proj2:".length);
+      if (m[t]) continue;
+      try { const v = JSON.parse(localStorage.getItem(k)); if (v?.ng) m[t] = v; } catch {}
+    }
+    return m;
+  } catch { return {}; }
+};
+const saveProjections = (m) => { try { localStorage.setItem(PROJ_KEY, JSON.stringify(m)); } catch {} };
 const UNASSIGNED = "__unassigned__";
 
 // ── CRYPTO SUPPORT ────────────────────────────────────────────────────
@@ -249,6 +267,25 @@ async function fetchFilings(ticker) {
 }
 async function fetchEarningsPrep(ticker, profile = "") {
   const r = await fetch(`${API}/earnings-prep?ticker=${encodeURIComponent(ticker)}&profile=${encodeURIComponent(profile||"")}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchCompareAI(tickers, profile = "") {
+  const r = await fetch(`${API}/ai-compare?tickers=${encodeURIComponent(tickers.join(","))}&profile=${encodeURIComponent(profile||"")}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchFinancialsReview(ticker, profile = "") {
+  const r = await fetch(`${API}/ai-financials-review?ticker=${encodeURIComponent(ticker)}&profile=${encodeURIComponent(profile||"")}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchProjectionsReview(ticker, projection, implied, profile = "") {
+  const r = await fetch(`${API}/ai-projections-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ ticker, projection, implied, profile }),
+  });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -3834,21 +3871,35 @@ function FairValueModel({ inp }) {
 const CMP_ROWS = [
   {k:"price", label:"Price",        get:d=>d.spot,                         fmt:v=>v==null?"—":`$${v.toFixed(2)}`, best:null},
   {k:"mcap",  label:"Market Cap",   get:d=>d.marketCap,                    fmt:fmtMoney, best:null},
+  {section:"Valuation"},
   {k:"tpe",   label:"TTM P/E",      get:d=>d.valuation?.trailingPE?.value, fmt:fmtX, best:"low",  typical:"20–28x"},
   {k:"fpe",   label:"Forward P/E",  get:d=>d.valuation?.forwardPE?.value,  fmt:fmtX, best:"low",  typical:"18–26x"},
   {k:"fpe2",  label:"2yr Fwd P/E",  get:d=>d.advanced?.fwd2PE,             fmt:fmtX, best:"low",  typical:"16–24x"},
   {k:"peg",   label:"PEG",          get:d=>d.valuation?.peg?.value,        fmt:v=>v==null?"—":v.toFixed(2), best:"low", typical:"1.5–2.5"},
   {k:"ps",    label:"TTM P/S",      get:d=>d.valuation?.ps?.value,         fmt:fmtX, best:"low",  typical:"1.8–2.6x"},
   {k:"ev",    label:"EV/EBITDA",    get:d=>d.valuation?.evEbitda?.value,   fmt:fmtX, best:"low",  typical:"10–16x"},
+  {section:"Growth & profitability"},
   {k:"epsgt", label:"TTM EPS Growth",     get:d=>d.advanced?.epsGrowthTTM,    fmt:fmtPct, best:"high", typical:"8–12%"},
   {k:"epsgn", label:"Next-Yr EPS G. est", get:d=>d.advanced?.epsGrowthNextYr, fmt:fmtPct, best:"high", typical:"8–12%"},
   {k:"revg",  label:"TTM Rev Growth",     get:d=>d.ttm?.revenueGrowth,        fmt:fmtPct, best:"high", typical:"4.5–6.5%"},
   {k:"revgn", label:"Next-Yr Rev G. est", get:d=>d.advanced?.revGrowthNextYr, fmt:fmtPct, best:"high", typical:"4.5–6.5%"},
+  {k:"r40",   label:"Rule of 40",   get:d=>d.advanced?.ruleOf40,           fmt:v=>v==null?"—":v.toFixed(0), best:"high", typical:"40+"},
   {k:"gm",    label:"Gross Margin", get:d=>d.health?.grossMargin,          fmt:fmtPct, best:"high", typical:"40–48%"},
   {k:"nm",    label:"Net Margin",   get:d=>d.health?.netMargin,            fmt:fmtPct, best:"high", typical:"8–10%"},
   {k:"roe",   label:"ROE",          get:d=>d.health?.roe,                  fmt:fmtPct, best:"high", typical:"12–18%"},
   {k:"de",    label:"Debt / Equity",get:d=>d.health?.debtToEquity,         fmt:v=>v==null?"—":v.toFixed(0), best:"low", typical:"<100"},
   {k:"fcf",   label:"Free Cash Flow",get:d=>d.health?.fcf,                 fmt:fmtMoney, best:"high"},
+  // Price-history metrics: filled for EVERYTHING including ETFs, so a stock can
+  // be judged against SPY/XLK on the same yardsticks (returns, risk, income, cost)
+  {section:"Performance & risk — stocks and ETFs"},
+  {k:"ret1y", label:"1Y Return",    get:d=>d.perf?.ret1y,   fmt:fmtPct, best:"high"},
+  {k:"cagr3", label:"3Y CAGR",      get:d=>d.perf?.cagr3y,  fmt:fmtPct, best:"high"},
+  {k:"cagr5", label:"5Y CAGR",      get:d=>d.perf?.cagr5y,  fmt:fmtPct, best:"high"},
+  {k:"vol",   label:"Volatility (1Y)", get:d=>d.perf?.vol1y, fmt:fmtPct, best:"low", typical:"15–25%"},
+  {k:"mdd",   label:"Max Drawdown", get:d=>d.perf?.maxDD5y, fmt:fmtPct, best:"high", typical:"−20–40%"},
+  {k:"beta",  label:"Beta vs SPY",  get:d=>d.perf?.beta,    fmt:v=>v==null?"—":v.toFixed(2), best:null, typical:"1 = market"},
+  {k:"dy",    label:"Dividend Yield", get:d=>d.perf?.divYield, fmt:fmtPct, best:"high"},
+  {k:"er",    label:"Expense Ratio",  get:d=>d.perf?.expenseRatio, fmt:v=>v==null?"—":`${v.toFixed(2)}%`, best:"low", typical:"ETF-only"},
 ];
 
 function CompareTable({ items, onRemove, onOpen }) {
@@ -3879,7 +3930,10 @@ function CompareTable({ items, onRemove, onOpen }) {
           <div style={{ padding:"12px 12px", fontSize:9.5, color:C.faint, letterSpacing:"0.04em", textTransform:"uppercase", textAlign:"right" }}>Many stocks<br/>trade at</div>
         </div>
         {/* rows */}
-        {CMP_ROWS.map(row=>{
+        {CMP_ROWS.map((row, ri)=>{
+          if (row.section) return (
+            <div key={`s${ri}`} style={{ padding:"9px 14px 5px", fontSize:9.5, color:C.faint, letterSpacing:"0.06em", textTransform:"uppercase", fontWeight:700, borderTop:`1px solid ${C.line}`, background:C.panel2 }}>{row.section}</div>
+          );
           const best = bestForRow(row);
           return (
             <div key={row.k} style={{ display:"grid", gridTemplateColumns:gridCols, borderTop:`1px solid ${C.panel2}` }}>
@@ -3903,6 +3957,67 @@ function CompareTable({ items, onRemove, onOpen }) {
   );
 }
 
+// AI head-to-head for the Compare tab: one Claude call ranking the lineup on
+// valuation, growth, quality and risk for THIS trader. Resets on lineup change.
+function CompareAIPanel({ tickers, aiEnabled, profile }) {
+  const [res, setRes] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const key = tickers.join(",");
+  useEffect(()=>{ setRes(null); setLoading(false); },[key]);
+  const run = () => {
+    setLoading(true); setRes(null);
+    fetchCompareAI(tickers, profile).then(setRes).catch(()=>setRes({ ai_error:"request failed" })).finally(()=>setLoading(false));
+  };
+  if (tickers.length < 2) return null;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px", marginTop:12 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:C.ink }}>🤖 AI Head-to-Head <span style={{ fontSize:10.5, color:C.faint, fontWeight:400 }}>· who wins on valuation, growth, quality & risk — for your profile</span></div>
+        {aiEnabled && !loading && (
+          <button onClick={run} style={{ background:C.cold, border:"none", borderRadius:8, padding:"7px 13px", color:"#fff", cursor:"pointer", fontSize:12, fontWeight:600, display:"flex", gap:6, alignItems:"center" }}><Zap size={13}/> {res?"Re-run":"Compare with AI"}</button>
+        )}
+      </div>
+      {!aiEnabled ? (
+        <div style={{ fontSize:11.5, color:C.faint, marginTop:8 }}>Turn on AI Insights in Settings to run the head-to-head.</div>
+      ) : loading ? (
+        <div style={{ padding:"14px 0", color:C.sub, display:"flex", gap:8, alignItems:"center" }}><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> <span style={{ fontSize:12 }}>Comparing {key}…</span></div>
+      ) : res?.ai_error ? (
+        <div style={{ fontSize:12, color:C.amber, marginTop:8 }}>AI error — {String(res.ai_error).slice(0,120)}</div>
+      ) : res ? (
+        <div style={{ marginTop:10, display:"flex", flexDirection:"column", gap:12 }}>
+          {res.headline && <div style={{ fontSize:13.5, fontWeight:700, color:C.ink, lineHeight:1.5 }}>{res.headline}</div>}
+          {(res.takes||[]).length>0 && (
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(210px,1fr))", gap:10 }}>
+              {res.takes.map((tk,i)=>(
+                <div key={i} style={{ background:C.panel2, borderRadius:10, padding:"11px 13px", border: res.winner===tk.ticker ? `1px solid ${C.up}66` : "1px solid transparent" }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ fontWeight:800, fontSize:12.5, color:C.ink }}>{tk.ticker}{res.winner===tk.ticker && <span style={{ color:C.up, fontSize:10, marginLeft:6 }}>★ best fit</span>}</span>
+                    {tk.score!=null && <span style={{ fontFamily:C.mono, fontSize:11.5, fontWeight:800, color:scoreColor(tk.score) }}>{tk.score}/10</span>}
+                  </div>
+                  {tk.role && <div style={{ fontSize:10, color:C.violet, fontWeight:700, marginTop:2, textTransform:"uppercase", letterSpacing:"0.03em" }}>{tk.role}</div>}
+                  <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.55, marginTop:5 }}>{tk.take}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {(res.dimensions||[]).length>0 && (
+            <div>
+              {res.dimensions.map((d,i)=>(
+                <div key={i} style={{ display:"flex", gap:10, padding:"7px 0", borderTop:i?`1px solid ${C.panel2}`:"none" }}>
+                  <span style={{ fontSize:11, fontWeight:700, color:C.cold, minWidth:150 }}>{d.name}</span>
+                  <span style={{ fontSize:11.5, color:C.sub, lineHeight:1.55, flex:1 }}>{d.read}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {res.verdict && <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.6, fontWeight:500, borderLeft:`3px solid ${C.cold}`, paddingLeft:10 }}>{res.verdict}</div>}
+          <div style={{ fontSize:9.5, color:C.faint }}>AI comparison from live market data — research input, not financial advice.</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // ── 1000X-STYLE FINANCIALS SUITE ──────────────────────────────────────
 // Reference ranges: what "many stocks trade at" — the yardstick column.
 const ADV_METRICS = [
@@ -3918,8 +4033,11 @@ const ADV_METRICS = [
   { label:"Gross Margin",           get:f=>f.health?.grossMargin,          fmt:fmtPct, lo:0.40,  hi:0.48,  better:"high" },
   { label:"Net Margin",             get:f=>f.health?.netMargin,            fmt:fmtPct, lo:0.08,  hi:0.10,  better:"high" },
   { label:"TTM P/S",                get:f=>f.valuation?.ps?.value,         fmt:fmtX,   lo:1.8,   hi:2.6,   better:"low"  },
+  { label:"EV/EBITDA",              get:f=>f.valuation?.evEbitda?.value,   fmt:fmtX,   lo:10,    hi:16,    better:"low"  },
+  { label:"Rule of 40",             get:f=>f.advanced?.ruleOf40, fmt:v=>v==null?"—":v.toFixed(0), lo:20, hi:40, better:"high", unit:"" },
 ];
-const typicalTxt = (m) => m.fmt===fmtPct ? `${(m.lo*100).toString().replace(/\.0$/,"")}–${(m.hi*100).toString().replace(/\.0$/,"")}%` : `${m.lo}–${m.hi}x`;
+const typicalTxt = (m) => m.unit!=null ? `${m.lo}–${m.hi}${m.unit}`
+  : m.fmt===fmtPct ? `${(m.lo*100).toString().replace(/\.0$/,"")}–${(m.hi*100).toString().replace(/\.0$/,"")}%` : `${m.lo}–${m.hi}x`;
 const typicalColor = (v, m) => v==null ? C.faint
   : m.better==="low"  ? (v < m.lo ? C.up : v > m.hi ? C.down : C.amber)
   :                     (v > m.hi ? C.up : v < m.lo ? C.down : C.amber);
@@ -3946,7 +4064,9 @@ function AdvancedMetrics({ fund }) {
 // Bar chart with solid actual bars + stacked low/avg/high analyst-estimate bars.
 function FinBarChart({ title, unit="money", past=[], est=[], note }) {
   const [hov, setHov] = useState(null);
-  const fmtV = v => v==null ? "—" : unit==="money" ? fmtMoney(v) : unit==="pct" ? fmtPct(v) : `$${Number(v).toFixed(2)}`;
+  const fmtV = v => v==null ? "—" : unit==="money" ? fmtMoney(v) : unit==="pct" ? fmtPct(v)
+    : unit==="count" ? (Math.abs(v)>=1e9 ? `${(v/1e9).toFixed(2)}B` : `${(v/1e6).toFixed(0)}M`)
+    : `$${Number(v).toFixed(2)}`;
   const all = [...past.map(p=>Math.abs(p.value||0)), ...est.map(e=>Math.abs(e.high ?? e.avg ?? 0))];
   if (!all.length) return null;
   const maxV = Math.max(...all) || 1;
@@ -3967,7 +4087,7 @@ function FinBarChart({ title, unit="money", past=[], est=[], note }) {
           const showLbl = cells.length <= 9;
           const lblTxt = c.kind==="a" ? fmtV(c.value) : fmtV(c.avg);
           const lbl = showLbl && (
-            <div style={{ fontSize:8, fontFamily:C.mono, color:c.kind==="e"?C.amber:C.sub, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", marginBottom:2 }}>{lblTxt}</div>
+            <div style={{ fontSize:8, fontFamily:C.mono, color:c.kind==="e"?C.violet:C.sub, fontWeight:c.kind==="e"?700:400, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", marginBottom:2 }}>{lblTxt}</div>
           );
           return c.kind==="a" ? (
             <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label}: ${fmtV(c.value)}`}
@@ -3980,26 +4100,26 @@ function FinBarChart({ title, unit="money", past=[], est=[], note }) {
             <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label} analyst est: avg ${fmtV(c.avg)} (low ${fmtV(c.low)} · high ${fmtV(c.high)})`}
               style={{ flex:1, minWidth:0, display:"flex", flexDirection:"column", justifyContent:"flex-end", height:"100%", opacity:hov===i?1:0.85, cursor:"default" }}>
               {lbl}
-              <div style={{ height:Math.max(1, hOf(c.high ?? c.avg)-hOf(c.avg)), background:C.up, borderRadius:"3px 3px 0 0" }}/>
-              <div style={{ height:Math.max(1, hOf(c.avg)-hOf(c.low ?? c.avg)), background:C.amber }}/>
-              <div style={{ height:hOf(c.low ?? c.avg), background:`${C.down}cc` }}/>
+              <div style={{ height:Math.max(1, hOf(c.high ?? c.avg)-hOf(c.avg)), background:`${C.violet}38`, borderRadius:"3px 3px 0 0" }}/>
+              <div style={{ height:Math.max(1, hOf(c.avg)-hOf(c.low ?? c.avg)), background:`${C.violet}80` }}/>
+              <div style={{ height:hOf(c.low ?? c.avg), background:C.violet }}/>
             </div>
           );
         })}
       </div>
       <div style={{ display:"flex", gap:2, marginTop:4 }}>
-        {cells.map((c,i)=>(<div key={i} style={{ flex:1, minWidth:0, fontSize:8, color:c.kind==="e"?C.amber:C.faint, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", fontFamily:C.mono }}>{c.label}</div>))}
+        {cells.map((c,i)=>(<div key={i} style={{ flex:1, minWidth:0, fontSize:8, color:c.kind==="e"?C.violet:C.faint, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", fontFamily:C.mono }}>{c.label}</div>))}
       </div>
       {est.length>0 && (
         <div style={{ fontSize:9, color:C.faint, marginTop:6 }}>
-          forward bars = analyst estimates: <span style={{ color:C.down }}>low</span> · <span style={{ color:C.amber }}>avg</span> · <span style={{ color:C.up }}>high</span>
+          <span style={{ color:C.violet, fontWeight:700 }}>purple bars = analyst estimates (projected)</span> — solid to the low, mid to the avg, faint to the high
         </div>
       )}
     </div>
   );
 }
 
-function FinancialsCharts({ ticker }) {
+function FinancialsCharts({ ticker, aiEnabled, profile }) {
   const [d, setD]     = useState(null);
   const [err, setErr] = useState(null);
   const [mode, setMode] = useState("quarterly");
@@ -4037,8 +4157,94 @@ function FinancialsCharts({ ticker }) {
         <FinBarChart title="Free Cash Flow" past={src.fcf}/>
         <FinBarChart title="Diluted EPS"    unit="eps" past={src.eps} est={estEPS}/>
         <FinBarChart title="Gross Margin"   unit="pct" past={src.grossMargin}/>
+        <FinBarChart title="Operating Margin" unit="pct" past={src.operatingMargin} note="(core profitability)"/>
+        <FinBarChart title="Net Margin"     unit="pct" past={src.netMargin}/>
+        <FinBarChart title="Shares Outstanding" unit="count" past={src.shares} note="(down = buybacks, up = dilution)"/>
+        <FinBarChart title="Net Debt"       past={src.netDebt} note="(debt − cash · negative = net cash)"/>
       </div>
       <div style={{ fontSize:10, color:C.faint, marginTop:10 }}>History depth is what Yahoo provides free (~5-6 quarters, 4-5 years). Latest reported bar is outlined.</div>
+      <div style={{ marginTop:14 }}><FinancialsReviewPanel ticker={ticker} aiEnabled={aiEnabled} profile={profile}/></div>
+    </div>
+  );
+}
+
+// AI analyst deep-dive on the statements: what's actually growing (real products/
+// segments, from model knowledge — clearly labeled), margins, cash quality, flags.
+function FinancialsReviewPanel({ ticker, aiEnabled, profile }) {
+  const [res, setRes] = useState(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(()=>{ setRes(null); setLoading(false); },[ticker]);
+  const run = () => {
+    setLoading(true); setRes(null);
+    fetchFinancialsReview(ticker, profile).then(setRes).catch(()=>setRes({ ai_error:"request failed" })).finally(()=>setLoading(false));
+  };
+  const DIR_COL = { growing:C.up, flat:C.amber, declining:C.down };
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:C.ink }}>🔬 AI Analyst Deep-Dive <span style={{ fontSize:10.5, color:C.faint, fontWeight:400 }}>· what's growing, what's fading, and what pros watch</span></div>
+        {aiEnabled && !loading && (
+          <button onClick={run} style={{ background:C.cold, border:"none", borderRadius:8, padding:"7px 13px", color:"#fff", cursor:"pointer", fontSize:12, fontWeight:600, display:"flex", gap:6, alignItems:"center" }}><Zap size={13}/> {res?"Re-run":"Dig into the numbers"}</button>
+        )}
+      </div>
+      {!aiEnabled ? (
+        <div style={{ fontSize:11.5, color:C.faint, marginTop:8 }}>Turn on AI Insights in Settings to run the deep-dive.</div>
+      ) : loading ? (
+        <div style={{ padding:"14px 0", color:C.sub, display:"flex", gap:8, alignItems:"center" }}><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> <span style={{ fontSize:12 }}>Reading {ticker}'s statements like an analyst…</span></div>
+      ) : res?.ai_error ? (
+        <div style={{ fontSize:12, color:C.amber, marginTop:8 }}>AI error — {String(res.ai_error).slice(0,120)}</div>
+      ) : res ? (
+        <div style={{ marginTop:10, display:"flex", flexDirection:"column", gap:12 }}>
+          {res.headline && <div style={{ fontSize:13.5, fontWeight:700, color:C.ink, lineHeight:1.5 }}>{res.headline}</div>}
+          {res.revenue_story && <div style={{ fontSize:12, color:C.sub, lineHeight:1.6 }}>{res.revenue_story}</div>}
+          {(res.segments||[]).length>0 && (
+            <div>
+              <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:6 }}>Products & segments <span style={{ textTransform:"none" }}>(AI knowledge — may lag the latest quarter)</span></div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px,1fr))", gap:8 }}>
+                {res.segments.map((s,i)=>(
+                  <div key={i} style={{ background:C.panel2, borderRadius:10, padding:"10px 12px" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+                      <span style={{ fontSize:12, fontWeight:700, color:C.ink }}>{s.name}</span>
+                      <span style={{ fontSize:9.5, fontWeight:800, color:DIR_COL[s.direction]||C.sub, background:`${DIR_COL[s.direction]||C.sub}14`, borderRadius:5, padding:"2px 7px", textTransform:"uppercase" }}>{s.direction}</span>
+                    </div>
+                    {s.note && <div style={{ fontSize:11, color:C.sub, lineHeight:1.5, marginTop:4 }}>{s.note}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(240px,1fr))", gap:10 }}>
+            {[["Margins", res.margin_story],["Cash flow", res.cash_flow_read],["Balance sheet", res.balance_sheet_read]].map(([t2,txt],i)=> txt ? (
+              <div key={i} style={{ background:C.panel2, borderRadius:10, padding:"11px 13px" }}>
+                <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:4 }}>{t2}</div>
+                <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>{txt}</div>
+              </div>
+            ) : null)}
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(240px,1fr))", gap:10 }}>
+            {(res.green_flags||[]).length>0 && (
+              <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}30`, borderRadius:10, padding:"11px 13px" }}>
+                <div style={{ fontSize:9.5, color:C.up, textTransform:"uppercase", marginBottom:4, fontWeight:700 }}>Green flags</div>
+                {res.green_flags.map((x,i)=><div key={i} style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>• {x}</div>)}
+              </div>
+            )}
+            {(res.red_flags||[]).length>0 && (
+              <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}30`, borderRadius:10, padding:"11px 13px" }}>
+                <div style={{ fontSize:9.5, color:C.down, textTransform:"uppercase", marginBottom:4, fontWeight:700 }}>Red flags</div>
+                {res.red_flags.map((x,i)=><div key={i} style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>• {x}</div>)}
+              </div>
+            )}
+          </div>
+          {(res.analyst_watch||[]).length>0 && (
+            <div>
+              <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:5 }}>What analysts watch next quarter</div>
+              {res.analyst_watch.map((x,i)=><div key={i} style={{ fontSize:12, color:C.sub, lineHeight:1.6 }}>• {x}</div>)}
+            </div>
+          )}
+          {res.bottom_line && <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.6, fontWeight:500, borderLeft:`3px solid ${C.cold}`, paddingLeft:10 }}>{res.bottom_line}</div>}
+          <div style={{ fontSize:9.5, color:C.faint }}>Statement data is live (yfinance); segment detail is AI knowledge and may lag. Not financial advice.</div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -4048,10 +4254,9 @@ function FinancialsCharts({ ticker }) {
 // 1000X-style projection model. Inputs (blue): REV GROWTH, NET INC. GROWTH, and
 // P/E LOW/HIGH per year. Everything else derives: revenue, net income, margins,
 // EPS, share-price low/high, and the CAGR you'd earn reaching each price.
-function ProjectionsTable({ fund }) {
+function ProjectionsTable({ fund, projections, onSave, aiEnabled, profile }) {
   const T = fund?.ticker;
   const spot = fund?.spot, shares = fund?.fairValueInputs?.shares, rev0 = fund?.fairValueInputs?.revenue;
-  const KEY = `alphadesk:proj2:${T}`;
   const clamp = (v,lo,hi)=>Math.max(lo,Math.min(hi,v));
   const nm0 = fund?.fairValueInputs?.netMargin ?? 0.15;
   const ni0 = rev0 != null ? rev0 * nm0 : null;
@@ -4067,10 +4272,13 @@ function ProjectionsTable({ fund }) {
     };
   };
   const [p, setP] = useState(null);
-  useEffect(()=>{ if(!T) return; try { const s = JSON.parse(localStorage.getItem(KEY)||"null"); setP(s?.ng ? s : seed()); } catch { setP(seed()); }
+  // Scenarios live in app-level `projections` state (synced to Supabase + localStorage)
+  useEffect(()=>{ if(!T) return; const s = projections?.[T]; setP(s?.ng ? s : seed());
   // eslint-disable-next-line
   },[T, fund]);
-  useEffect(()=>{ if (p && T) try { localStorage.setItem(KEY, JSON.stringify(p)); } catch {} },[p, T]);
+  useEffect(()=>{ if (p && T && onSave) onSave(T, p);
+  // eslint-disable-next-line
+  },[p, T]);
   if (!fund) return null;
   if (!spot || !shares || !rev0) return <div style={{ padding:30, textAlign:"center", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Not enough data to project {T} (needs price, shares and revenue).</div>;
   if (!p) return null;
@@ -4136,6 +4344,81 @@ function ProjectionsTable({ fund }) {
         </div>
       </div>
       <div style={{ fontSize:10, color:C.faint, marginTop:8 }}>CAGR = the yearly return if the stock reaches that price by that year, from today's ${spot?.toFixed(2)}. Assumes share count stays flat. Personal research input — not financial advice.</div>
+      <div style={{ marginTop:14 }}>
+        <ProjectionsReviewPanel ticker={T} projection={p}
+          implied={yrs.map(y=>({ year:y.year, priceLow:Math.round(y.lo), priceHigh:Math.round(y.hi),
+            cagrLow:y.cagrLo!=null?Math.round(y.cagrLo*100)/100:null, cagrHigh:y.cagrHi!=null?Math.round(y.cagrHi*100)/100:null }))}
+          aiEnabled={aiEnabled} profile={profile}/>
+      </div>
+    </div>
+  );
+}
+
+// AI stress-test of the user's projection assumptions vs analyst consensus,
+// the company's own history, and base rates. Reads the CURRENT blue-cell inputs.
+function ProjectionsReviewPanel({ ticker, projection, implied, aiEnabled, profile }) {
+  const [res, setRes] = useState(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(()=>{ setRes(null); setLoading(false); },[ticker]);
+  const run = () => {
+    setLoading(true); setRes(null);
+    fetchProjectionsReview(ticker, projection, implied, profile).then(setRes).catch(()=>setRes({ ai_error:"request failed" })).finally(()=>setLoading(false));
+  };
+  const PLAUS_COL = { conservative:C.cold, balanced:C.up, aggressive:C.amber };
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:C.ink }}>🧪 AI Analyst Check <span style={{ fontSize:10.5, color:C.faint, fontWeight:400 }}>· stress-tests YOUR assumptions vs consensus & history</span></div>
+        {aiEnabled && !loading && (
+          <button onClick={run} style={{ background:C.cold, border:"none", borderRadius:8, padding:"7px 13px", color:"#fff", cursor:"pointer", fontSize:12, fontWeight:600, display:"flex", gap:6, alignItems:"center" }}><Zap size={13}/> {res?"Re-check current inputs":"Check my assumptions"}</button>
+        )}
+      </div>
+      {!aiEnabled ? (
+        <div style={{ fontSize:11.5, color:C.faint, marginTop:8 }}>Turn on AI Insights in Settings to run the check.</div>
+      ) : loading ? (
+        <div style={{ padding:"14px 0", color:C.sub, display:"flex", gap:8, alignItems:"center" }}><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> <span style={{ fontSize:12 }}>Benchmarking your scenario…</span></div>
+      ) : res?.ai_error ? (
+        <div style={{ fontSize:12, color:C.amber, marginTop:8 }}>AI error — {String(res.ai_error).slice(0,120)}</div>
+      ) : res ? (
+        <div style={{ marginTop:10, display:"flex", flexDirection:"column", gap:12 }}>
+          <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+            {res.plausibility && <span style={{ fontSize:10.5, fontWeight:800, color:PLAUS_COL[res.plausibility]||C.sub, background:`${PLAUS_COL[res.plausibility]||C.sub}14`, borderRadius:6, padding:"3px 10px", textTransform:"uppercase", letterSpacing:"0.04em" }}>{res.plausibility}</span>}
+            {res.headline && <span style={{ fontSize:13, fontWeight:700, color:C.ink, lineHeight:1.5 }}>{res.headline}</span>}
+          </div>
+          {(res.assumption_reads||[]).length>0 && (
+            <div>
+              {res.assumption_reads.map((a,i)=>(
+                <div key={i} style={{ display:"flex", gap:10, padding:"7px 0", borderTop:i?`1px solid ${C.panel2}`:"none" }}>
+                  <span style={{ fontSize:11, fontWeight:700, color:C.cold, minWidth:150, fontFamily:C.mono }}>{a.assumption}</span>
+                  <span style={{ fontSize:11.5, color:C.sub, lineHeight:1.55, flex:1 }}>{a.read}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(240px,1fr))", gap:10 }}>
+            {(res.would_need||[]).length>0 && (
+              <div style={{ background:C.panel2, borderRadius:10, padding:"11px 13px" }}>
+                <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:4 }}>What must go right</div>
+                {res.would_need.map((x,i)=><div key={i} style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>• {x}</div>)}
+              </div>
+            )}
+            {(res.risks||[]).length>0 && (
+              <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}30`, borderRadius:10, padding:"11px 13px" }}>
+                <div style={{ fontSize:9.5, color:C.down, textTransform:"uppercase", marginBottom:4, fontWeight:700 }}>What breaks it</div>
+                {res.risks.map((x,i)=><div key={i} style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>• {x}</div>)}
+              </div>
+            )}
+          </div>
+          {res.more_likely && (
+            <div style={{ background:C.panel2, borderRadius:10, padding:"11px 13px" }}>
+              <div style={{ fontSize:9.5, color:C.faint, textTransform:"uppercase", marginBottom:4 }}>A neutral analyst would pencil in</div>
+              <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>{res.more_likely}</div>
+            </div>
+          )}
+          {res.bottom_line && <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.6, fontWeight:500, borderLeft:`3px solid ${C.cold}`, paddingLeft:10 }}>{res.bottom_line}</div>}
+          <div style={{ fontSize:9.5, color:C.faint }}>Re-run after editing the blue cells — the check reads your current inputs. Not financial advice.</div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -4256,6 +4539,15 @@ const GLOSSARY = [
   ["Analyst estimates (low/avg/high)","The forecast range across Wall Street analysts. A wide range = high disagreement/uncertainty."],
   ["RSI","Momentum, 0–100, over the last 14 bars. Under 30 = oversold, over 70 = overbought."],
   ["CAGR","Compound annual growth rate — the smoothed per-year return between two points in time."],
+  ["Rule of 40","Revenue growth % + FCF margin %. Above 40 = a growth company balancing speed and profitability well; the classic growth-stock health check."],
+  ["Operating margin","% of revenue left after running the business (before interest & tax). The purest read on core profitability."],
+  ["Net debt","Total debt minus cash. Negative = more cash than debt (a fortress balance sheet)."],
+  ["Volatility","How violently the price swings, annualized. 15–25% is typical for a big stock; ETFs run lower via diversification."],
+  ["Max drawdown","The worst peak-to-trough fall over the window. The pain you'd have had to sit through."],
+  ["Beta vs SPY","Sensitivity to the market: 1 = moves with SPY, 2 = twice the swing both ways, <1 = steadier."],
+  ["Dividend yield","Cash paid out per year ÷ price. Computed from actual payouts over the last 12 months."],
+  ["Expense ratio","What an ETF charges per year (e.g. 0.09% for SPY). Stocks have none — a direct cost edge to compare."],
+  ["Derived fallbacks","When Yahoo blocks analyst data (common on the production server), forward P/E and EV/EBITDA are derived from reported statements — trailing EPS grown at the latest yearly rate, and market cap + debt − cash over EBITDA."],
 ];
 function EducationPanel() {
   const [open, setOpen] = useState(false);
@@ -4489,7 +4781,7 @@ function ScreenerPanel({ watchlist, savedScreens, onSaveScreen, onDeleteScreen, 
   );
 }
 
-function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScreens, onSaveScreen, onDeleteScreen, onOpenDetail }) {
+function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScreens, onSaveScreen, onDeleteScreen, onOpenDetail, projections, onSaveProjection }) {
   const [view, setView]   = useState("analyze");   // analyze | compare | screener
   const [ticker, setTicker] = useState(initialTicker || "AAPL");
   const [fund, setFund]   = useState(null);
@@ -4676,8 +4968,12 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
           {cmpList.length===0 ? (
             <div style={{ textAlign:"center", padding:"40px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>Add 2–4 tickers to compare them side by side.</div>
           ) : (
-            <CompareTable items={cmpList.map(tk=>({ ticker:tk, ...(cmp[tk]||{ loading:true, data:null }) }))} onRemove={removeCompare} onOpen={go}/>
+            <>
+              <CompareTable items={cmpList.map(tk=>({ ticker:tk, ...(cmp[tk]||{ loading:true, data:null }) }))} onRemove={removeCompare} onOpen={go}/>
+              <CompareAIPanel tickers={cmpList} aiEnabled={aiEnabled} profile={profile}/>
+            </>
           )}
+          <div style={{ marginTop:16 }}><EducationPanel/></div>
         </div>
       )}
 
@@ -4685,7 +4981,7 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
         <div>
           <div style={{ marginBottom:16 }}>{searchBar(go, "Statements & estimates — e.g. PLTR, MU, SNDK")}</div>
           <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>{displaySym(ticker)} — statements & analyst estimates</div>
-          <FinancialsCharts ticker={ticker}/>
+          <FinancialsCharts ticker={ticker} aiEnabled={aiEnabled} profile={profile}/>
           <div style={{ marginTop:16 }}><EducationPanel/></div>
         </div>
       )}
@@ -4696,7 +4992,7 @@ function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScr
           <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:10 }}>{displaySym(ticker)} — 4-year projection model</div>
           {!fund ? (
             <div style={{ padding:40, textAlign:"center", color:C.sub }}><Loader2 size={18} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:8, fontSize:12 }}>Loading {ticker} fundamentals…</div></div>
-          ) : <ProjectionsTable fund={fund}/>}
+          ) : <ProjectionsTable fund={fund} projections={projections} onSave={onSaveProjection} aiEnabled={aiEnabled} profile={profile}/>}
           <div style={{ marginTop:16 }}><EducationPanel/></div>
         </div>
       )}
@@ -4870,6 +5166,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [accounts, setAccounts]         = useState(loadAccounts);
   const [accountCollapsed, setAccountCollapsed] = useState(loadAccountCollapsed);
   const [savedScreens, setSavedScreens] = useState(loadSavedScreens);
+  const [projections, setProjections]   = useState(loadProjections);
   const [financialsTicker, setFinancialsTicker] = useState(null);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
@@ -4885,6 +5182,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveAccounts(accounts); },[accounts]);
   useEffect(()=>{ saveAccountCollapsed(accountCollapsed); },[accountCollapsed]);
   useEffect(()=>{ saveSavedScreens(savedScreens); },[savedScreens]);
+  useEffect(()=>{ saveProjections(projections); },[projections]);
 
   // Keep-alive: ping the backend every 8 min so Render never cold-starts mid-session
   useEffect(()=>{
@@ -4901,7 +5199,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       sbLoad(userId).then(data=>{
         if (!data) {
           // New user row — push up whatever we have locally
-          sbSave(userId, { positions, watchlist, margin, marginRate, theme, aiEnabled, accounts, accountCollapsed });
+          sbSave(userId, { positions, watchlist, margin, marginRate, theme, aiEnabled, accounts, accountCollapsed, projections });
           return;
         }
         if (data.positions?.length)  setPositions(data.positions);
@@ -4918,6 +5216,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.accounts)             setAccounts(data.accounts);
         if (data.accountCollapsed)     setAccountCollapsed(data.accountCollapsed);
         if (data.savedScreens)         setSavedScreens(data.savedScreens);
+        // merge (cloud wins per ticker) so pre-login local scenarios survive first sync
+        if (data.projections)          setProjections(prev => ({ ...prev, ...data.projections }));
       }).catch(()=>{});
     } else {
       // Anonymous path: fall back to server positions.json + settings.json
@@ -4930,13 +5230,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens };
+  sbState.current = { positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, userId]);
+  },[positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, userId]);
 
   // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
   // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
@@ -5262,7 +5562,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds}/>}
           {tab==="financials" && <FinancialsPage initialTicker={financialsTicker} watchlist={watchlist} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}
-            savedScreens={savedScreens} onSaveScreen={saveScreen} onDeleteScreen={deleteScreen} onOpenDetail={setDetail}/>}
+            savedScreens={savedScreens} onSaveScreen={saveScreen} onDeleteScreen={deleteScreen} onOpenDetail={setDetail}
+            projections={projections} onSaveProjection={(t,params)=>setProjections(m=>({ ...m, [t]:params }))}/>}
           {tab==="brief" && (
             <div>
               {/* Decision first: the agent's brief. Evidence below: the full market intelligence. */}

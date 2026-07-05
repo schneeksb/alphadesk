@@ -25,6 +25,17 @@ for _s in (sys.stdout, sys.stderr):
 
 load_dotenv()
 
+# Yahoo blocks its info/quoteSummary + analyst-estimates APIs from datacenter IPs
+# (Render). Set YF_PROXY (e.g. http://user:pass@p.webshare.io:80) to route yfinance
+# through a residential proxy and restore forward estimates in production. Strictly
+# opt-in: proxies add latency and metered bandwidth, so nothing is auto-detected.
+if os.getenv("YF_PROXY"):
+    try:
+        yf.set_config(proxy=os.getenv("YF_PROXY"))
+        print(f"[yf] routing yfinance through proxy")
+    except Exception as _e:
+        print(f"[yf] proxy config failed: {_e}")
+
 # ── ANALYST PANEL ─────────────────────────────────────────────────────────
 # Ordered by trust weight (1 = highest). Channel IDs are hardcoded defaults;
 # override per-analyst via the env var listed in "env".
@@ -520,6 +531,17 @@ def _stmt_row(df, *names):
     return None
 
 
+def _spy_closes():
+    """SPY daily closes keyed by ISO date — the beta benchmark, cached a day."""
+    def produce():
+        try:
+            h = yf.Ticker("SPY").history(period="2y")["Close"].dropna()
+            return {str(k.date()): float(v) for k, v in h.items()}
+        except Exception:
+            return {}
+    return _cached_swr("spycl", produce, ttl=86400, stale_ttl=604800)
+
+
 def fundamentals(ticker):
     """Full fundamentals + valuation bundle for the Financials page. Free (yfinance)."""
     ticker = ticker.upper().strip()
@@ -699,16 +721,53 @@ def fundamentals(ticker):
             "vs_own": verdict(_num(value), own_avg),
         }
 
+    # ── Forward analyst estimates (avg/low/high per period: 0q,+1q,0y,+1y) ──
+    # Fetched before valuation so forward P/E can fall back to estimate-derived.
+    def _est_dict(df):
+        out = {}
+        try:
+            for period, row in df.iterrows():
+                out[str(period)] = {"avg": _num(row.get("avg")), "low": _num(row.get("low")),
+                                    "high": _num(row.get("high")), "growth": _num(row.get("growth"))}
+        except Exception:
+            pass
+        return out
+    est_rev, est_eps = {}, {}
+    try: est_rev = _est_dict(tk.revenue_estimate)
+    except Exception: pass
+    try: est_eps = _est_dict(tk.earnings_estimate)
+    except Exception: pass
+    eps_1y = (est_eps.get("+1y") or {}).get("avg")
+    eps_0y = (est_eps.get("0y") or {}).get("avg")
+
+    # EBITDA (statement-derived): explicit row first, else operating income + D&A
+    ebitda_ttm = _first(_ttm(qinc, "EBITDA", "Normalized EBITDA"),
+                        _newest(inc, "EBITDA", "Normalized EBITDA"))
+    if ebitda_ttm is None and op_ttm is not None:
+        da_ttm = _first(_ttm(qcf, "Depreciation And Amortization", "Depreciation Amortization Depletion"),
+                        _newest(cf, "Depreciation And Amortization", "Depreciation Amortization Depletion"))
+        if da_ttm is not None:
+            ebitda_ttm = op_ttm + da_ttm
+    mcap_full = _first(_num(info.get("marketCap")), mcap_d)
+    ev_abs = (mcap_full + (debt_d or 0) - (cash_d or 0)) if mcap_full else None
+
     # info first, statement-derived second (production fallback when info is blocked)
     tpe = _first(_num(info.get("trailingPE")),
                  _ratio(spot, eps_ttm) if (eps_ttm and eps_ttm > 0) else None)
-    fpe = _num(info.get("forwardPE"))                       # needs analyst estimates
+    # Forward P/E chain: Yahoo info → analyst curr-yr EPS estimate → trailing EPS
+    # grown at the latest YoY rate (the only option when estimates are blocked)
+    fpe = _first(_num(info.get("forwardPE")),
+                 _ratio(spot, eps_0y) if (eps_0y and eps_0y > 0) else None)
+    g_eps = eps_growth_yoy if eps_growth_yoy is not None else rev_growth_yoy
+    if fpe is None and spot and eps_ttm and eps_ttm > 0 and g_eps is not None and (1 + g_eps) > 0.2:
+        fpe = spot / (eps_ttm * (1 + g_eps))
     peg = _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio"))
     if peg is None and tpe and eps_growth_yoy and eps_growth_yoy > 0:
         peg = tpe / (eps_growth_yoy * 100)
     ps  = _first(_num(info.get("priceToSalesTrailing12Months")), _ratio(mcap_d, rev_ttm))
     pb  = _first(_num(info.get("priceToBook")), _ratio(mcap_d, equity_d))
-    ev  = _num(info.get("enterpriseToEbitda"))
+    ev  = _first(_num(info.get("enterpriseToEbitda")),
+                 _ratio(ev_abs, ebitda_ttm) if (ebitda_ttm and ebitda_ttm > 0) else None)
 
     valuation = {
         "forwardPE": metric(fpe, smed["forwardPE"], None),
@@ -751,27 +810,18 @@ def fundamentals(ticker):
         "netMargin":  _first(_num(info.get("profitMargins")), _ratio(ni_ttm, rev_ttm)),
     }
 
-    # ── Forward analyst estimates (avg/low/high per period: 0q,+1q,0y,+1y) ──
-    # Powers the forward bars on the Financials charts, 2yr-forward P/E, and
-    # the EPS/revenue growth rows in advanced metrics.
-    def _est_dict(df):
-        out = {}
-        try:
-            for period, row in df.iterrows():
-                out[str(period)] = {"avg": _num(row.get("avg")), "low": _num(row.get("low")),
-                                    "high": _num(row.get("high")), "growth": _num(row.get("growth"))}
-        except Exception:
-            pass
-        return out
-    est_rev, est_eps = {}, {}
-    try: est_rev = _est_dict(tk.revenue_estimate)
-    except Exception: pass
-    try: est_eps = _est_dict(tk.earnings_estimate)
-    except Exception: pass
-    eps_1y = (est_eps.get("+1y") or {}).get("avg")
-    eps_0y = (est_eps.get("0y") or {}).get("avg")
+    # 2yr-forward P/E: analyst next-yr EPS → trailing EPS compounded two years
+    fwd2 = (spot / eps_1y) if (spot and eps_1y and eps_1y > 0) else None
+    if fwd2 is None and spot and eps_ttm and eps_ttm > 0 and g_eps is not None and (1 + g_eps) > 0.2:
+        fwd2 = spot / (eps_ttm * (1 + g_eps) ** 2)
+
+    # Rule of 40 (growth stocks): revenue growth % + FCF margin % (op margin fallback)
+    r40_growth = _first(_num(info.get("revenueGrowth")), rev_growth_yoy)
+    r40_margin = _first(_ratio(fcf_ttm, rev_ttm), _ratio(op_ttm, rev_ttm))
+    rule40 = ((r40_growth + r40_margin) * 100) if (r40_growth is not None and r40_margin is not None) else None
+
     advanced = {
-        "fwd2PE":          (spot / eps_1y) if (spot and eps_1y and eps_1y > 0) else None,
+        "fwd2PE":          fwd2,
         "epsGrowthTTM":    _first(_num(info.get("earningsGrowth")), eps_growth_yoy),
         "epsGrowthCurrYr": (est_eps.get("0y") or {}).get("growth"),
         "epsGrowthNextYr": (est_eps.get("+1y") or {}).get("growth"),
@@ -779,7 +829,65 @@ def fundamentals(ticker):
         "revGrowthCurrYr": (est_rev.get("0y") or {}).get("growth"),
         "revGrowthNextYr": (est_rev.get("+1y") or {}).get("growth"),
         "epsCurrYrEst":    eps_0y, "epsNextYrEst": eps_1y,
+        "ruleOf40":        rule40,
     }
+
+    # ── Performance block (price-history derived → works for ETFs too, and in
+    # production where Yahoo blocks the info API). Returns, risk, income, cost.
+    perf = {"quoteType": info.get("quoteType")}
+    try:
+        # 6y so the 5y-CAGR lookback (1260 trading days) actually has data
+        hd = tk.history(period="6y")["Close"].dropna()
+        if len(hd) > 30:
+            last_px = float(hd.iloc[-1])
+            def _cagr_over(years):
+                n = 252 * years
+                if len(hd) <= n:
+                    return None
+                start = float(hd.iloc[-n - 1])
+                return (last_px / start) ** (1 / years) - 1 if start > 0 else None
+            ret1y = None
+            if len(hd) > 252 and float(hd.iloc[-253]) > 0:
+                ret1y = last_px / float(hd.iloc[-253]) - 1
+            rets = hd.pct_change().dropna()
+            vol1y = float(rets.tail(252).std() * np.sqrt(252)) if len(rets) > 60 else None
+            max_dd = float((hd / hd.cummax() - 1).min())
+            beta = None
+            try:
+                spy = _spy_closes()
+                pair = [(float(v), spy[str(ts.date())]) for ts, v in hd.tail(300).items()
+                        if str(ts.date()) in spy]
+                if len(pair) > 60:
+                    a = np.array(pair)
+                    ra = np.diff(a[:, 0]) / a[:-1, 0]
+                    rb = np.diff(a[:, 1]) / a[:-1, 1]
+                    if float(np.var(rb)) > 0:
+                        beta = float(np.cov(ra, rb)[0, 1] / np.var(rb))
+            except Exception:
+                pass
+            # Dividend yield from actual payouts (info's dividendYield changed
+            # units across yfinance versions — payout history is unambiguous)
+            div_yield = None
+            try:
+                dv = tk.dividends
+                if dv is not None and len(dv):
+                    cutoff = dv.index.max() - datetime.timedelta(days=365)
+                    last12 = float(dv[dv.index >= cutoff].sum())
+                    if last_px and last12 > 0:
+                        div_yield = last12 / last_px
+            except Exception:
+                pass
+            if div_yield is None:
+                iy = _num(info.get("dividendYield"))
+                if iy is not None:
+                    div_yield = iy / 100 if iy > 0.25 else iy   # percent-form heuristic
+            perf.update({
+                "ret1y": ret1y, "cagr3y": _cagr_over(3), "cagr5y": _cagr_over(5),
+                "vol1y": vol1y, "maxDD5y": max_dd, "beta": beta, "divYield": div_yield,
+                "expenseRatio": _num(info.get("netExpenseRatio")),   # ETFs; percent units
+            })
+    except Exception:
+        pass
 
     return _json_safe({
         "ticker": ticker,
@@ -812,6 +920,7 @@ def fundamentals(ticker):
         "valuation": valuation,
         "estimates": {"revenue": est_rev, "eps": est_eps},
         "advanced": advanced,
+        "perf": perf,
         "verdict": verdict_line,
         # Base inputs for the editable fair-value model (frontend recomputes live)
         "fairValueInputs": {
@@ -871,6 +980,68 @@ Respond with JSON only, no markdown:
         messages=[{"role": "user", "content": prompt}])
     from scanner import _lenient_json
     return _lenient_json(r.content[0].text)
+
+
+def _ai_json(client, prompt, max_tokens, schema, model="claude-sonnet-4-6"):
+    """Structured-output call via forced tool use with a REAL schema: the API
+    validates the tool input server-side, so the returned dict is guaranteed-parsed
+    JSON — no lenient-parse games with unescaped quotes or missing commas. (An
+    empty {"type":"object"} schema makes the model emit {}, so schemas are required.)
+    One retry for transient errors or empty emissions."""
+    last_err = None
+    for _ in range(2):
+        try:
+            r = client.messages.create(
+                model=model, max_tokens=max_tokens,
+                tools=[{"name": "emit_analysis",
+                        "description": "Emit the final analysis object.",
+                        "input_schema": schema}],
+                tool_choice={"type": "tool", "name": "emit_analysis"},
+                messages=[{"role": "user", "content": prompt}])
+            for block in r.content:
+                if block.type == "tool_use" and isinstance(block.input, dict) and block.input:
+                    return block.input
+            last_err = ValueError(f"no usable tool_use block (stop_reason={r.stop_reason})")
+        except Exception as e:
+            last_err = e
+        print(f"[ai_json] attempt failed: {last_err}")
+    raise last_err
+
+
+def _s(**props):
+    """Tiny schema builder: _s(a='str', b='int') → object schema with required keys."""
+    m = {"str": {"type": "string"}, "int": {"type": "integer"},
+         "strs": {"type": "array", "items": {"type": "string"}}}
+    out = {}
+    for k, v in props.items():
+        out[k] = m[v] if isinstance(v, str) else v
+    return {"type": "object", "properties": out, "required": list(props)}
+
+
+def _arr(item_schema):
+    return {"type": "array", "items": item_schema}
+
+
+_CMP_SCHEMA = _s(
+    headline="str",
+    takes=_arr(_s(ticker="str", role="str", take="str", score="int")),
+    dimensions=_arr(_s(name="str", read="str")),
+    winner="str", verdict="str",
+)
+_FINREV_SCHEMA = _s(
+    headline="str", revenue_story="str",
+    segments=_arr(_s(name="str",
+                     direction={"type": "string", "enum": ["growing", "flat", "declining"]},
+                     note="str")),
+    margin_story="str", cash_flow_read="str", balance_sheet_read="str",
+    red_flags="strs", green_flags="strs", analyst_watch="strs", bottom_line="str",
+)
+_PROJ_SCHEMA = _s(
+    headline="str",
+    plausibility={"type": "string", "enum": ["conservative", "balanced", "aggressive"]},
+    assumption_reads=_arr(_s(assumption="str", read="str")),
+    would_need="strs", risks="strs", more_likely="str", bottom_line="str",
+)
 
 
 # ── STOCK SCREENER (free, yfinance) ───────────────────────────────────────────
@@ -1141,6 +1312,18 @@ def _cached(key, producer):
     _CACHE[key] = (now, val)
     return val
 
+def _cached_ai(key, producer):
+    """_cached, but never stores failed AI results (ai_error) — so Re-run retries
+    instead of replaying a cached failure for 10 minutes."""
+    now = _time.time()
+    hit = _CACHE.get(key)
+    if hit and now - hit[0] < _TTL:
+        return hit[1]
+    val = producer()
+    if not (isinstance(val, dict) and val.get("ai_error")):
+        _CACHE[key] = (now, val)
+    return val
+
 def _cached_swr(key, producer, ttl=600, stale_ttl=7200):
     """Return cached value immediately; refresh in background thread if stale."""
     import threading
@@ -1352,26 +1535,45 @@ try:
                         lbl = (f"Q{col.quarter} '{str(col.year)[2:]}" if per == "Q" else str(col.year))
                         out.append({"label": lbl, "value": v})
                     return [o for o in out if o["value"] is not None]
-                qi, qc = None, None
-                ai_, ac = None, None
+                qi, qc, qb = None, None, None
+                ai_, ac, ab = None, None, None
                 try: qi = tk.quarterly_income_stmt
                 except Exception: pass
                 try: qc = tk.quarterly_cashflow
+                except Exception: pass
+                try: qb = tk.quarterly_balance_sheet
                 except Exception: pass
                 try: ai_ = tk.income_stmt
                 except Exception: pass
                 try: ac = tk.cashflow
                 except Exception: pass
-                def margin_series(df, per="Q"):
-                    rev, gp = rows(df, "Total Revenue"), rows(df, "Gross Profit")
-                    if rev is None or gp is None:
+                try: ab = tk.balance_sheet
+                except Exception: pass
+                def margin_series(df, num_names, per="Q"):
+                    rev, num = rows(df, "Total Revenue"), rows(df, *num_names)
+                    if rev is None or num is None:
                         return []
                     out = []
                     for col in list(df.columns)[::-1]:
-                        r, g = _num(rev[col]), _num(gp[col])
+                        r, g = _num(rev[col]), _num(num[col])
                         if r and g is not None:
                             lbl = (f"Q{col.quarter} '{str(col.year)[2:]}" if per == "Q" else str(col.year))
                             out.append({"label": lbl, "value": g / r})
+                    return out
+                def net_debt_series(df, per="Q"):
+                    debt = rows(df, "Total Debt")
+                    cash = rows(df, "Cash Cash Equivalents And Short Term Investments",
+                                "Cash And Cash Equivalents")
+                    if debt is None and cash is None:
+                        return []
+                    out = []
+                    for col in list(df.columns)[::-1]:
+                        d = _num(debt[col]) if debt is not None else None
+                        c = _num(cash[col]) if cash is not None else None
+                        if d is None and c is None:
+                            continue
+                        lbl = (f"Q{col.quarter} '{str(col.year)[2:]}" if per == "Q" else str(col.year))
+                        out.append({"label": lbl, "value": (d or 0) - (c or 0)})
                     return out
                 def est_block(df):
                     out = {}
@@ -1404,14 +1606,22 @@ try:
                         "netIncome":  series(qi, "Net Income", "Net Income Common Stockholders"),
                         "eps":        series(qi, "Diluted EPS", "Basic EPS"),
                         "fcf":        series(qc, "Free Cash Flow"),
-                        "grossMargin": margin_series(qi),
+                        "grossMargin": margin_series(qi, ("Gross Profit",)),
+                        "operatingMargin": margin_series(qi, ("Operating Income", "Total Operating Income As Reported")),
+                        "netMargin":  margin_series(qi, ("Net Income", "Net Income Common Stockholders")),
+                        "shares":     series(qb, "Ordinary Shares Number", "Share Issued"),
+                        "netDebt":    net_debt_series(qb),
                     },
                     "annual": {
                         "revenue":    series(ai_, "Total Revenue", "Operating Revenue", per="Y"),
                         "netIncome":  series(ai_, "Net Income", "Net Income Common Stockholders", per="Y"),
                         "eps":        series(ai_, "Diluted EPS", "Basic EPS", per="Y"),
                         "fcf":        series(ac, "Free Cash Flow", per="Y"),
-                        "grossMargin": margin_series(ai_, per="Y"),
+                        "grossMargin": margin_series(ai_, ("Gross Profit",), per="Y"),
+                        "operatingMargin": margin_series(ai_, ("Operating Income", "Total Operating Income As Reported"), per="Y"),
+                        "netMargin":  margin_series(ai_, ("Net Income", "Net Income Common Stockholders"), per="Y"),
+                        "shares":     series(ab, "Ordinary Shares Number", "Share Issued", per="Y"),
+                        "netDebt":    net_debt_series(ab, per="Y"),
                     },
                     "estimates": {"revenue": est_rev, "eps": est_eps},
                     "shares": _num(info.get("sharesOutstanding")),
@@ -1577,6 +1787,175 @@ Write an earnings-call prep. Respond with JSON only, no markdown:
             except Exception as e:
                 return {"ticker": t, "ai_error": str(e)}
         return _cached(f"bizq:{t}:{profile}", produce)
+
+    def _cmp_snapshot(t):
+        """Compact per-ticker bundle for the AI compare prompt (nulls left in —
+        the model is told ETFs lack company fundamentals)."""
+        f = _cached_swr(f"fundamentals:{t}", lambda t=t: fundamentals(t), ttl=3600, stale_ttl=21600)
+        v = f.get("valuation") or {}; h = f.get("health") or {}
+        a = f.get("advanced") or {}; p = f.get("perf") or {}
+        def mv(k): return (v.get(k) or {}).get("value")
+        return {
+            "ticker": t, "name": f.get("name"), "sector": f.get("sector"),
+            "type": p.get("quoteType"), "price": f.get("spot"), "market_cap": f.get("marketCap"),
+            "pe_ttm": mv("trailingPE"), "pe_fwd": mv("forwardPE"), "pe_fwd_2yr": a.get("fwd2PE"),
+            "peg": mv("peg"), "ps": mv("ps"), "ev_ebitda": mv("evEbitda"),
+            "rev_growth_ttm": a.get("revGrowthTTM"), "rev_growth_next_yr_est": a.get("revGrowthNextYr"),
+            "eps_growth_next_yr_est": a.get("epsGrowthNextYr"),
+            "gross_margin": h.get("grossMargin"), "net_margin": h.get("netMargin"),
+            "roe": h.get("roe"), "debt_to_equity": h.get("debtToEquity"), "fcf": h.get("fcf"),
+            "rule_of_40": a.get("ruleOf40"), "dilution_pct_over_window": f.get("dilution"),
+            "perf": {k: p.get(k) for k in ("ret1y", "cagr3y", "cagr5y", "vol1y",
+                                           "maxDD5y", "beta", "divYield", "expenseRatio")},
+            "valuation_verdict": f.get("verdict"),
+        }
+
+    @app.get("/ai-compare")
+    def ai_compare_endpoint(tickers: str, profile: str = "", authorization: str = Header(None)):
+        """AI head-to-head across 2-4 tickers/ETFs from the Compare tab. Costs a
+        Claude call — login required."""
+        require_user(authorization)
+        ts = [x.strip().upper() for x in tickers.split(",") if x.strip() and _valid_ticker(x.strip())][:4]
+        if len(ts) < 2:
+            return {"ai_error": "need at least 2 valid tickers"}
+        def produce():
+            try:
+                snaps = [_cmp_snapshot(t) for t in ts]
+                prof_block = _profile_ctx(profile)
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""You are a senior comparative equity analyst. Compare these {len(ts)} instruments
+head-to-head for a personal investor deciding where the next dollar goes. Today's date:
+{datetime.date.today()} (trust the live figures below over your training memory).
+{prof_block}
+DATA (yfinance; null = unavailable. ETFs and index funds have no company fundamentals —
+judge those on performance, risk, cost and diversification instead, and say when a boring
+diversified fund is genuinely the better hold):
+{json.dumps(snaps, indent=None)}
+
+Be concrete and comparative — every sentence should rank or contrast, not describe one name
+in isolation. Respond with JSON only, no markdown:
+{{"headline": "<one line: the essential difference between these choices>",
+"takes": [{{"ticker": "<T>", "role": "<what this is in a portfolio, e.g. 'quality compounder' / 'high-beta growth bet' / 'diversified benchmark'>",
+            "take": "<2 sentences: the case for it AND the catch vs the others>", "score": <1-10 attractiveness at today's price>}}],
+"dimensions": [{{"name": "Valuation", "read": "<who's cheap, who's rich, and whether the premium is deserved>"}},
+               {{"name": "Growth", "read": "<who grows fastest and how durable it looks>"}},
+               {{"name": "Quality & profitability", "read": "<margins, returns on capital, balance sheet>"}},
+               {{"name": "Risk", "read": "<volatility, drawdown, concentration, what breaks each thesis>"}}],
+"winner": "<the single ticker best suited to THIS trader today, or 'split' if roles differ too much>",
+"verdict": "<2-3 sentences: the decision framing — when you'd pick each, and what would change the answer>"}}"""
+                return _json_safe({"tickers": ts, **(_ai_json(client, prompt, 2000, _CMP_SCHEMA) or {})})
+            except Exception as e:
+                return {"ai_error": str(e)}
+        return _cached_ai(f"aicmp:{','.join(ts)}:{profile}", produce)
+
+    @app.get("/ai-financials-review")
+    def ai_financials_review_endpoint(ticker: str, profile: str = "", authorization: str = Header(None)):
+        """AI analyst deep-dive on the statements: what's actually growing (products/
+        services/segments from model knowledge, clearly labeled), margin trajectory,
+        cash quality, and the red flags pros look for. Costs a Claude call."""
+        require_user(authorization)
+        t = ticker.upper().strip()
+        if not _valid_ticker(t): return {"ticker": t, "ai_error": "invalid ticker"}
+        def produce():
+            try:
+                fund = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+                det = financials_detail_endpoint(t)
+                q = det.get("quarterly") or {}
+                h = fund.get("health") or {}; a = fund.get("advanced") or {}
+                def ser(key):
+                    return [{"p": x["label"], "v": x["value"]} for x in (q.get(key) or [])]
+                prof_block = _profile_ctx(profile)
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""You are a sell-side analyst writing an in-depth financial-statement review of
+{fund.get('name')} ({t}) for a personal investor. Today's date: {datetime.date.today()} (trust the live
+figures below over your training memory). Sector: {fund.get('sector')} / {fund.get('industry')}.
+{prof_block}
+QUARTERLY STATEMENT SERIES (yfinance, oldest→newest):
+- Revenue: {ser('revenue')}
+- Net income: {ser('netIncome')}
+- Diluted EPS: {ser('eps')}
+- Free cash flow: {ser('fcf')}
+- Gross margin: {ser('grossMargin')}
+- Operating margin: {ser('operatingMargin')}
+- Net margin: {ser('netMargin')}
+- Shares outstanding: {ser('shares')}
+- Net debt (debt minus cash): {ser('netDebt')}
+TTM CONTEXT: rev growth {a.get('revGrowthTTM')} · gross margin {h.get('grossMargin')} · op margin
+{h.get('operatingMargin')} · net margin {h.get('netMargin')} · ROE {h.get('roe')} · FCF {h.get('fcf')}
+· cash {h.get('totalCash')} vs debt {h.get('totalDebt')} · Rule of 40: {a.get('ruleOf40')}
+ANALYST ESTIMATES (may be empty): revenue {fund.get('estimates', {}).get('revenue')} · EPS {fund.get('estimates', {}).get('eps')}
+
+For the segment/product breakdown, use your knowledge of this company's actual products, services
+and reporting segments (the statement data above is company-wide only). Be specific — name real
+products/segments — and if your segment knowledge may be dated, say so in the note.
+
+Respond with JSON only, no markdown:
+{{"headline": "<one line: the story these statements tell>",
+"revenue_story": "<2-3 sentences: what is driving or dragging the top line>",
+"segments": [{{"name": "<real product/service/segment>", "direction": "growing" | "flat" | "declining",
+               "note": "<1 sentence: why, with numbers where you know them>"}}],
+"margin_story": "<2 sentences: gross vs operating vs net margin trajectory and what it means>",
+"cash_flow_read": "<2 sentences: FCF quality — is net income converting to cash?>",
+"balance_sheet_read": "<1-2 sentences: net debt, dilution/buybacks, staying power>",
+"red_flags": ["<specific warning sign an analyst would flag, or empty list>"],
+"green_flags": ["<specific strength an analyst would highlight>"],
+"analyst_watch": ["<the specific line-items pros will watch next quarter>", "<2>", "<3>"],
+"bottom_line": "<2 sentences: what these financials mean for this trader's decision>"}}"""
+                return _json_safe({"ticker": t, **(_ai_json(client, prompt, 2000, _FINREV_SCHEMA) or {})})
+            except Exception as e:
+                return {"ticker": t, "ai_error": str(e)}
+        return _cached_ai(f"aifin:{t}:{profile}", produce)
+
+    @app.post("/ai-projections-review")
+    def ai_projections_review_endpoint(body: dict = Body(...), authorization: str = Header(None)):
+        """AI critique of the user's 4-year projection scenario vs analyst consensus
+        and the company's own history. Costs a Claude call."""
+        require_user(authorization)
+        t = (body.get("ticker") or "").upper().strip()
+        proj = body.get("projection") or {}
+        implied = body.get("implied") or []
+        profile = body.get("profile") or ""
+        if not _valid_ticker(t): return {"ticker": t, "ai_error": "invalid ticker"}
+        if not proj.get("g"): return {"ticker": t, "ai_error": "no projection inputs"}
+        def produce():
+            try:
+                fund = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+                tr = fund.get("trends") or {}; a = fund.get("advanced") or {}; h = fund.get("health") or {}
+                prof_block = _profile_ctx(profile)
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""You are a valuation analyst stress-testing a personal investor's 4-year projection
+model for {fund.get('name')} ({t}). Today's date: {datetime.date.today()}. Price: {fund.get('spot')}.
+{prof_block}
+THE USER'S ASSUMPTIONS (year 1→4):
+- Revenue growth %: {proj.get('g')}
+- Net income growth %: {proj.get('ng')}
+- Exit P/E low: {proj.get('peLo')} · Exit P/E high: {proj.get('peHi')}
+- Implied share-price outcomes: {json.dumps(implied, indent=None)}
+COMPANY REALITY (yfinance):
+- Revenue by year ({', '.join(fund.get('years', []))}): {tr.get('revenue')}
+- Revenue growth TTM {a.get('revGrowthTTM')} · analyst est curr yr {a.get('revGrowthCurrYr')} · next yr {a.get('revGrowthNextYr')}
+- EPS growth TTM {a.get('epsGrowthTTM')} · analyst est next yr {a.get('epsGrowthNextYr')}
+- Margins: gross {h.get('grossMargin')} · operating {h.get('operatingMargin')} · net {h.get('netMargin')}
+- Valuation today: {fund.get('verdict')} · trailing P/E {(fund.get('valuation') or {}).get('trailingPE', {}).get('value')}
+  · forward P/E {(fund.get('valuation') or {}).get('forwardPE', {}).get('value')} · 5yr P/E band {(fund.get('valuation') or {}).get('trailingPE', {}).get('own_band')}
+
+Judge whether each assumption is conservative, in-line, or aggressive vs analyst consensus, the
+company's own trajectory, and base rates for companies this size (very few sustain >30% growth
+for 4 straight years). If analyst estimates are null, say you're benchmarking against history only.
+
+Respond with JSON only, no markdown:
+{{"headline": "<one line: the overall read on this scenario>",
+"plausibility": "conservative" | "balanced" | "aggressive",
+"assumption_reads": [{{"assumption": "<e.g. 'Rev growth 42%→25%'>", "read": "<1 sentence vs consensus/history/base rates>"}}],
+"would_need": ["<specific thing that must go right for this scenario>", "<2>", "<3>"],
+"risks": ["<what most likely breaks it>", "<2>"],
+"more_likely": "<1-2 sentences: what a neutral analyst would pencil in instead, with rough numbers>",
+"bottom_line": "<2 sentences: how this trader should use (or adjust) this scenario>"}}"""
+                return _json_safe({"ticker": t, **(_ai_json(client, prompt, 1600, _PROJ_SCHEMA) or {})})
+            except Exception as e:
+                return {"ticker": t, "ai_error": str(e)}
+        key = f"aiproj:{t}:{json.dumps(proj, sort_keys=True)}:{profile}"
+        return _cached_ai(key, produce)
 
     @app.get("/screen")
     def screen_endpoint(

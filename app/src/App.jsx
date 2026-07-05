@@ -619,17 +619,24 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
     chartDates = (history_dates || []).slice(-63);
   }
 
-  // Moving-average overlays. Only meaningful on daily-bar ranges; for the sliced
-  // ranges we compute the SMA over the FULL year of history then tail-slice so
-  // the line is continuous (not restarted inside the window). YTD (daily fetch)
-  // computes on its own series. Weekly/intraday ranges (2Y/5Y/1D/1W) are skipped.
-  const dailyBars = rConf?.days != null || range === "ytd";
+  // Moving-average overlays. Daily-bar ranges use true 20/50/200-day SMAs,
+  // computed over the FULL year of history then tail-sliced so the line runs
+  // continuously across the window (YTD computes on its own daily series).
+  // 2Y/5Y use WEEKLY bars, so we draw the classic weekly equivalents instead:
+  // 50-day ≈ 10-week, 200-day ≈ 40-week. Intraday/hourly (1D/1W) are skipped.
+  const dailyBars  = rConf?.days != null || range === "ytd";
+  const weeklyBars = (range === "2y" || range === "5y") && !!extras[range];
   const overlays = dailyBars ? MA_DEFS.filter(m => maOn[m.n]).map(m => {
     const vals = rConf?.days != null
       ? calcSMA(history || [], m.n).slice(-rConf.days)
       : calcSMA(chartData, m.n);
     return { label:m.label, color:m.color, values:vals };
-  }).filter(o => o.values.some(v => v!=null)) : [];
+  }).filter(o => o.values.some(v => v!=null))
+  : weeklyBars ? MA_DEFS.filter(m => m.n !== 20 && maOn[m.n]).map(m => {
+    const wk = m.n === 50 ? 10 : 40;
+    return { label:`${m.label}≈${wk}w`, color:m.color, values: calcSMA(chartData, wk) };
+  }).filter(o => o.values.some(v => v!=null))
+  : [];
 
   const handleRange = async (key) => {
     setRange(key);
@@ -667,17 +674,20 @@ function ChartWithRanges({ ticker, history, history_dates, color, defaultRange="
       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap" }} title={MA_HELP}>
         <span style={{ fontSize:10, color:C.faint, letterSpacing:"0.05em" }}>MA</span>
         {MA_DEFS.map(m => {
-          const on = dailyBars && maOn[m.n];
+          const usable = dailyBars || (weeklyBars && m.n !== 20);   // MA20 has no weekly equivalent worth drawing
+          const on = usable && maOn[m.n];
+          const lbl = weeklyBars && usable ? `${m.label}≈${m.n===50?10:40}w` : m.label;
           return (
-            <button key={m.n} onClick={()=> dailyBars && setMaOn(s=>({ ...s, [m.n]: !s[m.n] }))}
-              disabled={!dailyBars}
+            <button key={m.n} onClick={()=> usable && setMaOn(s=>({ ...s, [m.n]: !s[m.n] }))}
+              disabled={!usable}
               style={{ display:"flex", alignItems:"center", gap:5, background:on?`${m.color}1c`:C.panel, border:`1px solid ${on?m.color:C.line}`,
-                borderRadius:20, padding:"3px 10px", cursor:dailyBars?"pointer":"not-allowed", opacity:dailyBars?1:0.4, fontSize:11, fontWeight:600, color:on?m.color:C.sub }}>
-              <span style={{ width:9, height:2.5, borderRadius:2, background:m.color, display:"inline-block" }}/>{m.label}
+                borderRadius:20, padding:"3px 10px", cursor:usable?"pointer":"not-allowed", opacity:usable?1:0.4, fontSize:11, fontWeight:600, color:on?m.color:C.sub }}>
+              <span style={{ width:9, height:2.5, borderRadius:2, background:m.color, display:"inline-block" }}/>{lbl}
             </button>
           );
         })}
-        {!dailyBars && <span style={{ fontSize:9.5, color:C.faint }}>daily-bar ranges only (1M–1Y, YTD)</span>}
+        {!dailyBars && !weeklyBars && <span style={{ fontSize:9.5, color:C.faint }}>MAs need daily bars (1M–1Y, YTD) or weekly (2Y/5Y)</span>}
+        {weeklyBars && <span style={{ fontSize:9.5, color:C.faint }}>weekly bars — showing the classic 10w/40w equivalents</span>}
         {ma?.trend && ma.trend!=="n/a" && (
           <span style={{ marginLeft:"auto", fontSize:11, fontFamily:C.mono, fontWeight:700,
             color: ma.trend==="uptrend"?C.up : ma.trend==="downtrend"?C.down : C.amber }}>
@@ -978,6 +988,12 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
         const sliceDates = isIntraday
           ? (intraday?.history_dates || [])
           : (d.history_dates || []).slice(-sparkDays);
+        // MA20/MA50 overlays on daily windows — computed over the full year of
+        // history then sliced so the lines run continuously across the window.
+        const cardOverlays = (!isIntraday && (d.history?.length || 0) >= 21) ? [
+          { label:"MA20", color:"#f59e0b", values: calcSMA(d.history, 20).slice(-sparkDays) },
+          ...((d.history.length >= 51) ? [{ label:"MA50", color:"#3b82f6", values: calcSMA(d.history, 50).slice(-sparkDays) }] : []),
+        ].filter(o => o.values.some(v => v != null)) : [];
         // % change over the selected timeframe. 1D uses the server's daily % change
         // (accurate prior-close comparison) rather than first-vs-last intraday bar,
         // since the first 5-min bar isn't necessarily yesterday's close.
@@ -1005,7 +1021,7 @@ function WatchCard({ ticker, onOpen, onRemove, aiEnabled, onData, profile, range
               <Loader2 size={12} style={{ animation:"spin 1s linear infinite" }}/>
             </div>
           ) : (
-            <InteractiveChart data={slice} dates={sliceDates} h={34} color={tfCol} measure={false}/>
+            <InteractiveChart data={slice} dates={sliceDates} h={34} color={tfCol} measure={false} overlays={cardOverlays}/>
           )}
         </div>
         );

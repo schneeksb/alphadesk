@@ -813,7 +813,8 @@ def business_quality(ticker, fund, profile: str = ""):
     prof_line = f"\n{prof_block}\n" if prof_block else ""
     fpe = (v.get("forwardPE") or {}).get("value")
     prompt = f"""You are a long-term business-quality analyst evaluating {fund.get('name')} ({ticker}) as a
-POTENTIAL 3-5 YEAR CORE HOLDING — not a swing trade. Sector: {fund.get('sector')}, {fund.get('industry')}.
+POTENTIAL 3-5 YEAR CORE HOLDING — not a swing trade. Today's date: {datetime.date.today()} (trust the live
+figures below over your training memory). Sector: {fund.get('sector')}, {fund.get('industry')}.
 {prof_line}
 FUNDAMENTALS (yfinance):
 - Revenue trend ({', '.join(fund.get('years',[]))}): {rev_series}
@@ -1028,9 +1029,13 @@ def chat_reply(message, history=None, profile="", portfolio=None, watchlist=None
         data_ctx = "(No specific ticker data resolved for this question — answer from general market knowledge and ask for a ticker if needed.)"
 
     prof_block = _profile_ctx(profile)
+    today = datetime.date.today()
     system = (
         "You are AlphaDesk's research assistant — a sharp, concise markets analyst helping a retail "
         "investor reason about their watchlist, holdings, and specific stocks using the LIVE DATA provided.\n\n"
+        f"TODAY'S DATE: {today.isoformat()} ({today.strftime('%A, %B %d, %Y')}). Your training data predates "
+        "this — for anything after your knowledge cutoff, trust the LIVE DATA numbers in context over your "
+        "memory, and never claim it is an earlier year.\n\n"
         + (prof_block + "\n\n" if prof_block else "")
         + ANALYST_WEIGHT_BLOCK + "\n\n"
         "RULES:\n"
@@ -1437,7 +1442,8 @@ try:
                 h = fund.get("health") or {}
                 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
                 prompt = f"""Explain {fund.get('name') or t} ({t}) to an investor who finds it interesting but
-doesn't know it well yet. Sector: {fund.get('sector')} / {fund.get('industry')}.
+doesn't know it well yet. Today's date: {datetime.date.today()} (trust the live figures below over your
+training memory). Sector: {fund.get('sector')} / {fund.get('industry')}.
 Context: gross margin {h.get('grossMargin')}, net margin {h.get('netMargin')}, TTM revenue growth
 {(fund.get('ttm') or {}).get('revenueGrowth')}, FCF {h.get('fcf')}.
 

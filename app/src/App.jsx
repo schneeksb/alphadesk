@@ -4949,6 +4949,9 @@ const RE_GLOSSARY = [
   ["Break-even occupancy","The % of gross rent you must actually collect to cover operating costs AND the mortgage. Under ~85% leaves a cushion; over 100% means even full occupancy loses money."],
   ["Acquisition Score","0–100 across deal math (60), property quality (25) and risk (15). Transparent weights — 70+ worth pursuing, 45–70 needs negotiation, below 45 walk unless the price moves."],
   ["Risk Watch","Deterministic alerts from YOUR inputs: under-market rent, expiring leases, insurance/tax jumps, thin DSCR, aging roof/HVAC. Update value, market rent and premiums monthly — even Zillow/assessor data lags weeks to months."],
+  ["SBA 504","Owner-occupied commercial financing: bank 1st mortgage (~50%) + fixed-rate SBA/CDC debenture (~40%, fees financed in) + only ~10% down. Your business must occupy ≥51% of the building. Long fixed rate on the CDC piece is the draw."],
+  ["SBA 7(a)","Single SBA-guaranteed note up to ~90% LTV, usually floating (Prime + spread), 25-yr amortization for real estate, guaranty fee (~2–3.5%) financed into the loan. Same ≥51% owner-occupancy rule; more flexible but rate risk is yours."],
+  ["Conventional commercial","20–30% down, 20–25 yr amortization — but the NOTE often matures in 5–10 yrs (balloon/reset), so model refinance risk at today's rates, not the teaser."],
 ];
 
 // Small labeled number input used across all RE calculators.
@@ -4978,16 +4981,50 @@ function REMetric({ label, value, sub, col }) {
 const RE_DEFAULTS = {
   rental:      { price:300000, downPct:20, ratePct:6.5, termYrs:30, closingPct:3, rehab:5000, units:1, rentMo:2200, otherMo:0, vacancyPct:5, taxesYr:3600, insYr:1400, maintPct:5, capexPct:5, mgmtPct:8, utilitiesMo:0, hoaMo:0, apprPct:3, rentGrowthPct:2 },
   multifamily: { price:900000, downPct:25, ratePct:6.75, termYrs:30, closingPct:3, rehab:20000, units:4, rentMo:1400, otherMo:100, vacancyPct:7, taxesYr:9000, insYr:4000, maintPct:6, capexPct:6, mgmtPct:8, utilitiesMo:250, hoaMo:0, apprPct:3, rentGrowthPct:2 },
-  commercial:  { price:1200000, downPct:30, ratePct:7, termYrs:25, closingPct:2.5, rehab:0, units:1, rentMo:8500, otherMo:0, vacancyPct:8, taxesYr:14000, insYr:6000, maintPct:4, capexPct:4, mgmtPct:5, utilitiesMo:0, hoaMo:0, sqft:6000, marketCapPct:7, apprPct:2.5, rentGrowthPct:2 },
+  commercial:  { price:1200000, downPct:30, ratePct:7, termYrs:25, closingPct:2.5, rehab:0, units:1, rentMo:8500, otherMo:0, vacancyPct:8, taxesYr:14000, insYr:6000, maintPct:4, capexPct:4, mgmtPct:5, utilitiesMo:0, hoaMo:0, sqft:6000, marketCapPct:7, apprPct:2.5, rentGrowthPct:2,
+                 loanType:"conventional", bankPct:50, bankRatePct:7, bankAmYrs:25, cdcPct:40, cdcRatePct:6.3, cdcAmYrs:25, sbaFeesPct:2.65, amYrs:25, guarantyFeePct:3 },
   flip:        { price:220000, rehab:60000, arv:380000, months:6, closingPct:2, sellCostPct:8, holdMo:900, financedPct:80, ratePct:11, points:2 },
 };
 const n_ = (v) => { const x=parseFloat(v); return isNaN(x)?0:x; };
 
+// Financing structures. Conventional = simple down/rate/term. SBA 504 = bank 1st
+// (~50%) + fixed-rate CDC debenture (~40%, SBA fees financed into it) + ~10% down.
+// SBA 7(a) = single high-LTV note, guaranty fee financed. Both SBA programs
+// require the owner's business to occupy ≥51% of the building.
+function calcFinancing(i) {
+  const price = n_(i.price);
+  const lt = i.loanType || "conventional";
+  if (lt === "cash")
+    return { lt, down: price, loans: [], pmt: 0 };
+  if (lt === "sba504") {
+    const bank = price * n_(i.bankPct ?? 50) / 100;
+    const cdcBase = price * n_(i.cdcPct ?? 40) / 100;
+    const cdc = cdcBase * (1 + n_(i.sbaFeesPct ?? 2.65) / 100);   // fees financed into the debenture
+    return { lt, down: Math.max(0, price - bank - cdcBase),
+      loans: [
+        { label:"Bank 1st mortgage", amt:bank, rate:n_(i.bankRatePct), amYrs:n_(i.bankAmYrs)||25 },
+        { label:"SBA/CDC debenture (fixed)", amt:cdc, rate:n_(i.cdcRatePct), amYrs:n_(i.cdcAmYrs)||25 },
+      ],
+      pmt: mortgagePmt(bank, n_(i.bankRatePct), n_(i.bankAmYrs)||25)
+         + mortgagePmt(cdc, n_(i.cdcRatePct), n_(i.cdcAmYrs)||25) };
+  }
+  if (lt === "sba7a") {
+    const down = price * n_(i.downPct ?? 10) / 100;
+    const loan = (price - down) * (1 + n_(i.guarantyFeePct ?? 3) / 100);   // guaranty fee financed
+    return { lt, down, loans:[{ label:"SBA 7(a) note", amt:loan, rate:n_(i.ratePct), amYrs:n_(i.amYrs)||25 }],
+      pmt: mortgagePmt(loan, n_(i.ratePct), n_(i.amYrs)||25) };
+  }
+  const down = price * n_(i.downPct) / 100, loan = price - down;
+  return { lt, down, loans:[{ label:"Loan", amt:loan, rate:n_(i.ratePct), amYrs:n_(i.termYrs)||30 }],
+    pmt: mortgagePmt(loan, n_(i.ratePct), n_(i.termYrs)||30) };
+}
+
 // Income-property underwriting (rental / multifamily / commercial).
 function calcIncomeDeal(i, type) {
   const price=n_(i.price), rehab=n_(i.rehab), units=Math.max(1, n_(i.units)||1);
-  const down=price*n_(i.downPct)/100, closing=price*n_(i.closingPct)/100;
-  const loan=price-down, pmt=mortgagePmt(loan, n_(i.ratePct), n_(i.termYrs)||30);
+  const fin=calcFinancing(i);
+  const down=fin.down, closing=price*n_(i.closingPct)/100;
+  const loan=fin.loans.reduce((s,l)=>s+l.amt,0), pmt=fin.pmt;
   const cashIn=down+closing+rehab;
   const rentTotal=(type==="multifamily" ? n_(i.rentMo)*units : n_(i.rentMo));
   const grossMo=rentTotal+n_(i.otherMo);
@@ -5002,9 +5039,9 @@ function calcIncomeDeal(i, type) {
   const basis=price+rehab;
   const cap=basis?noi/basis:null;
   const beOcc=gsi>0?(opex+ads)/gsi:null;   // occupancy needed to break even
-  // 5-yr hold: value appreciates, cash flow grows with rents, loan amortizes.
+  // 5-yr hold: value appreciates, cash flow grows with rents, loans amortize.
   const value5=basis*Math.pow(1+n_(i.apprPct)/100,5);
-  const bal5=loanBalAfter(loan, n_(i.ratePct), n_(i.termYrs)||30, 60);
+  const bal5=fin.loans.reduce((s,l)=>s+loanBalAfter(l.amt, l.rate, l.amYrs, 60), 0);
   let cum=0, cfy=cf;
   for (let y=0;y<5;y++){ cum+=cfy; cfy*=1+n_(i.rentGrowthPct)/100; }
   const equity5=value5-bal5;
@@ -5012,7 +5049,7 @@ function calcIncomeDeal(i, type) {
   const totRet5=cashIn>0?profit5/cashIn:null;
   const ann5=(totRet5!=null && totRet5>-1)?Math.pow(1+totRet5,1/5)-1:null;
   return {
-    loan, pmt, ads, cashIn, gsi, egi, opex, noi, cf, cfMo:cf/12, cap, beOcc,
+    loan, pmt, ads, cashIn, gsi, egi, opex, noi, cf, cfMo:cf/12, cap, beOcc, fin,
     coc: cashIn>0?cf/cashIn:null,
     dscr: ads>0?noi/ads:null,
     grm: gsi>0?price/gsi:null,
@@ -5181,10 +5218,35 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
   const [inp, setInp] = useState(RE_DEFAULTS.rental);
   const [dealName, setDealName] = useState("");
   const [q, setQ] = useState(RE_QUALITY_DEFAULT);
+  const [addr, setAddr] = useState("");
+  const [looking, setLooking] = useState(false);
+  const [look, setLook] = useState(null);
   const pick = (t) => { memory.current[type]=inp; setType(t); setInp(memory.current[t] || RE_DEFAULTS[t]); };
   const set = (k) => (v) => setInp(s=>({ ...s, [k]: v }));
   const setQk = (k) => (v) => setQ(s=>({ ...s, [k]: v }));
   const isFlip = type==="flip";
+  // Address auto-fill: price ← value estimate, plus rent/taxes/insurance (and for
+  // commercial: sqft + the submarket cap rate). Every field stays editable.
+  const autoFill = () => {
+    const a = addr.trim();
+    if (a.length < 8) { setLook({ ai_error:"enter the full address (street, city, state)" }); return; }
+    setLooking(true); setLook(null);
+    fetchREPropertyLookup(a, type).then(d=>{
+      if (d.ai_error) { setLook(d); return; }
+      setInp(s=>({ ...s,
+        price:  d.value  != null ? Math.round(d.value)  : s.price,
+        ...(type!=="flip" ? {
+          rentMo:  d.rentMo  != null ? Math.round(d.rentMo)  : s.rentMo,
+          taxesYr: d.taxesYr != null ? Math.round(d.taxesYr) : s.taxesYr,
+          insYr:   d.insYr   != null ? Math.round(d.insYr)   : s.insYr,
+        } : {}),
+        ...(type==="commercial" && d.marketCapPct != null ? { marketCapPct: Math.round(d.marketCapPct*10)/10 } : {}),
+        ...(type==="commercial" && d.sqft != null ? { sqft: d.sqft } : {}),
+      }));
+      setLook(d);
+      setDealName(prev=>prev||a);
+    }).catch(e=>setLook({ ai_error:String(e.message||e) })).finally(()=>setLooking(false));
+  };
   const m = isFlip ? calcFlipDeal(inp) : calcIncomeDeal(inp, type);
   const v = reBuyVerdict(type, m);
   const score = acquisitionScore(type, m, q);
@@ -5197,11 +5259,38 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
   const inGrid = { display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(118px, 1fr))", gap:10 };
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-      <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, width:"fit-content", flexWrap:"wrap" }}>
-        {RE_TYPES.map(([id,lab])=>(
-          <button key={id} onClick={()=>pick(id)} style={{ padding:"7px 14px", borderRadius:7, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:600, background:type===id?C.line:"transparent", color:type===id?C.ink:C.sub }}>{lab}</button>
-        ))}
+      <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+        <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexWrap:"wrap" }}>
+          {RE_TYPES.map(([id,lab])=>(
+            <button key={id} onClick={()=>pick(id)} style={{ padding:"7px 14px", borderRadius:7, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:600, background:type===id?C.line:"transparent", color:type===id?C.ink:C.sub }}>{lab}</button>
+          ))}
+        </div>
+        <input value={addr} onChange={e=>setAddr(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") autoFill(); }}
+          placeholder="Address — auto-fill price, rent, taxes, cap rate…"
+          style={{ flex:"1 1 240px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:9, padding:"8px 12px", color:C.ink, fontSize:12.5, outline:"none" }}/>
+        <button onClick={autoFill} disabled={looking}
+          style={{ background:C.cold, border:"none", borderRadius:9, padding:"8px 13px", color:"#fff", cursor:"pointer", fontSize:12, fontWeight:600, display:"flex", gap:6, alignItems:"center", opacity:looking?0.7:1 }}>
+          {looking ? <Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> : <Zap size={13}/>} Auto-fill
+        </button>
       </div>
+      {look && (look.ai_error ? (
+        <div style={{ fontSize:11.5, color:C.amber }}>Lookup failed — {String(look.ai_error).slice(0,140)}</div>
+      ) : (
+        <div style={{ background: look.source==="rentcast" ? `${C.up}0c` : `${C.amber}0c`,
+          border:`1px solid ${look.source==="rentcast" ? C.up : C.amber}30`, borderRadius:10, padding:"9px 12px" }}>
+          <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.55 }}>
+            <b style={{ color: look.source==="rentcast" ? C.up : C.amber }}>
+              {look.source==="rentcast" ? "✓ RentCast AVM (live data)" : `✨ AI estimate (${look.confidence||"medium"} confidence) — verify before you underwrite on it`}
+            </b>
+            {" · "}value {fmt$(look.value)}{look.valueLow!=null && ` (${fmt$(look.valueLow)}–${fmt$(look.valueHigh)})`}
+            {" · "}rent {fmt$(look.rentMo)}/mo{look.rentMoLow!=null && ` (${fmt$(look.rentMoLow)}–${fmt$(look.rentMoHigh)})`}
+            {look.taxesYr!=null && ` · taxes ${fmt$(look.taxesYr)}/yr`}{look.insYr!=null && ` · ins ${fmt$(look.insYr)}/yr`}
+            {look.marketCapPct!=null && ` · market cap ~${look.marketCapPct}%`}
+            {look.sqft!=null && ` · ${look.sqft.toLocaleString()}sf`}
+          </div>
+          {look.note && <div style={{ fontSize:10.5, color:C.sub, marginTop:4, lineHeight:1.5 }}>{look.note}</div>}
+        </div>
+      ))}
 
       {/* Inputs */}
       <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>
@@ -5223,9 +5312,28 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
           <>
             <div style={inGrid}>
               <REIn label="Purchase price" prefix="$" value={inp.price} onChange={set("price")}/>
-              <REIn label="Down payment" suffix="%" value={inp.downPct} onChange={set("downPct")}/>
-              <REIn label="Rate" suffix="%" value={inp.ratePct} onChange={set("ratePct")}/>
-              <REIn label="Term" suffix="yrs" value={inp.termYrs} onChange={set("termYrs")}/>
+              {type==="commercial" && <RESel label="Financing" value={inp.loanType||"conventional"} onChange={set("loanType")}
+                options={[["conventional","Conventional"],["sba504","SBA 504 (50/40/10)"],["sba7a","SBA 7(a)"],["cash","All cash"]]}/>}
+              {(type!=="commercial" || (inp.loanType||"conventional")==="conventional") && (<>
+                <REIn label="Down payment" suffix="%" value={inp.downPct} onChange={set("downPct")}/>
+                <REIn label="Rate" suffix="%" value={inp.ratePct} onChange={set("ratePct")}/>
+                <REIn label="Term / amortization" suffix="yrs" value={inp.termYrs} onChange={set("termYrs")}/>
+              </>)}
+              {type==="commercial" && inp.loanType==="sba504" && (<>
+                <REIn label="Bank 1st" suffix="%" value={inp.bankPct} onChange={set("bankPct")}/>
+                <REIn label="Bank rate" suffix="%" value={inp.bankRatePct} onChange={set("bankRatePct")}/>
+                <REIn label="Bank amortization" suffix="yrs" value={inp.bankAmYrs} onChange={set("bankAmYrs")}/>
+                <REIn label="CDC 2nd" suffix="%" value={inp.cdcPct} onChange={set("cdcPct")}/>
+                <REIn label="CDC rate (fixed)" suffix="%" value={inp.cdcRatePct} onChange={set("cdcRatePct")}/>
+                <REIn label="CDC amortization" suffix="yrs" value={inp.cdcAmYrs} onChange={set("cdcAmYrs")}/>
+                <REIn label="SBA fees (financed)" suffix="%" value={inp.sbaFeesPct} onChange={set("sbaFeesPct")}/>
+              </>)}
+              {type==="commercial" && inp.loanType==="sba7a" && (<>
+                <REIn label="Down payment" suffix="%" value={inp.downPct} onChange={set("downPct")}/>
+                <REIn label="Rate (Prime + spread)" suffix="%" value={inp.ratePct} onChange={set("ratePct")}/>
+                <REIn label="Amortization" suffix="yrs" value={inp.amYrs} onChange={set("amYrs")}/>
+                <REIn label="Guaranty fee (financed)" suffix="%" value={inp.guarantyFeePct} onChange={set("guarantyFeePct")}/>
+              </>)}
               <REIn label="Closing costs" suffix="%" value={inp.closingPct} onChange={set("closingPct")}/>
               <REIn label="Rehab / make-ready" prefix="$" value={inp.rehab} onChange={set("rehab")}/>
               {type==="multifamily" && <REIn label="Units" value={inp.units} onChange={set("units")}/>}
@@ -5246,9 +5354,36 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
               <REIn label="Rent growth / yr" suffix="%" value={inp.rentGrowthPct} onChange={set("rentGrowthPct")}/>
               {type==="commercial" && <REIn label="Market cap rate" suffix="%" value={inp.marketCapPct} onChange={set("marketCapPct")}/>}
             </div>
+            {type==="commercial" && (inp.loanType==="sba504" || inp.loanType==="sba7a") && (
+              <div style={{ fontSize:11, color:C.amber, marginTop:10, lineHeight:1.5 }}>
+                ⚠️ SBA {inp.loanType==="sba504"?"504":"7(a)"} is for <b>owner-occupied</b> commercial real estate — your business must occupy ≥51% of the building (and 504 adds job-creation/net-worth criteria). Pure investment property doesn't qualify; use Conventional for that.
+              </div>
+            )}
           </>
         )}
       </div>
+
+      {/* Financing structure (commercial) — the tranches behind the P&I number */}
+      {!isFlip && type==="commercial" && m.fin.loans.length>0 && (
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"13px 16px" }}>
+          <div style={{ fontSize:11, fontWeight:700, color:C.ink, marginBottom:7 }}>Financing structure
+            <span style={{ fontSize:9.5, color:C.faint, fontWeight:400 }}> · {{conventional:"conventional commercial", sba504:"SBA 504 — bank 1st + fixed CDC debenture + 10% down", sba7a:"SBA 7(a) — single note, guaranty fee financed", cash:"all cash"}[inp.loanType||"conventional"]}</span>
+          </div>
+          {m.fin.loans.map((l,i)=>(
+            <div key={i} style={{ display:"flex", gap:10, alignItems:"baseline", padding:"5px 0", borderTop:i?`1px solid ${C.panel2}`:"none", fontFamily:C.mono, fontSize:11.5, flexWrap:"wrap" }}>
+              <span style={{ color:C.sub, fontFamily:"inherit", minWidth:170 }}>{l.label}</span>
+              <span style={{ color:C.ink, fontWeight:700 }}>{fmt$(l.amt)}</span>
+              <span style={{ color:C.faint }}>@ {l.rate}% / {l.amYrs} yrs</span>
+              <span style={{ color:C.cold, marginLeft:"auto" }}>{fmt$(mortgagePmt(l.amt, l.rate, l.amYrs))}/mo</span>
+            </div>
+          ))}
+          <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginTop:8, paddingTop:8, borderTop:`1px solid ${C.panel2}`, fontSize:11, color:C.sub }}>
+            <span>Down: <b style={{ color:C.ink, fontFamily:C.mono }}>{fmt$(m.fin.down)}</b> ({n_(inp.price)>0?((m.fin.down/n_(inp.price))*100).toFixed(0):"—"}%)</span>
+            <span>Total P&I: <b style={{ color:C.ink, fontFamily:C.mono }}>{fmt$(m.pmt)}/mo</b></span>
+            <span>Effective LTV: <b style={{ color:C.ink, fontFamily:C.mono }}>{n_(inp.price)>0?((m.loan/n_(inp.price))*100).toFixed(0):"—"}%</b></span>
+          </div>
+        </div>
+      )}
 
       {/* Property quality & risk checklist → feeds the Acquisition Score + AI review */}
       <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px" }}>

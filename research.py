@@ -1046,6 +1046,7 @@ _RELOOK_SCHEMA = _s(
     value="num", valueLow="num", valueHigh="num",
     rentMo="num", rentMoLow="num", rentMoHigh="num",
     taxesYr="num", insYr="num",
+    marketCapPct="num",
     confidence={"type": "string", "enum": ["low", "medium", "high"]},
     note="str",
 )
@@ -2209,13 +2210,21 @@ PROPERTY TYPE: {ptype}
 Today's date: {datetime.date.today()} — your area knowledge may lag ~a year; adjust modestly for
 typical price/rent drift since then.
 
+For COMMERCIAL / OFFICE / RETAIL property types: rentMo is the realistic TOTAL monthly rent for the
+building or unit — derive it from the submarket's typical $/SF/yr for that asset class times a
+plausible size (state the size you assumed in the note), and remember office rents in many submarkets
+softened materially post-2020. For residential, rentMo is the whole-property monthly rent.
+
 Emit via the tool:
 - value / valueLow / valueHigh: current market value estimate ($, range wide enough to be honest)
-- rentMo / rentMoLow / rentMoHigh: market rent per month
+- rentMo / rentMoLow / rentMoHigh: market rent per month (see rules above)
 - taxesYr: annual property tax = your value estimate × that county's effective rate
-- insYr: typical annual landlord policy for that state and value (higher for coastal/wind/flood states)
+- insYr: typical annual landlord/commercial-property policy for that state and value
+- marketCapPct: the prevailing market cap rate (as a percent, e.g. 7.5) for THIS property type in
+  this submarket today — for residential use the local small-rental cap norm
 - confidence: high only for well-known metros you know well; low for rural or ambiguous addresses
-- note: one sentence — what drove the estimate and the single most important thing to verify locally"""
+- note: one sentence — what drove the estimate (incl. any size/$-per-SF assumption) and the single
+  most important thing to verify locally"""
                 out = _ai_json(client, prompt, 800, _RELOOK_SCHEMA) or {}
                 return _json_safe({"address": address, "source": "ai", **out})
             except Exception as e:

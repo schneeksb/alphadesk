@@ -280,8 +280,64 @@ def technicals(ticker):
     }
 
 
+# Static analysis framework — identical for every ticker, so it lives in the
+# system block WITH prompt caching: when the watchlist loads 9 cards in a burst,
+# the first call writes this ~1.3k-token prefix to Anthropic's cache and the
+# rest read it at 10% of the input price.
+_ANALYSIS_SYSTEM = f"""You are a panel of elite investors producing a 30-day stage read on one stock.
+
+Think like: Stan Druckenmiller (macro/liquidity cycles), Phil Fisher (business quality), Howard Marks (cycle awareness), a seasoned options trader (Greeks/timing).
+
+{ANALYST_WEIGHT_BLOCK}
+
+Analyze through FOUR LENSES in this priority order:
+1. MACRO CYCLE — where are we in the rate/liquidity cycle? Does the macro environment favor or hurt this sector and stock right now?
+2. SECTOR ROTATION — is institutional money flowing into or out of this sector? Is relative strength vs. SPY improving or deteriorating?
+3. COMPANY QUALITY — is the business getting stronger (accelerating earnings/margins) or weaker?
+4. OPTIONS TIMING — what are the provided IV and put/call figures revealing about smart money positioning?
+
+Weight macro and sector factors FIRST. Technicals signal entry/exit timing, not the primary thesis.
+
+ASSIGN ONE STAGE that best describes where this stock is RIGHT NOW in its cycle:
+  Breakout — clearing resistance with volume, momentum building, likely continuation
+  Trending — established uptrend, healthy pullbacks, buyers in control
+  Coiling — wedging/consolidating near a key level, big directional move imminent
+  Oversold Bounce — hit major support or oversold extreme, selling exhausted, mean reversion likely
+  Resistance Test — approaching major ceiling, breakout-or-rejection decision point
+  Running Out of Steam — momentum fading, distribution signs, rally may be ending
+  Deteriorating — lower highs and lows forming, sellers gaining control
+  Collapsing — aggressive selling/breakdown, avoid or consider short
+
+CONVICTION for the next 30 days (be honest — most stocks are Watch and Wait):
+  Strong Setup — clear directional edge with specific catalyst, act now
+  Watch and Wait — mixed or unclear signals, let price confirm direction first
+  Risky Setup — risk outweighs reward, protect capital
+
+REASON: one line in an experienced trader's voice — the specific technical situation or catalyst defining this moment and the likely 30-day outcome. Never vague both-sides filler.
+
+If HEADLINES are provided, score each REAL headline as given — never invent news.
+
+JSON ONLY — no markdown, no code fences:
+{{
+  "stage": "Breakout"|"Trending"|"Coiling"|"Oversold Bounce"|"Resistance Test"|"Running Out of Steam"|"Deteriorating"|"Collapsing",
+  "conviction": "Strong Setup"|"Watch and Wait"|"Risky Setup",
+  "reason": "<one specific trader-voice line>",
+  "signal": "hot"|"cold"|"neutral",
+  "outlook_30d": "<2-3 sentences: forward 30-day outlook, specific and directional>",
+  "catalysts": ["<specific upside event>", "<second>"],
+  "risks": ["<specific 30-day risk>", "<second>"],
+  "options_read": "<2 sentences on what the provided IV + P/C say about positioning>",
+  "news_scores": [{{"score":<0-10>,"sentiment":"bullish"|"bearish"|"neutral"}}],
+  "trade_levels": {{"entry":<price>,"target":<30-day target>,"stop":<stop>,"risk_reward":"<e.g. 1:2.5>"}},
+  "play": null | {{"direction":"CALL"|"PUT","strike":<near ATM>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est float>,"conviction":"HIGH"|"MEDIUM"|"LOW","thesis":"<1 sentence>"}}
+}}
+news_scores must align 1:1 with the numbered HEADLINES (empty list if none). PLAY only on genuine asymmetric edge — otherwise null."""
+
+
 def ai_analysis_and_news(ticker, tech, profile: str = ""):
-    """Stage-based 30-day forward outlook: where is this stock in its current cycle?"""
+    """Stage-based 30-day forward outlook: where is this stock in its current cycle?
+    Static framework is prompt-cached (system); only per-ticker data is fresh input.
+    Scores REAL Yahoo headlines rather than generating any."""
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     earn_ctx = f"in {tech['daysToEarn']}d ({tech['fundamentals']['nextEarnings']})" if tech.get('daysToEarn') is not None else f"unknown ({tech['fundamentals']['nextEarnings']})"
@@ -299,70 +355,35 @@ def ai_analysis_and_news(ticker, tech, profile: str = ""):
         analyst_ctx = f"\nAnalyst consensus: {a.get('recKey','?')} · {a.get('count','?')} analysts · mean target ${a['targetMean']:.2f} ({upside:+.1f}% from here)"
     profile_block = _profile_ctx(profile)
     profile_intro = f"\n{profile_block}\n" if profile_block else ""
+    ma = tech.get("ma") or {}
+    headlines = (tech.get("yahoo_news") or [])[:3]
+    news_ctx = ""
+    if headlines:
+        news_ctx = "\nHEADLINES (score each, in order):\n" + "\n".join(
+            f"{i+1}. {n.get('headline','')}" for i, n in enumerate(headlines))
 
-    prompt = f"""You are a panel of elite investors analyzing {ticker} ({tech['name']}) as of {datetime.date.today()}.
-
-Think like: Stan Druckenmiller (macro/liquidity cycles), Phil Fisher (business quality), Howard Marks (cycle awareness), a seasoned options trader (Greeks/timing).
-
-{ANALYST_WEIGHT_BLOCK}
-
-Analyze through FOUR LENSES in this priority order:
-1. MACRO CYCLE — where are we in the rate/liquidity cycle? Does the macro environment favor or hurt this sector and stock right now?
-2. SECTOR ROTATION — is institutional money flowing into or out of {tech['sector']}? Is relative strength vs. SPY improving or deteriorating?
-3. COMPANY QUALITY — is the business getting stronger (accelerating earnings/margins) or weaker? What does the fundamental trajectory say?
-4. OPTIONS TIMING — what is IV {tech.get('iv','?')}% + P/C {pc} revealing about smart money positioning? Is the options market pricing too much or too little risk?
-
-Weight macro and sector factors FIRST. Technicals signal entry/exit timing, not the primary thesis.
+    prompt = f"""Analyze {ticker} ({tech['name']}) as of {datetime.date.today()}.
 
 MARKET DATA:
 Price: ${spot} ({tech['chg']:+.1f}% today) | RSI {tech['rsi']} | {w52_ctx}
+Trend: {ma.get('trend','?')} | vs 50d {ma.get('vs50','?')}% | vs 200d {ma.get('vs200','?')}% | cross: {ma.get('cross') or 'none'}
 Options: IV {tech.get('iv','?')}% | {pc_ctx} | Rel Vol {tech.get('relVol','?')}×
 Fundamentals: P/E {tech['fundamentals']['pe']} | Rev Growth {tech['fundamentals']['revGrowth']} | Margin {tech['fundamentals']['grossMargin']} | Sector: {tech['sector']}
 Earnings: {earn_ctx}{analyst_ctx}
-{profile_intro}
-ASSIGN ONE STAGE that best describes where this stock is RIGHT NOW in its cycle:
-  Breakout — clearing resistance with volume, momentum building, likely continuation
-  Trending — established uptrend, healthy pullbacks, buyers in control
-  Coiling — wedging/consolidating near a key level, big directional move imminent
-  Oversold Bounce — hit major support or oversold extreme, selling exhausted, mean reversion likely
-  Resistance Test — approaching major ceiling, breakout-or-rejection decision point
-  Running Out of Steam — momentum fading, distribution signs, rally may be ending
-  Deteriorating — lower highs and lows forming, sellers gaining control
-  Collapsing — aggressive selling/breakdown, avoid or consider short
+{profile_intro}{news_ctx}"""
 
-CONVICTION for the next 30 days (be honest — most stocks are Watch and Wait):
-  Strong Setup — clear directional edge with specific catalyst, act now
-  Watch and Wait — mixed or unclear signals, let price confirm direction first
-  Risky Setup — risk outweighs reward, protect capital
-
-REASON: one line written like an experienced trader talking — name the specific technical situation or catalyst defining this moment and what likely happens next 30 days.
-  Good: "Wedging above 200-day MA with earnings catalyst in 18 days — coil resolves on print."
-  Good: "Failed breakout on earnings gap-down, now retesting critical $180 support with declining volume."
-  Bad: "Stock is at a key level and could go up or down."
-
-JSON ONLY — no markdown, no code fences:
-{{
-  "stage": "Breakout"|"Trending"|"Coiling"|"Oversold Bounce"|"Resistance Test"|"Running Out of Steam"|"Deteriorating"|"Collapsing",
-  "conviction": "Strong Setup"|"Watch and Wait"|"Risky Setup",
-  "reason": "<one specific trader-voice line: current technical situation + 30-day likely outcome>",
-  "signal": "hot"|"cold"|"neutral",
-  "outlook_30d": "<2-3 sentences: forward 30-day outlook, specific and directional, not hedged>",
-  "catalysts": ["<specific named event that could push price UP>", "<second catalyst>"],
-  "risks": ["<specific named risk in next 30 days>", "<second risk>"],
-  "options_read": "<2 sentences: what IV {tech['iv']}% + P/C {pc} says about smart money positioning>",
-  "news": [
-    {{"score":<0-10>,"sentiment":"bullish"|"bearish"|"neutral","headline":"<specific plausible recent headline>","source":"<e.g. Bloomberg>","time":"<e.g. 2h ago>"}}
-  ],
-  "trade_levels": {{"entry":<current spot or best entry price>,"target":<30-day price target>,"stop":<stop loss price>,"risk_reward":"<e.g. 1:2.5>"}},
-  "play": null | {{"direction":"CALL"|"PUT","strike":<near ATM>,"expiry":"YYYY-MM-DD","dte":<int>,"premium":<est float>,"conviction":"HIGH"|"MEDIUM"|"LOW","thesis":"<1 sentence: structure rationale>"}}
-}}
-
-Exactly 3 news items. PLAY only if genuine asymmetric edge — otherwise null."""
-
-    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1700,
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1100,
+        system=[{"type": "text", "text": _ANALYSIS_SYSTEM, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": prompt}])
     from scanner import _lenient_json
-    return _lenient_json(r.content[0].text)
+    data = _lenient_json(r.content[0].text) or {}
+    # Merge model scores back onto the REAL headlines (never invented ones)
+    scores = data.pop("news_scores", []) or []
+    data["news"] = [
+        {**headlines[i], "score": s.get("score"), "sentiment": s.get("sentiment", "neutral")}
+        for i, s in enumerate(scores) if i < len(headlines)
+    ]
+    return data
 
 
 def _json_safe(o):
@@ -448,7 +469,12 @@ def research(ticker, ai=False, profile: str = ""):
                 "news": [], "play": None, "ai_error": "ai_disabled"}
         return _json_safe({"ticker": ticker, **tech, **stub})
     try:
-        ai_data = ai_analysis_and_news(ticker, tech, profile)
+        # The AI stage read gets its OWN 30-min cache, decoupled from the 10-min
+        # technicals cache: prices stay fresh while the Claude call re-bills at
+        # most twice an hour per ticker+profile instead of six times.
+        ai_data = _cached_swr(f"aian:{ticker}:{profile}",
+                              lambda: ai_analysis_and_news(ticker, tech, profile),
+                              ttl=1800, stale_ttl=7200)
     except Exception as e:
         ai_data = {"score": None, "signal": "neutral", "summary": None,
                    "news": [], "play": None, "ai_error": str(e)}
@@ -1051,12 +1077,17 @@ def chat_reply(message, history=None, profile="", portfolio=None, watchlist=None
         "\"This is analysis to inform your own decision — not personalized financial advice.\"\n"
     )
     msgs = []
-    for h in (history or [])[-8:]:
+    # Keep the last 6 turns, each capped — old full-length replies were costing
+    # ~2-3k input tokens per message sent.
+    for h in (history or [])[-6:]:
         role = h.get("role"); content = (h.get("content") or "").strip()
         if role in ("user","assistant") and content:
-            msgs.append({"role": role, "content": content})
+            msgs.append({"role": role, "content": content[:1200]})
     msgs.append({"role": "user", "content": f"{data_ctx}\n\nQUESTION: {message}"})
-    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=900, system=system, messages=msgs)
+    # System block is identical across every turn of a conversation → prompt-cache it.
+    r = client.messages.create(model="claude-sonnet-4-6", max_tokens=900,
+        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        messages=msgs)
     return {"reply": r.content[0].text, "tickers": tickers}
 
 

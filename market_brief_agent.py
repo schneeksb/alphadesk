@@ -299,11 +299,32 @@ def run_market_brief(positions=None, analytics=None, conviction=None, radar=None
     tool_log, brief = [], None
     turns_used = 0
 
+    # Prompt caching: the tools schema + system prompt (~3k tokens) are identical
+    # every turn, and each turn replays the whole growing conversation. Marking
+    # the last tool and the newest message as cache breakpoints means turn N
+    # reads everything from turn N-1 at 10% of the input price instead of full.
+    cached_tools = [dict(t) for t in TOOLS]
+    cached_tools[-1]["cache_control"] = {"type": "ephemeral"}
+    cached_system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    def _mark_newest(msgs):
+        # move the rolling breakpoint to the final content block of the last message
+        for m in msgs:
+            c = m.get("content")
+            if isinstance(c, list):
+                for b in c:
+                    if isinstance(b, dict): b.pop("cache_control", None)
+        last = msgs[-1]
+        if isinstance(last.get("content"), str):
+            last["content"] = [{"type": "text", "text": last["content"]}]
+        if isinstance(last.get("content"), list) and last["content"] and isinstance(last["content"][-1], dict):
+            last["content"][-1]["cache_control"] = {"type": "ephemeral"}
+
     for turn in range(MAX_TURNS):
         turns_used = turn + 1
         force_submit = (turn == MAX_TURNS - 1)   # last turn: no more investigating
+        _mark_newest(messages)
         resp = client.messages.create(
-            model=MODEL, max_tokens=4096, system=system, tools=TOOLS,
+            model=MODEL, max_tokens=4096, system=cached_system, tools=cached_tools,
             tool_choice=({"type": "tool", "name": "submit_brief"} if force_submit else {"type": "auto"}),
             messages=messages,
         )

@@ -1042,6 +1042,16 @@ _PROJ_SCHEMA = _s(
     assumption_reads=_arr(_s(assumption="str", read="str")),
     would_need="strs", risks="strs", more_likely="str", bottom_line="str",
 )
+_RE_SCHEMA = _s(
+    headline="str",
+    verdict={"type": "string", "enum": ["strong", "workable", "weak"]},
+    score="int",
+    metric_reads=_arr(_s(metric="str", read="str")),
+    strengths="strs", risks="strs",
+    actions="strs",
+    verify_locally="strs",
+    bottom_line="str",
+)
 
 
 # ── STOCK SCREENER (free, yfinance) ───────────────────────────────────────────
@@ -2069,6 +2079,61 @@ Respond with JSON only, no markdown:
             except Exception as e:
                 return {"ticker": t, "ai_error": str(e)}
         key = f"aiproj:{t}:{json.dumps(proj, sort_keys=True)}:{profile}"
+        return _cached_ai(key, produce)
+
+    @app.post("/ai-re-review")
+    def ai_re_review_endpoint(body: dict = Body(...), authorization: str = Header(None)):
+        """AI underwriter review for the Real Estate command center. Takes the user's
+        deal inputs + the frontend's computed metrics (mode: buy / sell / operate,
+        dealType: rental / multifamily / flip / commercial) and returns a structured
+        second opinion. No live property data — the numbers are the user's own; the
+        model grades them against underwriting norms. Costs a Claude call."""
+        require_user(authorization)
+        mode = (body.get("mode") or "buy").lower()
+        deal_type = (body.get("dealType") or "rental").lower()
+        inputs = body.get("inputs") or {}
+        computed = body.get("computed") or {}
+        profile = body.get("profile") or ""
+        if mode not in ("buy", "sell", "operate"):
+            return {"ai_error": "invalid mode"}
+        def produce():
+            try:
+                prof_block = _profile_ctx(profile)
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                role = {
+                    "buy":     f"underwriting a {deal_type.upper()} ACQUISITION",
+                    "sell":    "advising on a SELL-vs-KEEP decision for a currently-owned property",
+                    "operate": "reviewing the operating performance of a currently-owned rental portfolio/property",
+                }[mode]
+                prompt = f"""You are a veteran real-estate investor and underwriter {role}. Today's date:
+{datetime.date.today()}. The investor entered their own numbers into a deal calculator; grade the deal
+against real underwriting norms (cash-on-cash, DSCR, cap rate vs asset class and rate environment,
+the 1% rule for rentals, the 70% rule and annualized ROI for flips, expense ratios, exit costs and
+depreciation recapture for sales). Be direct — this is a personal research tool, not marketing.
+{prof_block}
+DEAL TYPE: {deal_type} · ANALYSIS MODE: {mode}
+USER INPUTS: {json.dumps(inputs, indent=None)}
+CALCULATOR OUTPUTS: {json.dumps(computed, indent=None)}
+
+Sanity-check the INPUTS too — flag anything that looks optimistic (rents above market norms for the
+price point, thin vacancy/maintenance/capex reserves, missing line items, an ARV that assumes a
+perfect comp). If a critical number is missing or zero, say what it does to the analysis.
+
+Respond via the tool with:
+- headline: one line, the essential read
+- verdict: strong | workable | weak
+- score: 1-10 deal quality for THIS investor
+- metric_reads: 3-6 entries — the key metrics with a one-sentence grade each (e.g. "CoC 9.1%": "...")
+- strengths: what genuinely works
+- risks: what most likely hurts them, including input optimism
+- actions: concrete next moves — negotiation levers, structure changes, value-adds, or listing steps
+- verify_locally: the numbers they must verify in their actual market before acting (rents, taxes,
+  insurance quotes, comps, permit costs...)
+- bottom_line: 2 sentences, the decision framing"""
+                return _json_safe(_ai_json(client, prompt, 1600, _RE_SCHEMA) or {})
+            except Exception as e:
+                return {"ai_error": str(e)}
+        key = f"aire:{mode}:{deal_type}:{json.dumps(inputs, sort_keys=True)}:{json.dumps(computed, sort_keys=True)}:{profile}"
         return _cached_ai(key, produce)
 
     @app.get("/screen")

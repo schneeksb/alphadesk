@@ -1,8 +1,10 @@
 # AlphaDesk — personal stock-research app (decision-first)
 
-One user (Google login required in prod). Four core pages: Watchlist (Conviction/Radar tiers),
-Portfolio, Financials (analyze/statements/compare/projections/filings), Brief (agentic morning
-Market Brief). Recommendations are research input, not financial advice.
+One user (Google login required in prod). Core pages: Watchlist (Conviction/Radar tiers),
+Portfolio, Real Estate (buy underwriting for rental/multifamily/flip/commercial + operating
+dashboard + sell-vs-keep — all calculator-driven from user inputs, no market API), Financials
+(analyze/statements/compare/projections/filings), Brief (agentic morning Market Brief).
+Recommendations are research input, not financial advice.
 
 ## Architecture
 - **Backend**: `research.py` — FastAPI app AND the whole data layer (yfinance). All endpoints
@@ -19,7 +21,7 @@ Market Brief). Recommendations are research input, not financial advice.
 
 ## Persistence & auth (CRITICAL rules)
 - Per-user state (positions, watchlist+radar, baselines, profile, screens, projection
-  scenarios, briefs) lives in Supabase with RLS (`auth.uid() = user_id`). Frontend also mirrors to localStorage (anonymous/
+  scenarios, RE properties+deals, briefs) lives in Supabase with RLS (`auth.uid() = user_id`). Frontend also mirrors to localStorage (anonymous/
   localhost mode is localStorage-only; auth disabled on localhost).
 - `SUPABASE_SERVICE_ROLE_KEY`: local `.env` + GitHub Actions secrets ONLY. NEVER frontend, NEVER
   the Render web service. Render gets SUPABASE_URL + SUPABASE_ANON_KEY only.

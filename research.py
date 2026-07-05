@@ -1010,7 +1010,7 @@ def _ai_json(client, prompt, max_tokens, schema, model="claude-sonnet-4-6"):
 
 def _s(**props):
     """Tiny schema builder: _s(a='str', b='int') → object schema with required keys."""
-    m = {"str": {"type": "string"}, "int": {"type": "integer"},
+    m = {"str": {"type": "string"}, "int": {"type": "integer"}, "num": {"type": "number"},
          "strs": {"type": "array", "items": {"type": "string"}}}
     out = {}
     for k, v in props.items():
@@ -1357,6 +1357,32 @@ def _valid_ticker(t):
     it ever reaches an outbound request."""
     import re
     return bool(t) and bool(re.fullmatch(r"[A-Za-z0-9.\-=^:]{1,15}", t))
+
+
+def _next_periods(last_label, mode, n=2):
+    """Given the newest reported period label from financials-detail, return the
+    next N future period labels. Annual: '2025' → ['2026','2027']. Quarterly:
+    "Q1 '26" → ["Q2 '26","Q3 '26"] (wraps the year after Q4)."""
+    import re
+    out = []
+    if not last_label:
+        return out
+    if mode == "annual":
+        m = re.match(r"(\d{4})", str(last_label))
+        if not m:
+            return out
+        y = int(m.group(1))
+        return [str(y + i) for i in range(1, n + 1)]
+    m = re.match(r"Q(\d)\s*'(\d{2})", str(last_label))
+    if not m:
+        return out
+    q, yy = int(m.group(1)), int(m.group(2))
+    for _ in range(n):
+        q += 1
+        if q > 4:
+            q, yy = 1, (yy + 1) % 100
+        out.append(f"Q{q} '{yy:02d}")
+    return out
 
 
 def _recommend(score, pnl_pct, dte, conviction=None):
@@ -1905,6 +1931,94 @@ Respond with JSON only, no markdown:
             except Exception as e:
                 return {"ticker": t, "ai_error": str(e)}
         return _cached_ai(f"aifin:{t}:{profile}", produce)
+
+    # Statement metrics we forecast, with the label + units hint fed to the model.
+    _FCST_METRICS = [
+        ("revenue",         "Revenue (raw dollars, same scale as history)"),
+        ("netIncome",       "Net income (raw dollars; can be negative)"),
+        ("fcf",             "Free cash flow (raw dollars; can be negative)"),
+        ("eps",             "Diluted EPS (dollars per share)"),
+        ("grossMargin",     "Gross margin (FRACTION, e.g. 0.42 = 42%)"),
+        ("operatingMargin", "Operating margin (FRACTION)"),
+        ("netMargin",       "Net margin (FRACTION)"),
+        ("shares",          "Shares outstanding (same scale/units as history)"),
+        ("netDebt",         "Net debt = total debt − cash (raw dollars; negative = net cash)"),
+    ]
+
+    @app.get("/ai-financials-forecast")
+    def ai_financials_forecast_endpoint(ticker: str, mode: str = "annual", authorization: str = Header(None)):
+        """AI best-estimate forward projections for each statement metric, grounded in
+        the reported history. Fills the forward bars on the Financials charts EVERYWHERE
+        — including production, where Yahoo blocks the real analyst-estimate API. Clearly
+        labeled as AI-generated. Costs a Claude call — login required."""
+        require_user(authorization)
+        t = ticker.upper().strip()
+        mode = "quarterly" if mode == "quarterly" else "annual"
+        if not _valid_ticker(t): return {"ticker": t, "ai_error": "invalid ticker"}
+        def produce():
+            try:
+                det = financials_detail_endpoint(t)
+                src = det.get(mode) or {}
+                if det.get("error"):
+                    return {"ticker": t, "ai_error": det["error"]}
+                # Anchor the future labels to the newest reported period we have.
+                anchor = None
+                for key in ("revenue", "netIncome", "eps"):
+                    s = src.get(key) or []
+                    if s:
+                        anchor = s[-1].get("label"); break
+                periods = _next_periods(anchor, mode, 2)
+                if not periods:
+                    return {"ticker": t, "ai_error": "not enough reported history to forecast"}
+                available = [(k, hint) for k, hint in _FCST_METRICS if src.get(k)]
+                if not available:
+                    return {"ticker": t, "ai_error": "no statement series available"}
+
+                fund = _cached_swr(f"fundamentals:{t}", lambda: fundamentals(t), ttl=3600, stale_ttl=21600)
+                a = fund.get("advanced") or {}; h = fund.get("health") or {}
+                est = fund.get("estimates") or {}
+                def recent(key, n=8):
+                    return [{"p": x["label"], "v": x["value"]} for x in (src.get(key) or [])[-n:]]
+                hist_lines = "\n".join(f"- {hint.split(' (')[0]}: {recent(k)}" for k, hint in available)
+                units_lines = "\n".join(f"  {k}: {hint}" for k, hint in available)
+
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""You are a financial forecasting analyst. Produce your BEST-ESTIMATE forecast of
+{fund.get('name')} ({t})'s {mode} statement metrics for the next {len(periods)} reporting periods,
+in this exact order: {periods}. Today's date: {datetime.date.today()} — trust the reported figures
+below over your training memory.
+
+REPORTED HISTORY ({mode}, oldest→newest):
+{hist_lines}
+GROWTH & MARGIN CONTEXT (yfinance): revenue growth TTM {a.get('revGrowthTTM')}, analyst est current-yr
+{a.get('revGrowthCurrYr')}, next-yr {a.get('revGrowthNextYr')}; EPS growth TTM {a.get('epsGrowthTTM')},
+analyst next-yr {a.get('epsGrowthNextYr')}; current gross {h.get('grossMargin')} / operating
+{h.get('operatingMargin')} / net {h.get('netMargin')} margin. Analyst revenue estimates: {est.get('revenue')}.
+Analyst EPS estimates: {est.get('eps')}.
+
+For EACH metric emit an array with exactly {len(periods)} objects — one per future period, in the SAME
+ORDER as {periods}. Each object: {{"low","avg","high"}} where avg is your single best estimate and
+low/high bound a plausible range. UNITS (match the history exactly — do not rescale):
+{units_lines}
+Ground each path in the recent trend, {"quarter-over-quarter seasonality, " if mode=="quarterly" else ""}analyst
+growth rates where given, and mean-reversion of margins. Be realistic, not promotional — very few
+companies sustain >30% growth for multiple periods. Also return "notes": 2-4 short bullets stating the
+key assumptions and the biggest risk to the forecast."""
+
+                schema = {"type": "object",
+                          "properties": {k: _arr(_s(low="num", avg="num", high="num")) for k, _ in available},
+                          "required": [k for k, _ in available]}
+                schema["properties"]["notes"] = {"type": "array", "items": {"type": "string"}}
+                out = _ai_json(client, prompt, 1600, schema) or {}
+                # Attach the period label to each item so the frontend needn't re-align.
+                for k, _ in available:
+                    for i, item in enumerate(out.get(k) or []):
+                        if isinstance(item, dict) and i < len(periods):
+                            item["label"] = periods[i]
+                return _json_safe({"ticker": t, "mode": mode, "periods": periods, **out})
+            except Exception as e:
+                return {"ticker": t, "ai_error": str(e)}
+        return _cached_ai(f"aifcst:{t}:{mode}", produce)
 
     @app.post("/ai-projections-review")
     def ai_projections_review_endpoint(body: dict = Body(...), authorization: str = Header(None)):

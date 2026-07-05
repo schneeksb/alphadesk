@@ -280,6 +280,11 @@ async function fetchFinancialsReview(ticker, profile = "") {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchFinancialsForecast(ticker, mode = "annual") {
+  const r = await fetch(`${API}/ai-financials-forecast?ticker=${encodeURIComponent(ticker)}&mode=${encodeURIComponent(mode)}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchProjectionsReview(ticker, projection, implied, profile = "") {
   const r = await fetch(`${API}/ai-projections-review`, {
     method: "POST",
@@ -4095,12 +4100,18 @@ function AdvancedMetrics({ fund }) {
 }
 
 // Bar chart with solid actual bars + stacked low/avg/high analyst-estimate bars.
-function FinBarChart({ title, unit="money", past=[], est=[], note }) {
+// past = reported bars (blue). est = forward bars, rendered in `estColor` and
+// labeled by `estSource` — violet for real analyst estimates, amber for the AI
+// forecast. Est bars stack low/avg/high when all positive & ordered (the clean
+// range look); otherwise they fall back to a single avg bar colored by sign, so
+// negatives (net debt / losses) render correctly.
+function FinBarChart({ title, unit="money", past=[], est=[], note, estColor=C.violet, estSource="analyst estimates" }) {
   const [hov, setHov] = useState(null);
   const fmtV = v => v==null ? "—" : unit==="money" ? fmtMoney(v) : unit==="pct" ? fmtPct(v)
     : unit==="count" ? (Math.abs(v)>=1e9 ? `${(v/1e9).toFixed(2)}B` : `${(v/1e6).toFixed(0)}M`)
     : `$${Number(v).toFixed(2)}`;
-  const all = [...past.map(p=>Math.abs(p.value||0)), ...est.map(e=>Math.abs(e.high ?? e.avg ?? 0))];
+  const emag = e => Math.max(Math.abs(e.low??0), Math.abs(e.avg??0), Math.abs(e.high??0));
+  const all = [...past.map(p=>Math.abs(p.value||0)), ...est.map(emag)];
   if (!all.length) return null;
   const maxV = Math.max(...all) || 1;
   const H = 140;
@@ -4109,6 +4120,7 @@ function FinBarChart({ title, unit="money", past=[], est=[], note }) {
   const hovTxt = hov==null ? null : cells[hov].kind==="a"
     ? `${cells[hov].label}: ${fmtV(cells[hov].value)}`
     : `${cells[hov].label}: avg ${fmtV(cells[hov].avg)} (${fmtV(cells[hov].low)}–${fmtV(cells[hov].high)})`;
+  const EC = estColor;
   return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"13px 15px", minWidth:0 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:8, marginBottom:8, flexWrap:"wrap" }}>
@@ -4120,32 +4132,40 @@ function FinBarChart({ title, unit="money", past=[], est=[], note }) {
           const showLbl = cells.length <= 9;
           const lblTxt = c.kind==="a" ? fmtV(c.value) : fmtV(c.avg);
           const lbl = showLbl && (
-            <div style={{ fontSize:8, fontFamily:C.mono, color:c.kind==="e"?C.violet:C.sub, fontWeight:c.kind==="e"?700:400, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", marginBottom:2 }}>{lblTxt}</div>
+            <div style={{ fontSize:8, fontFamily:C.mono, color:c.kind==="e"?EC:C.sub, fontWeight:c.kind==="e"?700:400, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", marginBottom:2 }}>{lblTxt}</div>
           );
-          return c.kind==="a" ? (
+          if (c.kind==="a") return (
             <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label}: ${fmtV(c.value)}`}
               style={{ flex:1, minWidth:0, display:"flex", flexDirection:"column", justifyContent:"flex-end", height:"100%", cursor:"default" }}>
               {lbl}
               <div style={{ height:hOf(c.value), background:(c.value||0)<0?C.down:C.cold, opacity:hov===i?1:0.82,
                 borderRadius:"3px 3px 0 0", outline: i===past.length-1 ? `1.5px solid ${C.ink}` : "none" }}/>
             </div>
-          ) : (
-            <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label} analyst est: avg ${fmtV(c.avg)} (low ${fmtV(c.low)} · high ${fmtV(c.high)})`}
+          );
+          const lo=c.low??c.avg, hi=c.high??c.avg, av=c.avg;
+          const ordered = lo>=0 && av>=0 && hi>=0 && hi>=av && av>=lo;
+          return (
+            <div key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} title={`${c.label} — ${estSource}: avg ${fmtV(av)} (low ${fmtV(c.low)} · high ${fmtV(c.high)})`}
               style={{ flex:1, minWidth:0, display:"flex", flexDirection:"column", justifyContent:"flex-end", height:"100%", opacity:hov===i?1:0.85, cursor:"default" }}>
               {lbl}
-              <div style={{ height:Math.max(1, hOf(c.high ?? c.avg)-hOf(c.avg)), background:`${C.violet}38`, borderRadius:"3px 3px 0 0" }}/>
-              <div style={{ height:Math.max(1, hOf(c.avg)-hOf(c.low ?? c.avg)), background:`${C.violet}80` }}/>
-              <div style={{ height:hOf(c.low ?? c.avg), background:C.violet }}/>
+              {ordered ? (<>
+                <div style={{ height:Math.max(1, hOf(hi)-hOf(av)), background:`${EC}38`, borderRadius:"3px 3px 0 0" }}/>
+                <div style={{ height:Math.max(1, hOf(av)-hOf(lo)), background:`${EC}80` }}/>
+                <div style={{ height:hOf(lo), background:EC }}/>
+              </>) : (
+                <div style={{ height:hOf(av), background:(av||0)<0?C.down:EC, opacity:0.9, borderRadius:"3px 3px 0 0",
+                  border:`1px dashed ${(av||0)<0?C.down:EC}` }}/>
+              )}
             </div>
           );
         })}
       </div>
       <div style={{ display:"flex", gap:2, marginTop:4 }}>
-        {cells.map((c,i)=>(<div key={i} style={{ flex:1, minWidth:0, fontSize:8, color:c.kind==="e"?C.violet:C.faint, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", fontFamily:C.mono }}>{c.label}</div>))}
+        {cells.map((c,i)=>(<div key={i} style={{ flex:1, minWidth:0, fontSize:8, color:c.kind==="e"?EC:C.faint, textAlign:"center", whiteSpace:"nowrap", overflow:"hidden", fontFamily:C.mono }}>{c.label}</div>))}
       </div>
       {est.length>0 && (
         <div style={{ fontSize:9, color:C.faint, marginTop:6 }}>
-          <span style={{ color:C.violet, fontWeight:700 }}>purple bars = analyst estimates (projected)</span> — solid to the low, mid to the avg, faint to the high
+          <span style={{ color:EC, fontWeight:700 }}>{estSource} (projected)</span> — bar = best estimate, shaded band = low–high range
         </div>
       )}
     </div>
@@ -4156,14 +4176,38 @@ function FinancialsCharts({ ticker, aiEnabled, profile }) {
   const [d, setD]     = useState(null);
   const [err, setErr] = useState(null);
   const [mode, setMode] = useState("quarterly");
+  // AI forecast: best-estimate forward bars for every metric. Keyed by mode so
+  // switching Quarterly/Annual keeps whichever it already fetched. showAI toggles
+  // whether the forward bars are shown (and triggers the fetch on demand).
+  const [showAI, setShowAI]     = useState(false);
+  const [fc, setFc]             = useState({});    // { annual:{...}, quarterly:{...} }
+  const [fcLoading, setFcLoading] = useState(false);
+  const [fcErr, setFcErr]       = useState(null);
   useEffect(()=>{
-    let alive = true; setD(null); setErr(null);
+    let alive = true; setD(null); setErr(null); setFc({}); setShowAI(false); setFcErr(null);
     fetchFinancialsDetail(ticker).then(x=>{ if(alive){ x.error?setErr(x.error):setD(x); } }).catch(e=>alive&&setErr(e.message));
     return ()=>{ alive=false; };
   },[ticker]);
+  useEffect(()=>{
+    if (!showAI || fc[mode] || fcLoading) return;
+    let alive = true; setFcLoading(true); setFcErr(null);
+    fetchFinancialsForecast(ticker, mode)
+      .then(r=>{ if(!alive) return; if(r.ai_error) setFcErr(r.ai_error); else setFc(f=>({ ...f, [mode]:r })); })
+      .catch(e=>alive&&setFcErr(e.message))
+      .finally(()=>alive&&setFcLoading(false));
+    return ()=>{ alive=false; };
+  },[showAI, mode, ticker, fc, fcLoading]);
   if (err) return <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"14px 16px", color:C.down, fontSize:12.5 }}>Couldn't load statements for {ticker}: {err}</div>;
   if (!d)  return <div style={{ padding:40, textAlign:"center", color:C.sub }}><Loader2 size={18} style={{ animation:"spin 1s linear infinite" }}/><div style={{ marginTop:8, fontSize:12 }}>Loading statements…</div></div>;
   const src = d[mode] || {};
+  const aiFc = showAI ? fc[mode] : null;   // active AI forecast for this mode, or null
+  // AI forecast bars for a metric (amber), else the real analyst-estimate bars (violet).
+  const aiEst = (metric) => {
+    const arr = aiFc && aiFc[metric];
+    if (!Array.isArray(arr)) return [];
+    return arr.map((x,i)=>({ label: x.label || (aiFc.periods?.[i]) || `+${i+1}`, low:x.low, avg:x.avg, high:x.high }))
+      .filter(x=>x.avg!=null);
+  };
   const em = d.estimates || {}; const revE = em.revenue || {}, epsE = em.eps || {};
   const periods = mode==="quarterly" ? [["0q","EstQ"],["+1q","EstQ+1"]] : [["0y","Est FY"],["+1y","Est FY+1"]];
   const estRev = [], estEPS = [], estNI = [];
@@ -4174,28 +4218,56 @@ function FinancialsCharts({ ticker, aiEnabled, profile }) {
       if (d.shares) estNI.push({ label:lbl, low:(epsE[k].low??epsE[k].avg)*d.shares, avg:epsE[k].avg*d.shares, high:(epsE[k].high??epsE[k].avg)*d.shares });
     }
   });
+  // When AI mode is on, every chart shows amber AI bars; otherwise the two metrics
+  // Yahoo covers (revenue, EPS→net income) show violet analyst bars where present.
+  const AI = C.amber, ASRC = "AI forecast";
+  const estProps = (metric, analystEst) => aiFc
+    ? { est: aiEst(metric), estColor:AI, estSource:ASRC }
+    : { est: analystEst || [], estColor:C.violet, estSource:"analyst estimates" };
   return (
     <div>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12, flexWrap:"wrap", gap:8 }}>
-        <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}` }}>
-          {[["quarterly","Quarterly"],["annual","Annual"]].map(([id,lab])=>(
-            <button key={id} onClick={()=>setMode(id)} style={{ padding:"6px 13px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:mode===id?C.line:"transparent", color:mode===id?C.ink:C.sub }}>{lab}</button>
-          ))}
+        <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+          <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}` }}>
+            {[["quarterly","Quarterly"],["annual","Annual"]].map(([id,lab])=>(
+              <button key={id} onClick={()=>setMode(id)} style={{ padding:"6px 13px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:mode===id?C.line:"transparent", color:mode===id?C.ink:C.sub }}>{lab}</button>
+            ))}
+          </div>
+          {aiEnabled && (
+            <button onClick={()=>setShowAI(v=>!v)} title="AI best-estimate forward projections for every metric"
+              style={{ display:"flex", gap:6, alignItems:"center", padding:"7px 12px", borderRadius:8, cursor:"pointer", fontSize:12, fontWeight:600,
+                border:`1px solid ${showAI?C.amber:C.line}`, background:showAI?`${C.amber}14`:C.panel, color:showAI?C.amber:C.sub }}>
+              {fcLoading ? <Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> : <Zap size={13}/>}
+              {showAI ? "AI Forecast: On" : "AI Forecast"}
+            </button>
+          )}
         </div>
         {d.next_earnings && <span style={{ fontSize:11, color:C.violet, fontFamily:C.mono, background:`${C.violet}14`, borderRadius:6, padding:"4px 10px" }}>next earnings {String(d.next_earnings).slice(0,10)}</span>}
       </div>
+      {showAI && (
+        fcLoading ? <div style={{ fontSize:11.5, color:C.sub, marginBottom:10, display:"flex", gap:7, alignItems:"center" }}><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Forecasting {mode} metrics for {ticker}…</div>
+        : fcErr ? <div style={{ fontSize:11.5, color:C.amber, marginBottom:10 }}>Couldn't generate the AI forecast — {String(fcErr).slice(0,140)}</div>
+        : aiFc ? (
+          <div style={{ background:`${AI}0c`, border:`1px solid ${AI}30`, borderRadius:10, padding:"10px 13px", marginBottom:12 }}>
+            <div style={{ fontSize:11.5, color:C.ink, fontWeight:600 }}>✨ <span style={{ color:AI }}>Amber bars are AI best-estimates</span> for {(aiFc.periods||[]).join(" & ")} — generated from reported history, not analyst or reported data.</div>
+            {(aiFc.notes||[]).length>0 && (
+              <div style={{ marginTop:6 }}>{aiFc.notes.map((n,i)=><div key={i} style={{ fontSize:10.5, color:C.sub, lineHeight:1.5 }}>• {n}</div>)}</div>
+            )}
+          </div>
+        ) : null
+      )}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(290px, 1fr))", gap:12 }}>
-        <FinBarChart title="Revenue"        past={src.revenue}     est={estRev}/>
-        <FinBarChart title="Net Income"     past={src.netIncome}   est={estNI} note="(est = EPS est × shares)"/>
-        <FinBarChart title="Free Cash Flow" past={src.fcf}/>
-        <FinBarChart title="Diluted EPS"    unit="eps" past={src.eps} est={estEPS}/>
-        <FinBarChart title="Gross Margin"   unit="pct" past={src.grossMargin}/>
-        <FinBarChart title="Operating Margin" unit="pct" past={src.operatingMargin} note="(core profitability)"/>
-        <FinBarChart title="Net Margin"     unit="pct" past={src.netMargin}/>
-        <FinBarChart title="Shares Outstanding" unit="count" past={src.shares} note="(down = buybacks, up = dilution)"/>
-        <FinBarChart title="Net Debt"       past={src.netDebt} note="(debt − cash · negative = net cash)"/>
+        <FinBarChart title="Revenue"        past={src.revenue}   {...estProps("revenue", estRev)}/>
+        <FinBarChart title="Net Income"     past={src.netIncome} {...estProps("netIncome", estNI)} note={aiFc?"":"(est = EPS est × shares)"}/>
+        <FinBarChart title="Free Cash Flow" past={src.fcf}       {...estProps("fcf")}/>
+        <FinBarChart title="Diluted EPS"    unit="eps" past={src.eps} {...estProps("eps", estEPS)}/>
+        <FinBarChart title="Gross Margin"   unit="pct" past={src.grossMargin} {...estProps("grossMargin")}/>
+        <FinBarChart title="Operating Margin" unit="pct" past={src.operatingMargin} {...estProps("operatingMargin")} note="(core profitability)"/>
+        <FinBarChart title="Net Margin"     unit="pct" past={src.netMargin} {...estProps("netMargin")}/>
+        <FinBarChart title="Shares Outstanding" unit="count" past={src.shares} {...estProps("shares")} note="(down = buybacks, up = dilution)"/>
+        <FinBarChart title="Net Debt"       past={src.netDebt} {...estProps("netDebt")} note="(debt − cash · negative = net cash)"/>
       </div>
-      <div style={{ fontSize:10, color:C.faint, marginTop:10 }}>History depth is what Yahoo provides free (~5-6 quarters, 4-5 years). Latest reported bar is outlined.</div>
+      <div style={{ fontSize:10, color:C.faint, marginTop:10 }}>History depth is what Yahoo provides free (~5-6 quarters, 4-5 years). Latest reported bar is outlined.{aiFc && " AI forecast bars are model estimates for research — not guarantees, not analyst consensus."}</div>
       <div style={{ marginTop:14 }}><FinancialsReviewPanel ticker={ticker} aiEnabled={aiEnabled} profile={profile}/></div>
     </div>
   );

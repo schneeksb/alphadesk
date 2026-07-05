@@ -32,7 +32,9 @@ Market Brief). Recommendations are research input, not financial advice.
   Statements + price history still work there. `fundamentals()` derives metrics from statements
   as fallback (incl. EV/EBITDA from EV/EBITDA components and forward P/E from trailing EPS ×
   latest YoY growth); true analyst-estimate bars still need the API. Optional fix: set `YF_PROXY`
-  (residential proxy URL) on Render to route yfinance and restore estimates in prod.
+  (residential proxy URL) on Render to route yfinance and restore estimates in prod. Independently,
+  the Financials "AI Forecast" toggle (`/ai-financials-forecast`) fills the forward bars EVERYWHERE
+  via Claude best-estimates (amber, clearly labeled) — works in prod regardless of the Yahoo block.
   The `perf` block (returns/vol/drawdown/beta/div yield) is price-history-only → works everywhere,
   including for ETFs.
 - YouTube blocks transcript downloads (IP-level) → Market Pulse runs locally, throttled

@@ -39,6 +39,8 @@ Recommendations are research input, not financial advice.
   via Claude best-estimates (amber, clearly labeled) — works in prod regardless of the Yahoo block.
   The `perf` block (returns/vol/drawdown/beta/div yield) is price-history-only → works everywhere,
   including for ETFs.
+- RE property auto-fill (`/re-property-lookup`): RentCast AVM when `RENTCAST_API_KEY` is set
+  (free tier 50 req/mo, works on Render), else a labeled AI estimate. 10-min cache via `_cached_ai`.
 - YouTube blocks transcript downloads (IP-level) → Market Pulse runs locally, throttled
   (`YT_THROTTLE_S`), merges per-analyst into `market_pulse` (public-read table). Optional proxy:
   `WEBSHARE_USER/PASS` or `YT_PROXY`.

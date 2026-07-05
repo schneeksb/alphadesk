@@ -288,6 +288,11 @@ async function fetchFinancialsReview(ticker, profile = "") {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchREPropertyLookup(address, ptype = "rental") {
+  const r = await fetch(`${API}/re-property-lookup?address=${encodeURIComponent(address)}&ptype=${encodeURIComponent(ptype)}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchREReview(mode, dealType, inputs, computed, profile = "") {
   const r = await fetch(`${API}/ai-re-review`, {
     method: "POST",
@@ -5393,7 +5398,26 @@ function propAction(m, health) {
 
 function REPropertyForm({ initial, onSubmit, onClose }) {
   const [p, setP] = useState(initial || RE_PROP_DEFAULT);
+  const [looking, setLooking] = useState(false);
+  const [look, setLook] = useState(null);          // last lookup result (provenance display)
   const set = (k) => (v) => setP(s=>({ ...s, [k]: v }));
+  // Auto-fill from the address: RentCast AVM when the key is configured, else a
+  // labeled AI estimate. Fills value/market rent/taxes/insurance — all editable.
+  const autoFill = () => {
+    const addr = p.name.trim();
+    if (addr.length < 8) { setLook({ ai_error:"Type the full address (street, city, state) in the name field first" }); return; }
+    setLooking(true); setLook(null);
+    fetchREPropertyLookup(addr, p.type).then(d=>{
+      if (d.ai_error) { setLook(d); return; }
+      setP(s=>({ ...s,
+        value:        d.value  != null ? Math.round(d.value)  : s.value,
+        marketRentMo: d.rentMo != null ? Math.round(d.rentMo) : s.marketRentMo,
+        taxesYr:      d.taxesYr!= null ? Math.round(d.taxesYr): s.taxesYr,
+        insYr:        d.insYr  != null ? Math.round(d.insYr)  : s.insYr,
+      }));
+      setLook(d);
+    }).catch(e=>setLook({ ai_error:String(e.message||e) })).finally(()=>setLooking(false));
+  };
   const inGrid = { display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(118px, 1fr))", gap:10 };
   return (
     <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"16px 18px" }}>
@@ -5402,8 +5426,13 @@ function REPropertyForm({ initial, onSubmit, onClose }) {
         <button onClick={onClose} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer" }}><X size={16}/></button>
       </div>
       <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:10 }}>
-        <input value={p.name} onChange={e=>setP(s=>({ ...s, name:e.target.value }))} placeholder="Name / address (e.g. 412 Oak St)"
+        <input value={p.name} onChange={e=>setP(s=>({ ...s, name:e.target.value }))} placeholder="Address (e.g. 412 Oak St, Austin, TX)"
+          onKeyDown={e=>{ if(e.key==="Enter") autoFill(); }}
           style={{ flex:"2 1 240px", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 10px", color:C.ink, fontSize:12.5, outline:"none" }}/>
+        <button onClick={autoFill} disabled={looking} title="Look up value, market rent, taxes & insurance for this address"
+          style={{ flex:"0 0 auto", background:C.cold, border:"none", borderRadius:8, padding:"8px 13px", color:"#fff", cursor:"pointer", fontSize:12, fontWeight:600, display:"flex", gap:6, alignItems:"center", opacity:looking?0.7:1 }}>
+          {looking ? <Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> : <Zap size={13}/>} Auto-fill
+        </button>
         <select value={p.type} onChange={e=>setP(s=>({ ...s, type:e.target.value }))}
           style={{ flex:"1 1 140px", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 10px", color:C.ink, fontSize:12.5, outline:"none" }}>
           {RE_TYPES.filter(([k])=>k!=="flip").map(([k,l])=><option key={k} value={k}>{l}</option>)}
@@ -5412,6 +5441,24 @@ function REPropertyForm({ initial, onSubmit, onClose }) {
         <input type="date" value={p.purchaseDate||""} onChange={e=>setP(s=>({ ...s, purchaseDate:e.target.value }))}
           style={{ flex:"1 1 130px", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 10px", color:C.sub, fontSize:12, outline:"none" }}/>
       </div>
+      {look && (look.ai_error ? (
+        <div style={{ fontSize:11.5, color:C.amber, margin:"0 0 10px" }}>Lookup failed — {String(look.ai_error).slice(0,140)}</div>
+      ) : (
+        <div style={{ background: look.source==="rentcast" ? `${C.up}0c` : `${C.amber}0c`,
+          border:`1px solid ${look.source==="rentcast" ? C.up : C.amber}30`, borderRadius:10, padding:"9px 12px", margin:"0 0 12px" }}>
+          <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.55 }}>
+            <b style={{ color: look.source==="rentcast" ? C.up : C.amber }}>
+              {look.source==="rentcast" ? "✓ RentCast AVM (live data)" : `✨ AI estimate (${look.confidence||"medium"} confidence) — verify before relying on it`}
+            </b>
+            {" · "}value {fmt$(look.value)}{look.valueLow!=null && ` (${fmt$(look.valueLow)}–${fmt$(look.valueHigh)})`}
+            {" · "}rent {fmt$(look.rentMo)}/mo{look.rentMoLow!=null && ` (${fmt$(look.rentMoLow)}–${fmt$(look.rentMoHigh)})`}
+            {look.taxesYr!=null && ` · taxes ${fmt$(look.taxesYr)}/yr`}{look.insYr!=null && ` · ins ${fmt$(look.insYr)}/yr`}
+            {look.beds!=null && ` · ${look.beds}bd/${look.baths??"—"}ba${look.sqft?` ${look.sqft.toLocaleString()}sf`:""}${look.yearBuilt?` (${look.yearBuilt})`:""}`}
+          </div>
+          {look.note && <div style={{ fontSize:10.5, color:C.sub, marginTop:4, lineHeight:1.5 }}>{look.note}</div>}
+          <div style={{ fontSize:10, color:C.faint, marginTop:4 }}>Filled current value, market rent, taxes & insurance — your rent, loan and purchase figures are untouched. Edit anything below.</div>
+        </div>
+      ))}
       <div style={inGrid}>
         <REIn label="Purchase price" prefix="$" value={p.purchasePrice} onChange={set("purchasePrice")}/>
         <REIn label="Current value" prefix="$" value={p.value} onChange={set("value")}/>

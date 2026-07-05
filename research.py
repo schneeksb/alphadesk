@@ -1042,6 +1042,13 @@ _PROJ_SCHEMA = _s(
     assumption_reads=_arr(_s(assumption="str", read="str")),
     would_need="strs", risks="strs", more_likely="str", bottom_line="str",
 )
+_RELOOK_SCHEMA = _s(
+    value="num", valueLow="num", valueHigh="num",
+    rentMo="num", rentMoLow="num", rentMoHigh="num",
+    taxesYr="num", insYr="num",
+    confidence={"type": "string", "enum": ["low", "medium", "high"]},
+    note="str",
+)
 _RE_SCHEMA = _s(
     headline="str",
     verdict={"type": "string", "enum": ["strong", "workable", "weak"]},
@@ -2135,6 +2142,85 @@ Respond via the tool with:
                 return {"ai_error": str(e)}
         key = f"aire:{mode}:{deal_type}:{json.dumps(inputs, sort_keys=True)}:{json.dumps(computed, sort_keys=True)}:{profile}"
         return _cached_ai(key, produce)
+
+    def _rentcast_lookup(address):
+        """Real AVM + rent estimate + property records via RentCast (free tier:
+        50 req/mo, RENTCAST_API_KEY env). Returns None when no key or no data —
+        the endpoint then falls back to a labeled AI estimate."""
+        api_key = os.getenv("RENTCAST_API_KEY")
+        if not api_key:
+            return None
+        import urllib.request as _ur, urllib.parse as _up, json as _json
+        def get(path, params):
+            url = f"https://api.rentcast.io/v1/{path}?{_up.urlencode(params)}"
+            req = _ur.Request(url, headers={"X-Api-Key": api_key, "Accept": "application/json"})
+            with _ur.urlopen(req, timeout=15) as r:
+                return _json.loads(r.read())
+        out = {"source": "rentcast"}
+        try:
+            v = get("avm/value", {"address": address})
+            out["value"], out["valueLow"], out["valueHigh"] = v.get("price"), v.get("priceRangeLow"), v.get("priceRangeHigh")
+        except Exception as e:
+            print(f"[rentcast] value: {e}")
+        try:
+            rr = get("avm/rent/long-term", {"address": address})
+            out["rentMo"], out["rentMoLow"], out["rentMoHigh"] = rr.get("rent"), rr.get("rentRangeLow"), rr.get("rentRangeHigh")
+        except Exception as e:
+            print(f"[rentcast] rent: {e}")
+        try:
+            props = get("properties", {"address": address})
+            p0 = props[0] if isinstance(props, list) and props else None
+            if p0:
+                out["sqft"], out["beds"], out["baths"] = p0.get("squareFootage"), p0.get("bedrooms"), p0.get("bathrooms")
+                out["yearBuilt"] = p0.get("yearBuilt")
+                taxes = p0.get("propertyTaxes") or {}
+                if taxes:
+                    latest = taxes.get(max(taxes.keys()))
+                    out["taxesYr"] = (latest or {}).get("total")
+        except Exception as e:
+            print(f"[rentcast] records: {e}")
+        return out if (out.get("value") or out.get("rentMo")) else None
+
+    @app.get("/re-property-lookup")
+    def re_property_lookup_endpoint(address: str, ptype: str = "rental", authorization: str = Header(None)):
+        """Auto-fill a property from its address. Tier 1: RentCast (real AVM,
+        rent estimate, tax records) when RENTCAST_API_KEY is set. Tier 2: AI
+        estimate from area knowledge — clearly labeled, with ranges and a
+        verify-this note. Login required (costs quota or a Claude call)."""
+        require_user(authorization)
+        address = (address or "").strip()
+        if len(address) < 8:
+            return {"ai_error": "enter a fuller address (street, city, state)"}
+        def produce():
+            try:
+                rc = _rentcast_lookup(address)
+                if rc:
+                    return _json_safe({"address": address, **rc})
+            except Exception as e:
+                print(f"[rentcast] {e}")
+            try:
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = f"""You are a real-estate data assistant pre-filling a personal deal calculator. You have
+NO live listing, assessor or MLS data — produce your best INFORMED ESTIMATES for this address from
+your knowledge of the area's price levels, $/sqft norms, county/state effective property-tax rates,
+and typical landlord insurance premiums. The user will verify and edit every number.
+ADDRESS: {address}
+PROPERTY TYPE: {ptype}
+Today's date: {datetime.date.today()} — your area knowledge may lag ~a year; adjust modestly for
+typical price/rent drift since then.
+
+Emit via the tool:
+- value / valueLow / valueHigh: current market value estimate ($, range wide enough to be honest)
+- rentMo / rentMoLow / rentMoHigh: market rent per month
+- taxesYr: annual property tax = your value estimate × that county's effective rate
+- insYr: typical annual landlord policy for that state and value (higher for coastal/wind/flood states)
+- confidence: high only for well-known metros you know well; low for rural or ambiguous addresses
+- note: one sentence — what drove the estimate and the single most important thing to verify locally"""
+                out = _ai_json(client, prompt, 800, _RELOOK_SCHEMA) or {}
+                return _json_safe({"address": address, "source": "ai", **out})
+            except Exception as e:
+                return {"ai_error": str(e)}
+        return _cached_ai(f"relook:{address.lower()}:{ptype}", produce)
 
     @app.get("/screen")
     def screen_endpoint(

@@ -101,11 +101,16 @@ def _t_analyst_pulse(_inp):
     import research
     return research.yt_insights_endpoint()
 
+def _t_positioning(_inp):
+    import research
+    return research.positioning_data()
+
 _EXECUTORS = {
     "get_market_climate":     _t_market_climate,
     "get_sector_rotation":    _t_sector_rotation,
     "get_sector_performance": _t_sector_performance,
     "get_economic_calendar":  _t_economic_calendar,
+    "get_positioning":        _t_positioning,
     "get_options_flow":       _t_options_flow,
     "get_ticker_snapshot":    _t_ticker_snapshot,
     "get_ticker_fundamentals":_t_ticker_fundamentals,
@@ -201,6 +206,14 @@ TOOLS = [
      "description": ("Upcoming macro events within 90 days (FOMC, CPI, NFP, OPEX) with days_away. "
                      "Check for event risk in the next 1-2 weeks — it changes what 'act now' means."),
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_positioning",
+     "description": ("Institutional futures positioning from the weekly CFTC Commitments of Traders: "
+                     "large-speculator net long/short in S&P 500, Nasdaq, Russell, 10Y Treasury, the "
+                     "dollar, gold, crude and VIX, each with its 3-year percentile and week-over-week "
+                     "change. Read EXTREMES as contrarian (crowded-long = downside/unwind risk, "
+                     "crowded-short = squeeze fuel) and weekly_change as the flow. Macro/index-level "
+                     "only — pair it with the regime and rotation reads, never treat it as single-stock."),
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_options_flow",
      "description": ("Options positioning for up to 8 specific tickers: put/call volume ratio, relative volume, "
                      "unusual-activity flag, and a bullish/bearish/neutral bias. Slow (~3s per ticker) — "
@@ -250,8 +263,9 @@ PRIORITIES, strictly in this order:
 
 {prof}
 INVESTIGATION DISCIPLINE:
-- Establish the macro regime first (get_market_climate), then rotation (get_sector_rotation), then event \
-risk (get_economic_calendar). Read everything else against that frame.
+- Establish the macro regime first (get_market_climate), then rotation (get_sector_rotation), then \
+institutional positioning (get_positioning) and event risk (get_economic_calendar). Read everything else \
+against that frame. When positioning sits at a 3-year extreme, say so and treat it as a contrarian tell.
 - Drill into specific tickers ONLY where the macro/sector picture or the user's exposure justifies it. \
 Batch independent tool calls in a single turn — you have a hard cap of {MAX_TURNS} turns, be efficient.
 - Every observation, flag, and action must cite specific numbers from tool results. Never invent a figure. \

@@ -41,6 +41,12 @@ Recommendations are research input, not financial advice.
   including for ETFs.
 - RE property auto-fill (`/re-property-lookup`): RentCast AVM when `RENTCAST_API_KEY` is set
   (free tier 50 req/mo, works on Render), else a labeled AI estimate. 10-min cache via `_cached_ai`.
+- Institutional positioning (`/positioning`, no auth): CFTC Commitments of Traders via the free
+  public Socrata API (`publicreporting.cftc.gov`, legacy futures-only `6dca-aqww`) — works on Render.
+  `cftc_positioning()`/`positioning_data()` (6h SWR) return large-spec net position, 3yr percentile
+  and weekly change for the major index/rate/FX/commodity futures. Contract names matched by `like`
+  substring (`_COT_CONTRACTS`), most-liquid match wins. Wired into the Brief agent (`get_positioning`
+  tool), the `/outlook` prompt, and the Brief-tab `PositioningPanel`. Macro/index-level, not per-stock.
 - YouTube blocks transcript downloads (IP-level) → Market Pulse runs locally, throttled
   (`YT_THROTTLE_S`), merges per-analyst into `market_pulse` (public-read table). Optional proxy:
   `WEBSHARE_USER/PASS` or `YT_PROXY`.

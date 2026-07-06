@@ -382,6 +382,11 @@ async function fetchOutlook() {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+async function fetchPositioning() {
+  const r = await fetch(`${API}/positioning`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 async function fetchPortfolioAnalysis(positions, analytics, cash, profile) {
   const r = await fetch(`${API}/portfolio-analysis`, {
     method: "POST",
@@ -1636,6 +1641,60 @@ const Badge = ({ text, col }) => (
     color:col, background:`${col}16`, border:`1px solid ${col}40`, borderRadius:5, padding:"2px 8px", whiteSpace:"nowrap" }}>{text}</span>
 );
 
+// Institutional positioning from the CFTC Commitments of Traders — deterministic,
+// no AI, no login. Large-speculator net futures position, its 3-year percentile
+// and weekly change. Extremes are contrarian (Nicholas Crown's #1 positioning source).
+function PositioningPanel() {
+  const [d, setD]     = useState(null);
+  const [err, setErr] = useState(null);
+  const [open, setOpen] = useState(true);
+  useEffect(()=>{ fetchPositioning().then(x=>x.error?setErr(x.error):setD(x)).catch(e=>setErr(String(e.message||e))); },[]);
+  const kfmt = v => { const a=Math.abs(v); const s=v<0?"−":""; return a>=1000 ? `${s}${(a/1000).toFixed(a>=100000?0:1)}k` : `${s}${a}`; };
+  const exCol = e => e==="crowded long" ? C.down : e==="crowded short" ? C.up : C.faint;
+  const rows = d?.contracts || [];
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, marginBottom:14 }}>
+      <button onClick={()=>setOpen(o=>!o)} style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"none", border:"none", padding:"13px 18px", cursor:"pointer", textAlign:"left" }}>
+        <span style={{ minWidth:0 }}>
+          <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>🏛️ Institutional Positioning</span>
+          <span style={{ fontSize:10.5, color:C.faint, marginLeft:8 }}>CFTC Commitments of Traders{d?.as_of ? ` · as of ${d.as_of}` : ""}</span>
+        </span>
+        <ChevronDown size={15} color={C.faint} style={{ flexShrink:0, transform:open?"rotate(180deg)":"none", transition:"transform .15s" }}/>
+      </button>
+      {open && (
+        <div style={{ padding:"0 18px 14px" }}>
+          {err ? (
+            <div style={{ fontSize:11.5, color:C.faint }}>Positioning data unavailable right now ({String(err).slice(0,60)}).</div>
+          ) : !d ? (
+            <div style={{ fontSize:11.5, color:C.sub, display:"flex", gap:7, alignItems:"center", padding:"6px 0" }}><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Loading COT positioning…</div>
+          ) : (
+            <>
+              <div style={{ fontSize:10.5, color:C.faint, lineHeight:1.5, marginBottom:8 }}>Large-speculator net futures position vs its 3-year range. Extremes are contrarian — <b style={{ color:C.down }}>crowded long</b> = unwind/downside risk, <b style={{ color:C.up }}>crowded short</b> = squeeze fuel. Weekly change = the flow.</div>
+              {rows.map((c,i)=>(
+                <div key={c.contract} style={{ display:"grid", gridTemplateColumns:"minmax(120px,1.4fr) minmax(90px,1fr) minmax(120px,1.5fr) minmax(64px,0.8fr) minmax(84px,1fr)", gap:8, alignItems:"center", padding:"7px 0", borderTop:i?`1px solid ${C.panel2}`:"none" }}>
+                  <span style={{ fontSize:11.5, fontWeight:600, color:C.ink, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{c.contract}</span>
+                  <span style={{ fontSize:11, fontFamily:C.mono, color:c.stance==="net long"?C.up:C.down }}>{c.stance} <span style={{ color:C.faint }}>{kfmt(c.net_noncommercial)}</span></span>
+                  {/* 3-yr percentile track with a marker */}
+                  <div title={`${c.pctile_3y}th percentile of 3-yr net position`} style={{ position:"relative", height:8, background:C.panel2, borderRadius:5 }}>
+                    <div style={{ position:"absolute", left:`calc(${Math.max(2,Math.min(98,c.pctile_3y))}% - 4px)`, top:-1, width:8, height:10, borderRadius:3, background:exCol(c.extreme)==C.faint?C.sub:exCol(c.extreme) }}/>
+                  </div>
+                  <span style={{ fontSize:11, fontFamily:C.mono, color:C.sub, textAlign:"right" }}>{c.pctile_3y}%ile</span>
+                  <span style={{ fontSize:10.5, textAlign:"right" }}>
+                    {c.extreme!=="neutral"
+                      ? <span style={{ fontWeight:800, color:exCol(c.extreme), background:`${exCol(c.extreme)}14`, borderRadius:5, padding:"2px 6px", textTransform:"uppercase", fontSize:8.5 }}>{c.extreme}</span>
+                      : <span style={{ fontFamily:C.mono, color:(c.weekly_change||0)>=0?C.up:C.down }}>{(c.weekly_change||0)>=0?"+":""}{kfmt(c.weekly_change)} wk</span>}
+                  </span>
+                </div>
+              ))}
+              <div style={{ fontSize:9.5, color:C.faint, marginTop:8 }}>Free public CFTC data, updated weekly (Fri ~3:30pm ET). Index/rate/FX/commodity futures — macro positioning, not single stocks. Research input, not financial advice.</div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MarketBriefSection({ userId, positions, watchlist, radar=[], profile, aiEnabled }) {
   const [row, setRow]           = useState(null);     // {brief, tool_log, generated_at, source}
   const [loading, setLoading]   = useState(true);
@@ -1704,6 +1763,8 @@ function MarketBriefSection({ userId, positions, watchlist, radar=[], profile, a
       </div>
 
       {err && <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"11px 14px", color:C.down, fontSize:12.5, marginBottom:12 }}>Brief failed: {err}</div>}
+
+      <PositioningPanel/>
 
       {loading ? (
         <div style={{ padding:30, textAlign:"center", color:C.sub }}><Loader2 size={18} style={{ animation:"spin 1s linear infinite" }}/></div>

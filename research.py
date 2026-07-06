@@ -521,6 +521,103 @@ def _num(x):
         return None
 
 
+# ── CFTC COMMITMENTS OF TRADERS (institutional positioning) ───────────────────
+# Free public CFTC data (Socrata API) — works from Render's IP, unlike Yahoo's
+# blocked endpoints. This is the #1 source in Nicholas Crown's positioning
+# framework: how large speculators are positioned in the major futures. Index/
+# futures-level only (macro), not single stocks. We read the legacy futures-only
+# report: net non-commercial (large-spec) position, its 3-year percentile, and
+# the week-over-week change. Extremes are contrarian; the change is the flow.
+_COT_CONTRACTS = [
+    ("S&P 500 (e-mini)", "E-MINI S&P 500 STOCK INDEX"),
+    ("Nasdaq-100 (mini)", "NASDAQ-100 STOCK INDEX (MINI)"),
+    ("Russell 2000 (mini)", "RUSSELL 2000"),
+    ("10Y Treasury", "10-YEAR U.S. TREASURY NOTES"),
+    ("US Dollar Index", "U.S. DOLLAR INDEX"),
+    ("Gold", "GOLD - COMMODITY EXCHANGE"),
+    ("Crude Oil (WTI)", "CRUDE OIL, LIGHT SWEET"),
+    ("VIX", "VIX FUTURES"),
+]
+
+
+def _cftc_series(name_like, weeks=156):
+    """Newest-first COT rows for the single most-liquid contract matching name_like."""
+    import urllib.request as _ur, urllib.parse as _up, json as _json
+    params = {
+        "$select": ("report_date_as_yyyy_mm_dd,market_and_exchange_names,open_interest_all,"
+                    "noncomm_positions_long_all,noncomm_positions_short_all"),
+        "$where": f"market_and_exchange_names like '%{name_like}%'",
+        "$order": "report_date_as_yyyy_mm_dd DESC",
+        "$limit": str(weeks * 4),          # several contracts may match; we filter to one
+    }
+    url = "https://publicreporting.cftc.gov/resource/6dca-aqww.json?" + _up.urlencode(params)
+    req = _ur.Request(url, headers={"Accept": "application/json", "User-Agent": "AlphaDesk research"})
+    with _ur.urlopen(req, timeout=25) as r:
+        rows = _json.loads(r.read())
+    if not rows:
+        return None
+    # Pick the most-liquid matching contract (highest open interest at the latest date),
+    # so "GOLD" doesn't blend in "MICRO GOLD", etc.
+    latest = max(r["report_date_as_yyyy_mm_dd"] for r in rows)
+    primary = max((r for r in rows if r["report_date_as_yyyy_mm_dd"] == latest),
+                  key=lambda r: _num(r.get("open_interest_all")) or 0)["market_and_exchange_names"]
+    series = sorted((r for r in rows if r["market_and_exchange_names"] == primary),
+                    key=lambda r: r["report_date_as_yyyy_mm_dd"])       # oldest → newest
+    return primary, series[-weeks:]
+
+
+def _cot_read(label, name_like):
+    got = _cftc_series(name_like)
+    if not got:
+        return None
+    _primary, series = got
+    def net(r):
+        lo, sh = _num(r.get("noncomm_positions_long_all")), _num(r.get("noncomm_positions_short_all"))
+        return (lo - sh) if (lo is not None and sh is not None) else None
+    nets = [n for n in (net(r) for r in series) if n is not None]
+    if len(nets) < 6:
+        return None
+    cur, prev = nets[-1], nets[-2]
+    lo, hi = min(nets), max(nets)
+    pctile = round((cur - lo) / (hi - lo) * 100) if hi > lo else 50
+    return {
+        "contract": label,
+        "as_of": series[-1]["report_date_as_yyyy_mm_dd"][:10],
+        "net_noncommercial": int(cur),
+        "weekly_change": int(cur - prev),
+        "pctile_3y": pctile,                       # 0 = most net-short in 3y, 100 = most net-long
+        "stance": "net long" if cur > 0 else "net short",
+        "extreme": ("crowded long" if pctile >= 85 else
+                    "crowded short" if pctile <= 15 else "neutral"),
+    }
+
+
+def cftc_positioning():
+    """Assemble the COT positioning read across the major futures. Never raises —
+    a failed contract is simply omitted (so a rename can't take the whole thing down)."""
+    out = []
+    for label, like in _COT_CONTRACTS:
+        try:
+            r = _cot_read(label, like)
+            if r:
+                out.append(r)
+        except Exception as e:
+            print(f"[cot] {label}: {e}")
+    return {
+        "source": "CFTC Commitments of Traders (legacy futures-only, weekly)",
+        "as_of": max((c["as_of"] for c in out), default=None),
+        "what_it_is": ("Net non-commercial (large-speculator) futures positioning. "
+                       "pctile_3y: 0 = most net-short in 3 years, 100 = most net-long. "
+                       "Extremes are contrarian; weekly_change is the flow. Macro/index-level, not single stocks."),
+        "contracts": out,
+    }
+
+
+def positioning_data():
+    """Cached COT read. COT publishes weekly (Fri ~3:30pm ET), so 6h fresh / 7d stale."""
+    return _cached_swr("cot", cftc_positioning, ttl=21600, stale_ttl=604800)
+
+
 def _stmt_row(df, *names):
     """Return a statement row (list, newest→oldest) by trying several label spellings."""
     if df is None or getattr(df, "empty", True):
@@ -2570,6 +2667,13 @@ Emit via the tool:
                 return {"error": str(e)}
         return _cached("sectors_rotation", produce)
 
+    @app.get("/positioning")
+    def positioning_endpoint():
+        """Institutional futures positioning — CFTC Commitments of Traders. Free
+        public CFTC data (no AI, no login): large-speculator net long/short in the
+        major index/rate/FX/commodity futures, with 3-yr percentile and weekly change."""
+        return positioning_data()
+
     @app.get("/outlook")
     def outlook_endpoint(profile: str = "", authorization: str = Header(None)):
         require_user(authorization)
@@ -2583,10 +2687,22 @@ Emit via the tool:
                 sc  = climate.get("macro_score", 50)
                 profile_block = _profile_ctx(profile)
                 profile_line = f"\n{profile_block}" if profile_block else ""
+                # Institutional positioning (CFTC COT) — flag the extremes for the strategist.
+                pos_line = ""
+                try:
+                    pos = positioning_data()
+                    xs = [c for c in (pos.get("contracts") or []) if c.get("extreme") != "neutral"]
+                    if xs:
+                        pos_line = ("\nInstitutional positioning (CFTC COT, as of "
+                                    f"{pos.get('as_of')}): "
+                                    + "; ".join(f"{c['contract']} {c['extreme']} ({c['pctile_3y']}%ile)" for c in xs)
+                                    + " — extremes are contrarian.")
+                except Exception:
+                    pass
                 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
                 prompt = f"""Market strategist. Date: {datetime.date.today()}. Macro: {sc}/100 ({climate.get('posture','neutral')}).
 Top sectors (1mo): {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in top)}
-Lagging: {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in bot)}{profile_line}
+Lagging: {', '.join(s['name']+' '+str(s.get('month',0))+'%' for s in bot)}{profile_line}{pos_line}
 
 1-3 month forward market outlook. JSON ONLY:
 {{"headline":"<bold 10-word directional call>","regime":"bull"|"bear"|"neutral"|"volatile",

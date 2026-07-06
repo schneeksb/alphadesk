@@ -5015,11 +5015,108 @@ const RE_GLOSSARY = [
   ["Conventional commercial","20–30% down, 20–25 yr amortization — but the NOTE often matures in 5–10 yrs (balloon/reset), so model refinance risk at today's rates, not the teaser."],
 ];
 
+// Plain-English "what do I enter here?" per field label. REIn/RESel look these
+// up automatically, so every input gets a "?" with no per-call wiring.
+const RE_HINTS = {
+  "Purchase price":"The contract/offer price for the property (before closing costs and rehab).",
+  "Down payment":"The cash % you put down. ~20–25% conventional; SBA 504 can be as low as ~10%.",
+  "Rate":"Your loan's annual interest rate (APR).",
+  "Rate (Prime + spread)":"SBA 7(a) rate — usually the Prime rate plus a lender spread, and it floats.",
+  "Term / amortization":"Years the loan is amortized over. Residential is usually 30; commercial 20–25.",
+  "Term left":"Years remaining on the loan's amortization.",
+  "Amortization":"Years the loan is amortized over (SBA real-estate loans are typically 25).",
+  "Closing costs":"One-time costs to BUY (title, escrow, lender fees, inspections) as a % of price. ~2–4%.",
+  "Buy closing costs":"One-time costs to purchase (title, escrow, lender fees) as a % of price. ~2–3%.",
+  "Rehab / make-ready":"Upfront dollars to get it rent-ready or add value (paint, flooring, repairs).",
+  "Rehab budget":"Total renovation cost to reach the after-repair value (ARV).",
+  "Units":"Number of separately-rentable units in the building.",
+  "Square feet":"Total leasable square footage.",
+  "Total rent / mo":"Gross monthly rent across ALL units at current/market rents.",
+  "Rent / unit / mo":"Average market rent per unit per month (multiplied by unit count).",
+  "Rent / mo":"The monthly rent this property actually collects today.",
+  "Other income / mo":"Non-rent monthly income: laundry, parking, storage, pet or admin fees.",
+  "Vacancy":"Expected % of the year units sit empty or rent goes uncollected. ~5% typical; higher in soft markets.",
+  "Taxes / yr":"Annual property-tax bill. Check the county assessor — it often RESETS to your purchase price after a sale.",
+  "Insurance / yr":"Annual property insurance on the BUILDING — landlord/hazard + liability for residential, a commercial property policy for commercial. NOT your personal health/life insurance. Coastal, wind, flood and wildfire areas run much higher — get a real quote.",
+  "Maintenance (% rent)":"Ongoing repairs budget as a % of rent. ~5% for newer/turnkey, 8–12% for older or C-class.",
+  "Capex reserve (% rent)":"Money set aside for big-ticket replacements (roof, HVAC, water heater). Skipping it fakes your cash flow.",
+  "Management (% EGI)":"Property-management fee as a % of collected rent. ~8–10% single-family, 3–5% larger. Enter 0 if self-managing.",
+  "Utilities / mo":"Any utilities YOU pay (not the tenant): common-area electric, water/sewer, trash.",
+  "HOA / mo":"Monthly HOA or condo dues, if any.",
+  "Appreciation / yr":"Assumed annual growth in the property's value. Keep it sober — 2–3% is a reasonable base case.",
+  "Rent growth / yr":"Assumed annual rent increase. 2–3% is typical; don't model boom years as forever.",
+  "Market cap rate":"The cap rate buyers currently pay for this asset class and area. NOI ÷ this rate = the value the income supports.",
+  // Flip
+  "ARV (after-repair value)":"What the property SELLS for once renovated, based on comps. The whole flip hinges on this number — be conservative.",
+  "Months to sell":"Total months from purchase to sale (rehab time + listing/closing time).",
+  "Selling costs":"What it costs to SELL: agent commissions + closing, as a % of the sale price. ~6–8%.",
+  "Holding costs / mo":"Monthly carry while you own it: insurance, utilities, taxes, HOA, loan interest if not counted elsewhere.",
+  "Financed":"% of the purchase price covered by a loan. Hard-money lenders often go 80–90%.",
+  "Loan rate (interest-only)":"Annual interest rate on the flip loan. Hard-money loans are usually interest-only.",
+  "Points":"Upfront lender fee as a % of the loan amount. Hard money is often 2–3 points.",
+  // SBA / commercial financing
+  "Financing":"How you're funding it. SBA 504/7(a) are for OWNER-OCCUPIED commercial (your business uses ≥51%). Use Conventional for pure investment property.",
+  "Bank 1st":"The conventional bank first-mortgage share of a 504 deal (~50%).",
+  "Bank rate":"Interest rate on the bank first mortgage (this piece is usually variable/market).",
+  "Bank amortization":"Years the bank first mortgage is amortized over (often 25).",
+  "CDC 2nd":"The SBA/CDC debenture share of a 504 deal (~40%) — the long fixed-rate second lien.",
+  "CDC rate (fixed)":"Fixed interest rate on the SBA/CDC debenture — the main draw of a 504.",
+  "CDC amortization":"Years the CDC debenture is amortized over (typically 25 for real estate).",
+  "SBA fees (financed)":"SBA/CDC one-time fees (~2.5–3%), rolled into the debenture rather than paid in cash.",
+  "Guaranty fee (financed)":"The SBA guaranty fee on a 7(a) loan (~2–3.5%), financed into the loan balance.",
+  // Quality checklist
+  "Location grade":"A = prime, B = solid, C = workforce, D = rough. Drives tenant demand, rent stability and your exit.",
+  "Condition":"How much work it needs — turnkey through a full gut rehab.",
+  "Roof age":"Years since the roof was replaced. 20+ means budget a replacement (~$8–15k).",
+  "HVAC age":"Years on the furnace/AC. 15+ means it's near end of life.",
+  "Deferred maintenance":"Known repairs the seller has put off, in dollars — hidden cost on top of your rehab.",
+  "Insurance risk (flood/wind/fire)":"Flood, wind, wildfire or quake exposure — it raises premiums or can make coverage hard to get.",
+  "Regulatory risk (rent control...)":"Rent control, tenant/eviction rules, short-term-rental bans, or zoning limits that cap your income or use.",
+  "Largest tenant (% of rent)":"Share of total rent from your single biggest tenant. High = concentration risk if they leave.",
+  // My Properties health inputs
+  "Current value":"What the property is worth TODAY (your estimate or an AVM). Drives equity and cap-on-value.",
+  "Loan balance":"The remaining principal you still owe on the mortgage.",
+  "P&I / mo (0 = estimate)":"Your actual principal+interest payment per month. Leave 0 to estimate it from the balance/rate/term.",
+  "Market rent / mo":"What the unit would rent for at market today. Drives the 'rent under market' Risk Watch alert.",
+  "Taxes LAST yr":"Last year's property-tax figure — we compare it to this year's to flag a jump.",
+  "Insurance LAST yr":"Last year's insurance premium — we compare it to this year's to flag a jump.",
+  // Sell vs Keep
+  "Loan payoff":"The loan balance you'd have to pay off at closing when you sell.",
+  "Cost basis (price + improvements)":"What you paid PLUS capital improvements — the IRS starting point for your taxable gain.",
+  "Depreciation taken":"Total depreciation you've deducted over the years — the IRS 'recaptures' (taxes) it when you sell.",
+  "Cap gains rate":"Your long-term capital-gains tax rate on the profit (commonly 15% or 20% federal).",
+  "Recapture rate":"Tax rate on depreciation recapture — capped at 25% federal.",
+  "State tax":"Your state's income/capital-gains rate on the sale, if any (0 in no-tax states).",
+  "Cash flow / yr":"Annual cash flow the property throws off today, after the mortgage.",
+  "Principal paydown / yr":"How much the loan balance drops in a year — equity you build even without appreciation.",
+  "Redeployed return":"What you could realistically earn per year on the net sale proceeds elsewhere (stocks, another deal).",
+  "Rent raise at renewal ($/mo)":"The monthly rent increase you could realistically get at the next lease renewal (a once-a-year event).",
+};
+
+// Shared field label with an optional "?" that reveals the hint on hover (desktop)
+// or tap (mobile). No hint in RE_HINTS → just the plain label.
+function REFieldLabel({ label }) {
+  const [tip, setTip] = useState(false);
+  const hint = RE_HINTS[label];
+  return (
+    <div style={{ position:"relative", display:"flex", alignItems:"center", gap:4, marginBottom:3 }}>
+      <span style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", minWidth:0 }}>{label}</span>
+      {hint && (<>
+        <span onClick={()=>setTip(t=>!t)} onMouseEnter={()=>setTip(true)} onMouseLeave={()=>setTip(false)} title={hint}
+          style={{ flexShrink:0, cursor:"help", width:13, height:13, borderRadius:"50%", border:`1px solid ${C.faint}`, color:C.faint, fontSize:9, lineHeight:"11px", textAlign:"center", fontWeight:700, userSelect:"none" }}>?</span>
+        {tip && (
+          <div style={{ position:"absolute", zIndex:80, top:"calc(100% + 4px)", left:0, width:220, maxWidth:"62vw", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 10px", fontSize:10.5, color:C.sub, lineHeight:1.5, boxShadow:"0 8px 24px rgba(0,0,0,0.28)", textTransform:"none", letterSpacing:0, fontWeight:400, whiteSpace:"normal" }}>{hint}</div>
+        )}
+      </>)}
+    </div>
+  );
+}
+
 // Small labeled number input used across all RE calculators.
 function REIn({ label, value, onChange, prefix, suffix, wide }) {
   return (
     <div style={{ minWidth:0, gridColumn: wide ? "span 2" : undefined }}>
-      <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{label}</div>
+      <REFieldLabel label={label}/>
       <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px" }}>
         {prefix && <span style={{ fontSize:11, color:C.faint }}>{prefix}</span>}
         <input type="number" step="any" value={value} onChange={e=>onChange(e.target.value)}
@@ -5157,7 +5254,7 @@ function reBuyVerdict(type, m) {
 function RESel({ label, value, onChange, options }) {
   return (
     <div style={{ minWidth:0 }}>
-      <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{label}</div>
+      <REFieldLabel label={label}/>
       <select value={value} onChange={e=>onChange(e.target.value)}
         style={{ width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 8px", color:C.ink, fontSize:12, outline:"none" }}>
         {options.map(([v,l])=><option key={v} value={v}>{l}</option>)}

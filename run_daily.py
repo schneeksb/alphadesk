@@ -91,6 +91,39 @@ def get_option_mark_price(ticker_obj, strike, expiry_str, option_type="call"):
         return None, 0.35
 
 
+# ── Price-fetch cache ─────────────────────────────────────────────────────────
+# Yahoo aggressively rate-limits datacenter IPs (Render), and the frontend re-values
+# the whole portfolio on every position edit / refresh. Without caching, each call
+# re-fetches every ticker's 5-day close and quickly trips 429 "Too Many Requests",
+# dropping positions into the errored list. Cache the close series per ticker for a
+# short TTL so repeated valuations reuse prices, and serve the last good series if a
+# fetch is rate-limited rather than failing the position.
+import time as _time_rd
+_PRICE_CACHE = {}          # ticker -> (timestamp, [close floats, oldest→newest])
+_PRICE_TTL   = 90          # seconds — a portfolio view doesn't need sub-minute prices
+
+def _is_rate_limited(err) -> bool:
+    s = str(err).lower()
+    return "too many requests" in s or "429" in s or "rate limit" in s
+
+def _closes_5d(ticker):
+    """5-day close series (oldest→newest) with a short TTL cache and stale-on-error."""
+    now = _time_rd.time()
+    hit = _PRICE_CACHE.get(ticker)
+    if hit and now - hit[0] < _PRICE_TTL:
+        return hit[1]
+    try:
+        c = yf.Ticker(ticker).history(period="5d")["Close"].dropna()
+        vals = [float(x) for x in c.tolist()]
+        if vals:
+            _PRICE_CACHE[ticker] = (now, vals)
+        return vals
+    except Exception:
+        if hit:                       # rate-limited/transient: reuse the last good prices
+            return hit[1]
+        raise
+
+
 def layer1_data_valuation(portfolio=None):
     """Value a list of positions concurrently (yfinance calls run in parallel threads).
 
@@ -114,12 +147,11 @@ def layer1_data_valuation(portfolio=None):
 
     def _value_one(pos):
         try:
-            tk   = yf.Ticker(pos["ticker"])
-            c    = tk.history(period="5d")["Close"].dropna()
-            if c.empty:
+            vals = _closes_5d(pos["ticker"])
+            if not vals:
                 return _err(pos, "No market data")
-            spot = float(c.iloc[-1])
-            prev = float(c.iloc[-2]) if len(c) > 1 else spot   # prior close → today's $ move
+            spot = float(vals[-1])
+            prev = float(vals[-2]) if len(vals) > 1 else spot   # prior close → today's $ move
             cb   = float(pos.get("cost_basis") or 0)
 
             if pos["type"] in ("SHARES", "CRYPTO"):
@@ -137,6 +169,7 @@ def layer1_data_valuation(portfolio=None):
                         "delta": 1.0, "theta": 0, "vega": 0, "iv": None, "dte": None,
                         "expired": False}
             else:
+                tk      = yf.Ticker(pos["ticker"])   # options need the chain (constructing is free)
                 expiry  = datetime.date.fromisoformat(pos["expiry"])
                 raw_dte = (expiry - today).days
                 dte     = max(raw_dte, 0)
@@ -163,11 +196,13 @@ def layer1_data_valuation(portfolio=None):
                         "day_change_pct": round(day_chg/prior_val,4) if prior_val else 0,
                         "dte": dte, "iv": round(iv,3), "expired": raw_dte < 0, **greeks}
         except Exception as e:
-            return _err(pos, str(e))
+            msg = "Yahoo rate-limited — prices refresh shortly" if _is_rate_limited(e) else str(e)
+            return _err(pos, msg)
 
-    # Run all positions concurrently; preserve original order via index map
+    # Run concurrently but with a modest cap: caching means most calls hit memory,
+    # and a smaller burst on a cold cache is far less likely to trip Yahoo's 429.
     results = [None] * len(portfolio)
-    with ThreadPoolExecutor(max_workers=min(len(portfolio), 8)) as ex:
+    with ThreadPoolExecutor(max_workers=min(len(portfolio), 4)) as ex:
         futs = {ex.submit(_value_one, pos): i for i, pos in enumerate(portfolio)}
         for fut in as_completed(futs):
             results[futs[fut]] = fut.result()

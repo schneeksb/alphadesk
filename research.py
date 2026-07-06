@@ -614,8 +614,19 @@ def cftc_positioning():
 
 
 def positioning_data():
-    """Cached COT read. COT publishes weekly (Fri ~3:30pm ET), so 6h fresh / 7d stale."""
-    return _cached_swr("cot", cftc_positioning, ttl=21600, stale_ttl=604800)
+    """Cached COT read. COT publishes weekly (Fri ~3:30pm ET), so 6h TTL. Never
+    caches an EMPTY result — a transient CFTC/network failure (e.g. Render cold
+    start) would otherwise poison the cache for hours; instead we serve the last
+    good data if we have it, or retry on the next call."""
+    now = _time.time()
+    hit = _CACHE.get("cot")
+    if hit and (now - hit[0] < 21600) and (hit[1].get("contracts")):
+        return hit[1]
+    val = cftc_positioning()
+    if val.get("contracts"):
+        _CACHE["cot"] = (now, val)
+        return val
+    return hit[1] if hit else val        # fall back to stale-good over empty
 
 
 def _stmt_row(df, *names):

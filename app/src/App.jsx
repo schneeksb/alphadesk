@@ -5221,6 +5221,7 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
   const [addr, setAddr] = useState("");
   const [looking, setLooking] = useState(false);
   const [look, setLook] = useState(null);
+  const [showAssume, setShowAssume] = useState(false);
   const pick = (t) => { memory.current[type]=inp; setType(t); setInp(memory.current[t] || RE_DEFAULTS[t]); };
   const set = (k) => (v) => setInp(s=>({ ...s, [k]: v }));
   const setQk = (k) => (v) => setQ(s=>({ ...s, [k]: v }));
@@ -5233,12 +5234,20 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
     setLooking(true); setLook(null);
     fetchREPropertyLookup(a, type).then(d=>{
       if (d.ai_error) { setLook(d); return; }
+      const num = (v, cur, r=1) => v != null ? Math.round(v*r)/r : cur;
       setInp(s=>({ ...s,
-        price:  d.value  != null ? Math.round(d.value)  : s.price,
+        price: num(d.value, s.price),
         ...(type!=="flip" ? {
-          rentMo:  d.rentMo  != null ? Math.round(d.rentMo)  : s.rentMo,
-          taxesYr: d.taxesYr != null ? Math.round(d.taxesYr) : s.taxesYr,
-          insYr:   d.insYr   != null ? Math.round(d.insYr)   : s.insYr,
+          rentMo:  num(d.rentMo, s.rentMo),
+          taxesYr: num(d.taxesYr, s.taxesYr),
+          insYr:   num(d.insYr, s.insYr),
+          // AI-drafted operating assumptions so the user doesn't hand-guess them
+          vacancyPct: num(d.vacancyPct, s.vacancyPct, 10),
+          maintPct:   num(d.maintPct, s.maintPct, 10),
+          capexPct:   num(d.capexPct, s.capexPct, 10),
+          mgmtPct:    num(d.mgmtPct, s.mgmtPct, 10),
+          apprPct:       num(d.apprPct, s.apprPct, 10),
+          rentGrowthPct: num(d.rentGrowthPct, s.rentGrowthPct, 10),
         } : {}),
         ...(type==="commercial" && d.marketCapPct != null ? { marketCapPct: Math.round(d.marketCapPct*10)/10 } : {}),
         ...(type==="commercial" && d.sqft != null ? { sqft: d.sqft } : {}),
@@ -5288,6 +5297,7 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
             {look.marketCapPct!=null && ` · market cap ~${look.marketCapPct}%`}
             {look.sqft!=null && ` · ${look.sqft.toLocaleString()}sf`}
           </div>
+          {look.vacancyPct!=null && <div style={{ fontSize:10.5, color:C.sub, marginTop:3 }}>Operating assumptions drafted too (vacancy {look.vacancyPct}%, maintenance {look.maintPct}%, capex {look.capexPct}%, management {look.mgmtPct}%) — tucked under “Operating assumptions,” all editable.</div>}
           {look.note && <div style={{ fontSize:10.5, color:C.sub, marginTop:4, lineHeight:1.5 }}>{look.note}</div>}
         </div>
       ))}
@@ -5342,17 +5352,32 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
               <REIn label="Other income / mo" prefix="$" value={inp.otherMo} onChange={set("otherMo")}/>
             </div>
             <div style={{ ...inGrid, marginTop:10 }}>
-              <REIn label="Vacancy" suffix="%" value={inp.vacancyPct} onChange={set("vacancyPct")}/>
               <REIn label="Taxes / yr" prefix="$" value={inp.taxesYr} onChange={set("taxesYr")}/>
               <REIn label="Insurance / yr" prefix="$" value={inp.insYr} onChange={set("insYr")}/>
-              <REIn label="Maintenance (% rent)" suffix="%" value={inp.maintPct} onChange={set("maintPct")}/>
-              <REIn label="Capex reserve (% rent)" suffix="%" value={inp.capexPct} onChange={set("capexPct")}/>
-              <REIn label="Management (% EGI)" suffix="%" value={inp.mgmtPct} onChange={set("mgmtPct")}/>
-              <REIn label="Utilities / mo" prefix="$" value={inp.utilitiesMo} onChange={set("utilitiesMo")}/>
-              <REIn label="HOA / mo" prefix="$" value={inp.hoaMo} onChange={set("hoaMo")}/>
-              <REIn label="Appreciation / yr" suffix="%" value={inp.apprPct} onChange={set("apprPct")}/>
-              <REIn label="Rent growth / yr" suffix="%" value={inp.rentGrowthPct} onChange={set("rentGrowthPct")}/>
               {type==="commercial" && <REIn label="Market cap rate" suffix="%" value={inp.marketCapPct} onChange={set("marketCapPct")}/>}
+            </div>
+            {/* The expert knobs — summarized and collapsed. Auto-fill drafts them from the
+                address, so most users can leave them and just tune what they want. */}
+            <div style={{ marginTop:12, border:`1px solid ${C.line}`, borderRadius:10, overflow:"hidden" }}>
+              <button onClick={()=>setShowAssume(s=>!s)} style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, background:C.panel2, border:"none", padding:"9px 12px", cursor:"pointer", textAlign:"left" }}>
+                <span style={{ fontSize:11, color:C.sub, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                  <b style={{ color:C.ink }}>Operating assumptions</b>
+                  <span style={{ color:C.faint }}> · Vac {inp.vacancyPct}% · Maint {inp.maintPct}% · Capex {inp.capexPct}% · Mgmt {inp.mgmtPct}% · Appr {inp.apprPct}%/yr · Rent +{inp.rentGrowthPct}%/yr</span>
+                </span>
+                <span style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, fontSize:10.5, color:C.cold }}>{showAssume?"hide":"edit"}<ChevronDown size={15} color={C.faint} style={{ transform:showAssume?"rotate(180deg)":"none", transition:"transform .15s" }}/></span>
+              </button>
+              {showAssume && (
+                <div style={{ ...inGrid, padding:"12px" }}>
+                  <REIn label="Vacancy" suffix="%" value={inp.vacancyPct} onChange={set("vacancyPct")}/>
+                  <REIn label="Maintenance (% rent)" suffix="%" value={inp.maintPct} onChange={set("maintPct")}/>
+                  <REIn label="Capex reserve (% rent)" suffix="%" value={inp.capexPct} onChange={set("capexPct")}/>
+                  <REIn label="Management (% EGI)" suffix="%" value={inp.mgmtPct} onChange={set("mgmtPct")}/>
+                  <REIn label="Utilities / mo" prefix="$" value={inp.utilitiesMo} onChange={set("utilitiesMo")}/>
+                  <REIn label="HOA / mo" prefix="$" value={inp.hoaMo} onChange={set("hoaMo")}/>
+                  <REIn label="Appreciation / yr" suffix="%" value={inp.apprPct} onChange={set("apprPct")}/>
+                  <REIn label="Rent growth / yr" suffix="%" value={inp.rentGrowthPct} onChange={set("rentGrowthPct")}/>
+                </div>
+              )}
             </div>
             {type==="commercial" && (inp.loanType==="sba504" || inp.loanType==="sba7a") && (
               <div style={{ fontSize:11, color:C.amber, marginTop:10, lineHeight:1.5 }}>
@@ -5544,11 +5569,15 @@ function REPropertyForm({ initial, onSubmit, onClose }) {
     setLooking(true); setLook(null);
     fetchREPropertyLookup(addr, p.type).then(d=>{
       if (d.ai_error) { setLook(d); return; }
+      const num = (v, cur, r=1) => v != null ? Math.round(v*r)/r : cur;
       setP(s=>({ ...s,
-        value:        d.value  != null ? Math.round(d.value)  : s.value,
-        marketRentMo: d.rentMo != null ? Math.round(d.rentMo) : s.marketRentMo,
-        taxesYr:      d.taxesYr!= null ? Math.round(d.taxesYr): s.taxesYr,
-        insYr:        d.insYr  != null ? Math.round(d.insYr)  : s.insYr,
+        value:        num(d.value, s.value),
+        marketRentMo: num(d.rentMo, s.marketRentMo),
+        taxesYr:      num(d.taxesYr, s.taxesYr),
+        insYr:        num(d.insYr, s.insYr),
+        vacancyPct:   num(d.vacancyPct, s.vacancyPct, 10),
+        maintPct:     num(d.maintPct, s.maintPct, 10),
+        mgmtPct:      num(d.mgmtPct, s.mgmtPct, 10),
       }));
       setLook(d);
     }).catch(e=>setLook({ ai_error:String(e.message||e) })).finally(()=>setLooking(false));
@@ -5782,14 +5811,14 @@ function RESellAnalyzer({ properties, aiEnabled, profile }) {
           <REIn label="Principal paydown / yr" prefix="$" value={inp.paydownYr} onChange={set("paydownYr")}/>
           <REIn label="Appreciation / yr" suffix="%" value={inp.apprPct} onChange={set("apprPct")}/>
           <REIn label="Redeployed return" suffix="%" value={inp.altReturnPct} onChange={set("altReturnPct")}/>
-          <REIn label="Achievable rent raise / mo" prefix="$" value={inp.rentUpMo} onChange={set("rentUpMo")}/>
+          <REIn label="Rent raise at renewal ($/mo)" prefix="$" value={inp.rentUpMo} onChange={set("rentUpMo")}/>
         </div>
       </div>
       <div style={{ background:C.panel, borderTop:`1px solid ${C.line}`, borderRight:`1px solid ${C.line}`, borderBottom:`1px solid ${C.line}`, borderLeft:`4px solid ${raiseFixesIt?C.cold:lazy?C.amber:C.up}`, borderRadius:12, padding:"13px 16px" }}>
         <span style={{ fontFamily:C.mono, fontSize:13, fontWeight:800, letterSpacing:"0.05em", color:raiseFixesIt?C.cold:lazy?C.amber:C.up }}>{raiseFixesIt?"RAISE RENTS FIRST":lazy?"EQUITY IS LAZY":"KEEPING WINS"}</span>
         <span style={{ fontSize:12.5, color:C.ink, marginLeft:10 }}>
           {raiseFixesIt
-            ? `At today's rent, keeping earns ${fmt$(keepYr)}/yr vs ${fmt$(redeployYr)}/yr redeployed — but a ${fmt$(n_(inp.rentUpMo))}/mo raise lifts keeping to ${fmt$(keepRaisedYr)}/yr, which beats selling. Fix the rent before you give up ${fmt$(totalTax+sellCosts)} in taxes and selling costs.`
+            ? `At today's rent, keeping earns ${fmt$(keepYr)}/yr vs ${fmt$(redeployYr)}/yr redeployed — but a ${fmt$(n_(inp.rentUpMo))}/mo raise at the next renewal (+${fmt$(n_(inp.rentUpMo)*12)}/yr) lifts keeping to ${fmt$(keepRaisedYr)}/yr, which beats selling. Fix the rent before you give up ${fmt$(totalTax+sellCosts)} in taxes and selling costs.`
             : lazy
             ? `Keeping earns ${fmt$(keepYr)}/yr on ${fmt$(equityNow)} equity (${fmtPc(roe)}) — redeploying the ${fmt$(netProceeds)} net proceeds at ${inp.altReturnPct}% would earn ${fmt$(redeployYr)}/yr. Consider selling, a cash-out refi, or a 1031 into a better-yielding asset.`
             : `Keeping earns ${fmt$(keepYr)}/yr (${fmtPc(roe)} on equity) vs ${fmt$(redeployYr)}/yr if you sold and redeployed at ${inp.altReturnPct}% — the property is still working harder than the alternative.`}

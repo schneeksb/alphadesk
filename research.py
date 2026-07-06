@@ -1047,6 +1047,8 @@ _RELOOK_SCHEMA = _s(
     rentMo="num", rentMoLow="num", rentMoHigh="num",
     taxesYr="num", insYr="num",
     marketCapPct="num",
+    vacancyPct="num", maintPct="num", capexPct="num", mgmtPct="num",
+    apprPct="num", rentGrowthPct="num",
     confidence={"type": "string", "enum": ["low", "medium", "high"]},
     note="str",
 )
@@ -2222,6 +2224,14 @@ Emit via the tool:
 - insYr: typical annual landlord/commercial-property policy for that state and value
 - marketCapPct: the prevailing market cap rate (as a percent, e.g. 7.5) for THIS property type in
   this submarket today — for residential use the local small-rental cap norm
+- OPERATING ASSUMPTIONS tuned to THIS property's type, class and area (so the user doesn't have to
+  guess). Give realistic, slightly-conservative numbers a good underwriter would use:
+    vacancyPct  — economic vacancy % (tighter markets ~4-5%, softer/rougher or office ~8-12%)
+    maintPct    — repairs & maintenance as % of rent (newer/turnkey ~4-5%, older/C-class ~8-12%)
+    capexPct    — capital-reserve % of rent for roofs/HVAC/etc (older buildings higher)
+    mgmtPct     — property management as % of collected rent (SFR ~8-10%, larger MF/commercial ~3-5%)
+    apprPct     — a sober annual appreciation assumption for this market (%/yr)
+    rentGrowthPct — a sober annual rent-growth assumption for this market (%/yr)
 - confidence: high only for well-known metros you know well; low for rural or ambiguous addresses
 - note: one sentence — what drove the estimate (incl. any size/$-per-SF assumption) and the single
   most important thing to verify locally"""

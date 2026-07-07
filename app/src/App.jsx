@@ -6310,7 +6310,7 @@ function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
   return (
     <>
       {/* Floating launcher */}
-      <button onClick={()=>setOpen(o=>!o)} title="Ask AlphaDesk"
+      <button onClick={()=>setOpen(o=>!o)} title="Ask Thrive Invest"
         style={{ position:"fixed", right:18, bottom:18, zIndex:80, width:54, height:54, borderRadius:"50%",
           background:C.cold, border:"none", boxShadow:"0 8px 28px rgba(0,0,0,0.35)", cursor:"pointer",
           display:"flex", alignItems:"center", justifyContent:"center", color:"#fff" }}>
@@ -6328,7 +6328,7 @@ function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
             <div style={{ display:"flex", alignItems:"center", gap:9 }}>
               <div style={{ width:30, height:30, borderRadius:9, background:`${C.cold}1c`, display:"flex", alignItems:"center", justifyContent:"center" }}><Zap size={16} color={C.cold}/></div>
               <div>
-                <div style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>AlphaDesk Assistant</div>
+                <div style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>Thrive Invest Assistant</div>
                 <div style={{ fontSize:10.5, color:C.faint }}>grounded in your live data</div>
               </div>
             </div>
@@ -6648,7 +6648,11 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       {/* ── Sticky top nav — always visible ─────────────────── */}
       <div style={{ borderBottom:`1px solid ${C.line}`, padding:"10px 14px", position:"sticky", top:0, background:C.bg, zIndex:20 }}>
         <div style={{ display:"flex", flexWrap:"wrap", justifyContent:"space-between", alignItems:"center", gap:8, maxWidth:1180, margin:"0 auto" }}>
-          <div onClick={()=>{ setDetail(null); setTab("watchlist"); }} title="Go to Watchlist" style={{ fontWeight:800, fontSize:17, letterSpacing:"-0.02em", flexShrink:0, cursor:"pointer" }}>AlphaDesk <span style={{ color:C.hot }}>·</span></div>
+          <div onClick={()=>{ setDetail(null); setTab("watchlist"); }} title="Go to Watchlist" style={{ display:"flex", alignItems:"baseline", gap:3, flexShrink:0, cursor:"pointer", letterSpacing:"-0.02em" }}>
+            <span style={{ fontWeight:800, fontSize:19 }}>Thrive</span>
+            <span style={{ fontWeight:600, fontSize:11.5, color:C.sub, letterSpacing:0 }}>Invest</span>
+            <span style={{ color:C.hot, fontWeight:800, fontSize:19 }}>·</span>
+          </div>
           <TickerInput style={{ flex:"1 1 180px", maxWidth:420 }} extra={watchlist}
             placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"
             onPick={(t)=>{ const T=normalizeTicker(t)||t; if(T) setDetail(T); }}/>

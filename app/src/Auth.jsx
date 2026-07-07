@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { supabase, authEnabled } from "./lib/supabase";
+import BrandMark from "./BrandMark.jsx";
 
 // undefined = still loading, null = signed out, object = signed in
 export function useSession() {
@@ -32,10 +33,10 @@ export function LoginScreen() {
       background:"#ffffff", fontFamily:"'Inter',system-ui,-apple-system,sans-serif", padding:"24px" }}>
       <div style={{ width:"100%", maxWidth:380, background:"#f6f8fb", border:"1px solid #dde3ec",
         borderRadius:18, padding:"34px 30px", textAlign:"center", boxShadow:"0 18px 50px rgba(16,22,32,0.08)" }}>
+        <BrandMark size={72} style={{ display:"block", margin:"0 auto 12px" }}/>
         <div style={{ display:"flex", alignItems:"baseline", justifyContent:"center", gap:4, letterSpacing:"-0.02em", marginBottom:6 }}>
           <span style={{ fontWeight:800, fontSize:30, color:"#101620" }}>Thrive</span>
           <span style={{ fontWeight:600, fontSize:15, color:"#586172" }}>Invest</span>
-          <span style={{ color:"#e8590c", fontWeight:800, fontSize:30 }}>·</span>
         </div>
         <div style={{ fontSize:13.5, color:"#586172", marginBottom:26, lineHeight:1.5 }}>
           Sign in to access your watchlist, portfolio, and market briefings — synced across your devices.

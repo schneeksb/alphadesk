@@ -5,6 +5,7 @@ import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } 
 import { CSS } from "@dnd-kit/utilities";
 import { authEnabled, supabase, authHeaders } from "./lib/supabase";
 import { useSession, signOut } from "./Auth.jsx";
+import BrandMark from "./BrandMark.jsx";
 
 
 /* ════════════════════════════════════════════════════════════════════
@@ -6648,10 +6649,12 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
       {/* ── Sticky top nav — always visible ─────────────────── */}
       <div style={{ borderBottom:`1px solid ${C.line}`, padding:"10px 14px", position:"sticky", top:0, background:C.bg, zIndex:20 }}>
         <div style={{ display:"flex", flexWrap:"wrap", justifyContent:"space-between", alignItems:"center", gap:8, maxWidth:1180, margin:"0 auto" }}>
-          <div onClick={()=>{ setDetail(null); setTab("watchlist"); }} title="Go to Watchlist" style={{ display:"flex", alignItems:"baseline", gap:3, flexShrink:0, cursor:"pointer", letterSpacing:"-0.02em" }}>
-            <span style={{ fontWeight:800, fontSize:19 }}>Thrive</span>
-            <span style={{ fontWeight:600, fontSize:11.5, color:C.sub, letterSpacing:0 }}>Invest</span>
-            <span style={{ color:C.hot, fontWeight:800, fontSize:19 }}>·</span>
+          <div onClick={()=>{ setDetail(null); setTab("watchlist"); }} title="Go to Watchlist" style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0, cursor:"pointer", letterSpacing:"-0.02em" }}>
+            <BrandMark size={30} style={{ flexShrink:0 }}/>
+            <span style={{ display:"flex", alignItems:"baseline", gap:3 }}>
+              <span style={{ fontWeight:800, fontSize:19 }}>Thrive</span>
+              <span style={{ fontWeight:600, fontSize:11.5, color:C.sub, letterSpacing:0 }}>Invest</span>
+            </span>
           </div>
           <TickerInput style={{ flex:"1 1 180px", maxWidth:420 }} extra={watchlist}
             placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"

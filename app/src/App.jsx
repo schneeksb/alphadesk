@@ -6064,15 +6064,21 @@ const NW_ASSET_CATS = ["Cash & savings","Retirement (401k/IRA)","Brokerage (othe
 const NW_LIAB_CATS  = ["Credit card","Student loan","Auto loan","Personal loan","Other mortgage","Tax owed","Other debt"];
 const NW_SEG_COLS   = [C.cold, C.up, C.violet, C.amber];   // holdings · cash · real estate · other
 
-function NetWorthPage({ holdingsValue=0, cash=0, margin=0, properties=[], positionsCount=0, items=[], onSaveItems, onGoto }) {
-  const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"" });
+function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, properties=[], positionsCount=0, items=[], onSaveItems, onGoto }) {
+  const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"", ratePct:"" });
   const reValue = properties.reduce((s,p)=>s+n_(p.value),0);
   const reDebt  = properties.reduce((s,p)=>s+n_(p.loanBalance),0);
+  const moInt   = (bal, rate) => n_(bal)*n_(rate)/100/12;   // estimated monthly interest accrued
 
   const manualAssets = items.filter(i=>i.kind==="asset");
   const manualLiabs  = items.filter(i=>i.kind==="liability");
   const manualAssetTot = manualAssets.reduce((s,a)=>s+n_(a.amount),0);
   const manualLiabTot  = manualLiabs.reduce((s,l)=>s+n_(l.amount),0);
+
+  // Real-estate loans: blended rate + total monthly interest across properties.
+  const reMoInt = properties.reduce((s,p)=>s+moInt(p.loanBalance, p.ratePct), 0);
+  const reRate  = reDebt>0 ? reMoInt*12/reDebt*100 : 0;
+  const marginMoInt = moInt(margin, marginRate);
 
   const autoAssets = [
     { key:"hold", label:"Investment holdings", amount:holdingsValue, note:`${positionsCount} position${positionsCount===1?"":"s"} · from Portfolio`, tab:"portfolio", col:NW_SEG_COLS[0] },
@@ -6080,13 +6086,15 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, properties=[], positi
     { key:"re",   label:"Real estate", amount:reValue, note:`${properties.length} propert${properties.length===1?"y":"ies"} · from Real Estate`, tab:"realestate", col:NW_SEG_COLS[2] },
   ];
   const autoLiabs = [
-    { key:"margin", label:"Margin loan", amount:margin, note:"from Portfolio", tab:"portfolio" },
-    { key:"reloan", label:"Real estate loans", amount:reDebt, note:"from Real Estate", tab:"realestate" },
+    { key:"margin", label:"Margin loan", amount:margin, note:"from Portfolio", tab:"portfolio", rate:margin>0?marginRate:null, mo:marginMoInt },
+    { key:"reloan", label:"Real estate loans", amount:reDebt, note:"from Real Estate", tab:"realestate", rate:reDebt>0?reRate:null, mo:reMoInt },
   ];
 
   const totalAssets = autoAssets.reduce((s,a)=>s+a.amount,0) + manualAssetTot;
   const totalLiabs  = autoLiabs.reduce((s,l)=>s+l.amount,0)  + manualLiabTot;
   const netWorth    = totalAssets - totalLiabs;
+  // Total estimated interest per month across every debt (auto + manual).
+  const totalMoInt = marginMoInt + reMoInt + manualLiabs.reduce((s,l)=>s+moInt(l.amount, l.ratePct), 0);
 
   // Asset allocation segments (for the bar): the three auto buckets + manual grouped.
   const segs = [
@@ -6099,18 +6107,22 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, properties=[], positi
   const add = () => {
     const amt = n_(draft.amount);
     if (!amt) return;
-    onSaveItems([...items, { id:newId(), kind:draft.kind, name:(draft.name||"").trim()||draft.category, category:draft.category, amount:Math.abs(amt) }]);
-    setDraft(d=>({ kind:d.kind, name:"", category:d.category, amount:"" }));
+    const it = { id:newId(), kind:draft.kind, name:(draft.name||"").trim()||draft.category, category:draft.category, amount:Math.abs(amt) };
+    if (draft.kind==="liability" && n_(draft.ratePct)>0) it.ratePct = n_(draft.ratePct);
+    onSaveItems([...items, it]);
+    setDraft(d=>({ kind:d.kind, name:"", category:d.category, amount:"", ratePct:"" }));
   };
   const remove = (id) => onSaveItems(items.filter(i=>i.id!==id));
   const setKind = (k) => setDraft(d=>({ ...d, kind:k, category:(k==="asset"?NW_ASSET_CATS:NW_LIAB_CATS)[0] }));
 
-  const Row = ({ label, note, amount, col, tab, onDel, muted }) => (
+  // rate/mo = interest rate % and estimated monthly interest accrued (liabilities).
+  const Row = ({ label, note, amount, col, tab, onDel, muted, rate, mo }) => (
     <div style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 0", borderTop:`1px solid ${C.panel2}` }}>
       {col && <span style={{ width:9, height:9, borderRadius:"50%", background:col, flexShrink:0 }}/>}
       <div style={{ minWidth:0, flex:1 }}>
         <div style={{ fontSize:12.5, color:C.ink, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{label}</div>
         {note && <div style={{ fontSize:10, color:C.faint, display:"flex", gap:6, alignItems:"center" }}>{note}{tab && onGoto && <span onClick={()=>onGoto(tab)} style={{ color:C.cold, cursor:"pointer" }}>open ↗</span>}</div>}
+        {rate!=null && rate>0 && <div style={{ fontSize:10, color:C.amber, marginTop:1 }}>{rate.toFixed(rate>=10?1:2)}% · ≈{fmt$(mo)}/mo interest</div>}
       </div>
       <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:muted?C.faint:C.ink, whiteSpace:"nowrap" }}>{fmt$(amount)}</div>
       {onDel && <button onClick={onDel} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}><Trash2 size={13}/></button>}
@@ -6163,10 +6175,16 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, properties=[], positi
             <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>Liabilities</span>
             <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:800, color:C.down }}>{fmt$(totalLiabs)}</span>
           </div>
-          {autoLiabs.filter(l=>l.amount>0).map(l=><Row key={l.key} label={l.label} note={l.note} amount={l.amount} tab={l.tab}/>)}
-          {manualLiabs.map(l=><Row key={l.id} label={l.name} note={l.category} amount={n_(l.amount)} onDel={()=>remove(l.id)}/>)}
+          {autoLiabs.filter(l=>l.amount>0).map(l=><Row key={l.key} label={l.label} note={l.note} amount={l.amount} tab={l.tab} rate={l.rate} mo={l.mo}/>)}
+          {manualLiabs.map(l=><Row key={l.id} label={l.name} note={l.category} amount={n_(l.amount)} rate={n_(l.ratePct)||null} mo={moInt(l.amount, l.ratePct)} onDel={()=>remove(l.id)}/>)}
           {autoLiabs.every(l=>l.amount===0) && manualLiabs.length===0 && (
             <div style={{ fontSize:11.5, color:C.faint, padding:"12px 0 4px" }}>No liabilities yet — add any debts below (credit cards, student loans, auto…).</div>
+          )}
+          {totalMoInt>0 && (
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:9, paddingTop:9, borderTop:`1px solid ${C.line}` }}>
+              <span style={{ fontSize:11, color:C.amber, fontWeight:700 }}>Interest drag</span>
+              <span style={{ fontFamily:C.mono, fontSize:12, color:C.amber, fontWeight:700 }}>≈{fmt$(totalMoInt)}/mo · {fmt$(totalMoInt*12)}/yr</span>
+            </div>
           )}
         </div>
       </div>
@@ -6183,11 +6201,17 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, properties=[], positi
           <select value={draft.category} onChange={e=>setDraft(d=>({ ...d, category:e.target.value }))} style={{ ...inp, flex:"1 1 160px" }}>
             {(draft.kind==="asset"?NW_ASSET_CATS:NW_LIAB_CATS).map(c=><option key={c} value={c}>{c}</option>)}
           </select>
-          <input value={draft.name} onChange={e=>setDraft(d=>({ ...d, name:e.target.value }))} placeholder="Name (e.g. Fidelity 401k)" style={{ ...inp, flex:"2 1 200px" }}/>
-          <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px", flex:"1 1 130px" }}>
+          <input value={draft.name} onChange={e=>setDraft(d=>({ ...d, name:e.target.value }))} placeholder={draft.kind==="liability"?"Name (e.g. Chase Visa)":"Name (e.g. Fidelity 401k)"} style={{ ...inp, flex:"2 1 180px" }}/>
+          <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px", flex:"1 1 120px" }}>
             <span style={{ fontSize:12, color:C.faint }}>$</span>
-            <input type="number" step="any" value={draft.amount} onChange={e=>setDraft(d=>({ ...d, amount:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="amount" style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+            <input type="number" step="any" value={draft.amount} onChange={e=>setDraft(d=>({ ...d, amount:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="balance" style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
           </div>
+          {draft.kind==="liability" && (
+            <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px", flex:"0 1 96px" }} title="Interest rate (APR) — used to estimate monthly interest">
+              <input type="number" step="any" value={draft.ratePct} onChange={e=>setDraft(d=>({ ...d, ratePct:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="rate" style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+              <span style={{ fontSize:12, color:C.faint }}>%</span>
+            </div>
+          )}
           <button onClick={add} style={{ background:C.up, border:"none", borderRadius:8, padding:"9px 16px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:700, display:"flex", gap:6, alignItems:"center" }}><Plus size={14}/> Add</button>
         </div>
         <div style={{ fontSize:9.5, color:C.faint, marginTop:10 }}>Manual entries sync across your devices. Holdings & cash update live from Portfolio; real-estate values from the Real Estate tab. Personal tracking — not financial advice.</div>
@@ -6994,7 +7018,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             deals={reDeals} onSaveDeals={setREDeals} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>}
           {tab==="networth" && <NetWorthPage holdingsValue={portfolio?.analytics?.total_value || 0}
-            cash={totalCash} margin={totalMargin} properties={reProperties} positionsCount={positions.length}
+            cash={totalCash} margin={totalMargin} marginRate={blendedRate} properties={reProperties} positionsCount={positions.length}
             items={nwItems} onSaveItems={setNwItems} onGoto={setTab}/>}
           {tab==="financials" && <FinancialsPage initialTicker={financialsTicker} watchlist={watchlist} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}

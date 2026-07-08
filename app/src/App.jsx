@@ -121,6 +121,13 @@ const saveREProps = (l) => { try { localStorage.setItem(REPROPS_KEY, JSON.string
 const REDEALS_KEY = "alphadesk:reDeals";
 const loadREDeals = () => { try { return JSON.parse(localStorage.getItem(REDEALS_KEY)) || []; } catch { return []; } };
 const saveREDeals = (l) => { try { localStorage.setItem(REDEALS_KEY, JSON.stringify(l)); } catch {} };
+
+// Net worth: manual assets & liabilities the app can't see (retirement, savings,
+// vehicles, student loans, credit cards…). Investment holdings, cash, and real
+// estate roll up automatically from the rest of the app.
+const NW_KEY = "alphadesk:networth";
+const loadNetWorth = () => { try { return JSON.parse(localStorage.getItem(NW_KEY)) || []; } catch { return []; } };
+const saveNetWorth = (l) => { try { localStorage.setItem(NW_KEY, JSON.stringify(l)); } catch {} };
 const UNASSIGNED = "__unassigned__";
 
 // ── CRYPTO SUPPORT ────────────────────────────────────────────────────
@@ -6050,6 +6057,145 @@ function RealEstatePage({ properties, onSaveProperties, deals, onSaveDeals, aiEn
   );
 }
 
+// ── NET WORTH ─────────────────────────────────────────────────────────
+// Rolls up everything: investment holdings + cash + real estate come straight
+// from the rest of the app; the user adds any other assets/liabilities by hand.
+const NW_ASSET_CATS = ["Cash & savings","Retirement (401k/IRA)","Brokerage (other)","Crypto wallet","Vehicle","Business equity","Collectibles","Other asset"];
+const NW_LIAB_CATS  = ["Credit card","Student loan","Auto loan","Personal loan","Other mortgage","Tax owed","Other debt"];
+const NW_SEG_COLS   = [C.cold, C.up, C.violet, C.amber];   // holdings · cash · real estate · other
+
+function NetWorthPage({ holdingsValue=0, cash=0, margin=0, properties=[], positionsCount=0, items=[], onSaveItems, onGoto }) {
+  const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"" });
+  const reValue = properties.reduce((s,p)=>s+n_(p.value),0);
+  const reDebt  = properties.reduce((s,p)=>s+n_(p.loanBalance),0);
+
+  const manualAssets = items.filter(i=>i.kind==="asset");
+  const manualLiabs  = items.filter(i=>i.kind==="liability");
+  const manualAssetTot = manualAssets.reduce((s,a)=>s+n_(a.amount),0);
+  const manualLiabTot  = manualLiabs.reduce((s,l)=>s+n_(l.amount),0);
+
+  const autoAssets = [
+    { key:"hold", label:"Investment holdings", amount:holdingsValue, note:`${positionsCount} position${positionsCount===1?"":"s"} · from Portfolio`, tab:"portfolio", col:NW_SEG_COLS[0] },
+    { key:"cash", label:"Cash", amount:cash, note:"from Portfolio accounts", tab:"portfolio", col:NW_SEG_COLS[1] },
+    { key:"re",   label:"Real estate", amount:reValue, note:`${properties.length} propert${properties.length===1?"y":"ies"} · from Real Estate`, tab:"realestate", col:NW_SEG_COLS[2] },
+  ];
+  const autoLiabs = [
+    { key:"margin", label:"Margin loan", amount:margin, note:"from Portfolio", tab:"portfolio" },
+    { key:"reloan", label:"Real estate loans", amount:reDebt, note:"from Real Estate", tab:"realestate" },
+  ];
+
+  const totalAssets = autoAssets.reduce((s,a)=>s+a.amount,0) + manualAssetTot;
+  const totalLiabs  = autoLiabs.reduce((s,l)=>s+l.amount,0)  + manualLiabTot;
+  const netWorth    = totalAssets - totalLiabs;
+
+  // Asset allocation segments (for the bar): the three auto buckets + manual grouped.
+  const segs = [
+    { label:"Holdings", amount:holdingsValue, col:NW_SEG_COLS[0] },
+    { label:"Cash", amount:cash, col:NW_SEG_COLS[1] },
+    { label:"Real estate", amount:reValue, col:NW_SEG_COLS[2] },
+    { label:"Other", amount:manualAssetTot, col:NW_SEG_COLS[3] },
+  ].filter(s=>s.amount>0);
+
+  const add = () => {
+    const amt = n_(draft.amount);
+    if (!amt) return;
+    onSaveItems([...items, { id:newId(), kind:draft.kind, name:(draft.name||"").trim()||draft.category, category:draft.category, amount:Math.abs(amt) }]);
+    setDraft(d=>({ kind:d.kind, name:"", category:d.category, amount:"" }));
+  };
+  const remove = (id) => onSaveItems(items.filter(i=>i.id!==id));
+  const setKind = (k) => setDraft(d=>({ ...d, kind:k, category:(k==="asset"?NW_ASSET_CATS:NW_LIAB_CATS)[0] }));
+
+  const Row = ({ label, note, amount, col, tab, onDel, muted }) => (
+    <div style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 0", borderTop:`1px solid ${C.panel2}` }}>
+      {col && <span style={{ width:9, height:9, borderRadius:"50%", background:col, flexShrink:0 }}/>}
+      <div style={{ minWidth:0, flex:1 }}>
+        <div style={{ fontSize:12.5, color:C.ink, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{label}</div>
+        {note && <div style={{ fontSize:10, color:C.faint, display:"flex", gap:6, alignItems:"center" }}>{note}{tab && onGoto && <span onClick={()=>onGoto(tab)} style={{ color:C.cold, cursor:"pointer" }}>open ↗</span>}</div>}
+      </div>
+      <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:muted?C.faint:C.ink, whiteSpace:"nowrap" }}>{fmt$(amount)}</div>
+      {onDel && <button onClick={onDel} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}><Trash2 size={13}/></button>}
+    </div>
+  );
+  const inp = { background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 10px", color:C.ink, fontSize:12.5, outline:"none" };
+
+  return (
+    <div>
+      <div style={{ marginBottom:14 }}>
+        <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Net Worth</div>
+        <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>Everything you own minus everything you owe · holdings, cash & real estate roll up automatically</div>
+      </div>
+
+      {/* Headline */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderLeft:`4px solid ${netWorth>=0?C.up:C.down}`, borderRadius:14, padding:"18px 20px", marginBottom:14 }}>
+        <div style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.08em" }}>NET WORTH</div>
+        <div style={{ fontFamily:C.mono, fontSize:38, fontWeight:800, color:netWorth>=0?C.ink:C.down, lineHeight:1.15, marginTop:2 }}>{fmt$(netWorth)}</div>
+        <div style={{ fontSize:12, color:C.sub, marginTop:6 }}>
+          <b style={{ color:C.up }}>{fmt$(totalAssets)}</b> assets − <b style={{ color:C.down }}>{fmt$(totalLiabs)}</b> liabilities
+        </div>
+        {segs.length>0 && (
+          <>
+            <div style={{ display:"flex", height:10, borderRadius:6, overflow:"hidden", marginTop:12, background:C.panel2 }}>
+              {segs.map((s,i)=><div key={i} title={`${s.label}: ${fmt$(s.amount)}`} style={{ width:`${(s.amount/totalAssets)*100}%`, background:s.col }}/>)}
+            </div>
+            <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginTop:8 }}>
+              {segs.map((s,i)=>(
+                <span key={i} style={{ fontSize:10.5, color:C.sub, display:"flex", alignItems:"center", gap:5 }}>
+                  <span style={{ width:8, height:8, borderRadius:"50%", background:s.col }}/>{s.label} <b style={{ color:C.ink, fontFamily:C.mono }}>{((s.amount/totalAssets)*100).toFixed(0)}%</b>
+                </span>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Assets / Liabilities columns */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:14, marginBottom:14 }}>
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:2 }}>
+            <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>Assets</span>
+            <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:800, color:C.up }}>{fmt$(totalAssets)}</span>
+          </div>
+          {autoAssets.map(a=><Row key={a.key} label={a.label} note={a.note} amount={a.amount} col={a.col} tab={a.tab} muted={a.amount===0}/>)}
+          {manualAssets.map(a=><Row key={a.id} label={a.name} note={a.category} amount={n_(a.amount)} onDel={()=>remove(a.id)}/>)}
+        </div>
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:2 }}>
+            <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>Liabilities</span>
+            <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:800, color:C.down }}>{fmt$(totalLiabs)}</span>
+          </div>
+          {autoLiabs.filter(l=>l.amount>0).map(l=><Row key={l.key} label={l.label} note={l.note} amount={l.amount} tab={l.tab}/>)}
+          {manualLiabs.map(l=><Row key={l.id} label={l.name} note={l.category} amount={n_(l.amount)} onDel={()=>remove(l.id)}/>)}
+          {autoLiabs.every(l=>l.amount===0) && manualLiabs.length===0 && (
+            <div style={{ fontSize:11.5, color:C.faint, padding:"12px 0 4px" }}>No liabilities yet — add any debts below (credit cards, student loans, auto…).</div>
+          )}
+        </div>
+      </div>
+
+      {/* Add manual item */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px" }}>
+        <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:10 }}>Add an asset or liability <span style={{ fontSize:10, color:C.faint, fontWeight:400 }}>· anything the app doesn't already track</span></div>
+        <div style={{ display:"flex", gap:2, background:C.panel2, borderRadius:9, padding:3, border:`1px solid ${C.line}`, width:"fit-content", marginBottom:10 }}>
+          {[["asset","Asset"],["liability","Liability"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setKind(k)} style={{ padding:"6px 16px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:draft.kind===k?C.line:"transparent", color:draft.kind===k?C.ink:C.sub }}>{l}</button>
+          ))}
+        </div>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
+          <select value={draft.category} onChange={e=>setDraft(d=>({ ...d, category:e.target.value }))} style={{ ...inp, flex:"1 1 160px" }}>
+            {(draft.kind==="asset"?NW_ASSET_CATS:NW_LIAB_CATS).map(c=><option key={c} value={c}>{c}</option>)}
+          </select>
+          <input value={draft.name} onChange={e=>setDraft(d=>({ ...d, name:e.target.value }))} placeholder="Name (e.g. Fidelity 401k)" style={{ ...inp, flex:"2 1 200px" }}/>
+          <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px", flex:"1 1 130px" }}>
+            <span style={{ fontSize:12, color:C.faint }}>$</span>
+            <input type="number" step="any" value={draft.amount} onChange={e=>setDraft(d=>({ ...d, amount:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="amount" style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+          </div>
+          <button onClick={add} style={{ background:C.up, border:"none", borderRadius:8, padding:"9px 16px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:700, display:"flex", gap:6, alignItems:"center" }}><Plus size={14}/> Add</button>
+        </div>
+        <div style={{ fontSize:9.5, color:C.faint, marginTop:10 }}>Manual entries sync across your devices. Holdings & cash update live from Portfolio; real-estate values from the Real Estate tab. Personal tracking — not financial advice.</div>
+      </div>
+    </div>
+  );
+}
+
 function FinancialsPage({ initialTicker, watchlist, aiEnabled, profile, savedScreens, onSaveScreen, onDeleteScreen, onOpenDetail, projections, onSaveProjection }) {
   const [view, setView]   = useState("analyze");   // analyze | compare | screener
   const [ticker, setTicker] = useState(initialTicker || "AAPL");
@@ -6438,6 +6584,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [projections, setProjections]   = useState(loadProjections);
   const [reProperties, setREProperties] = useState(loadREProps);
   const [reDeals, setREDeals]           = useState(loadREDeals);
+  const [nwItems, setNwItems]           = useState(loadNetWorth);
   const [financialsTicker, setFinancialsTicker] = useState(null);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
@@ -6456,6 +6603,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveProjections(projections); },[projections]);
   useEffect(()=>{ saveREProps(reProperties); },[reProperties]);
   useEffect(()=>{ saveREDeals(reDeals); },[reDeals]);
+  useEffect(()=>{ saveNetWorth(nwItems); },[nwItems]);
 
   // Keep-alive: ping the backend every 8 min so Render never cold-starts mid-session
   useEffect(()=>{
@@ -6493,6 +6641,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.projections)          setProjections(prev => ({ ...prev, ...data.projections }));
         if (data.reProperties?.length) setREProperties(data.reProperties);
         if (data.reDeals?.length)      setREDeals(data.reDeals);
+        if (data.nwItems?.length)      setNwItems(data.nwItems);
       }).catch(()=>{});
     } else {
       // Anonymous path: fall back to server positions.json + settings.json
@@ -6505,13 +6654,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals };
+  sbState.current = { positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, userId]);
+  },[positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, userId]);
 
   // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
   // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
@@ -6687,7 +6836,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"
             onPick={(t)=>{ const T=normalizeTicker(t)||t; if(T) setDetail(T); }}/>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0, flexWrap:"wrap" }}>
-            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["realestate","Real Estate"],["financials","Financials"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
+            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["realestate","Real Estate"],["networth","Net Worth"],["financials","Financials"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
                 style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500,
                   background: !detail && tab===id ? C.line : "transparent",
@@ -6844,6 +6993,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           {tab==="realestate" && <RealEstatePage properties={reProperties} onSaveProperties={setREProperties}
             deals={reDeals} onSaveDeals={setREDeals} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>}
+          {tab==="networth" && <NetWorthPage holdingsValue={portfolio?.analytics?.total_value || 0}
+            cash={totalCash} margin={totalMargin} properties={reProperties} positionsCount={positions.length}
+            items={nwItems} onSaveItems={setNwItems} onGoto={setTab}/>}
           {tab==="financials" && <FinancialsPage initialTicker={financialsTicker} watchlist={watchlist} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}
             savedScreens={savedScreens} onSaveScreen={saveScreen} onDeleteScreen={deleteScreen} onOpenDetail={setDetail}

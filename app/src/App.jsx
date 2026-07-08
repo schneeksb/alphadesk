@@ -4976,6 +4976,7 @@ function ScreenerPanel({ watchlist, savedScreens, onSaveScreen, onDeleteScreen, 
 // owned properties, and sell-vs-keep analysis. AI underwriter second opinion
 // via /ai-re-review. All state persists per-user (Supabase blob + localStorage).
 const RE_TYPES = [["rental","Rental"],["multifamily","Multifamily"],["flip","Fix & Flip"],["commercial","Commercial"]];
+const RE_HOLD_YEARS = [5, 10, 15, 20, 25, 30];
 const fmt$ = (v, d=0) => (v==null || isNaN(v) || !isFinite(v)) ? "—" : `${v<0?"−":""}$${Math.abs(Number(v)).toLocaleString(undefined,{maximumFractionDigits:d})}`;
 const fmtPc = (v, d=1) => (v==null || isNaN(v) || !isFinite(v)) ? "—" : `${(v*100).toFixed(d)}%`;
 const mortgagePmt = (P, annualPct, years) => {
@@ -5136,6 +5137,35 @@ function REMetric({ label, value, sub, col }) {
     </div>
   );
 }
+// Hold-period projection: value/equity/cash flow/profit/annualized at 5,10,…,30 yrs.
+function REHoldTable({ hold, apprPct, rentGrowthPct }) {
+  const cols = ["Hold","Property value","Equity","Cumulative cash flow","Total profit","Annualized"];
+  const grid = "70px repeat(5, minmax(94px, 1fr))";
+  const cell = { padding:"8px 10px", fontFamily:C.mono, fontSize:11.5, textAlign:"right", whiteSpace:"nowrap" };
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"13px 16px" }}>
+      <div style={{ fontSize:11, fontWeight:700, color:C.ink, marginBottom:8 }}>Hold-period projection <span style={{ fontSize:9.5, color:C.faint, fontWeight:400 }}>· {apprPct}% appreciation, {rentGrowthPct}% rent growth, loans amortizing to payoff · before sale costs &amp; tax</span></div>
+      <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+        <div style={{ minWidth:560 }}>
+          <div style={{ display:"grid", gridTemplateColumns:grid, borderBottom:`1px solid ${C.line}` }}>
+            {cols.map((c,i)=>(<div key={i} style={{ padding:"6px 10px", fontSize:9, color:C.faint, textTransform:"uppercase", letterSpacing:"0.04em", textAlign:i?"right":"left", whiteSpace:"nowrap" }}>{c}</div>))}
+          </div>
+          {(hold||[]).map((h,ri)=>(
+            <div key={h.yrs} style={{ display:"grid", gridTemplateColumns:grid, borderTop:ri?`1px solid ${C.panel2}`:"none", alignItems:"center" }}>
+              <div style={{ padding:"8px 10px", fontSize:11.5, fontWeight:700, color:C.ink }}>{h.yrs} yr</div>
+              <div style={cell}>{fmt$(h.value)}</div>
+              <div style={{ ...cell, color:C.up }}>{fmt$(h.equity)}</div>
+              <div style={{ ...cell, color:h.cumCF>=0?C.up:C.down }}>{fmt$(h.cumCF)}</div>
+              <div style={{ ...cell, fontWeight:700, color:h.profit>=0?C.up:C.down }}>{fmt$(h.profit)}</div>
+              <div style={{ ...cell, fontWeight:800, color:(h.ann??0)>=0?C.up:C.down }}>{fmtPc(h.ann)}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ fontSize:9.5, color:C.faint, marginTop:7 }}>Total profit = equity gain + cumulative cash flow − cash invested. Annualized is the smoothed yearly return on your cash over that hold.</div>
+    </div>
+  );
+}
 
 const RE_DEFAULTS = {
   rental:      { price:300000, downPct:20, ratePct:6.5, termYrs:30, closingPct:3, rehab:5000, units:1, rentMo:2200, otherMo:0, vacancyPct:5, taxesYr:3600, insYr:1400, maintPct:5, capexPct:5, mgmtPct:8, utilitiesMo:0, hoaMo:0, apprPct:3, rentGrowthPct:2 },
@@ -5198,15 +5228,21 @@ function calcIncomeDeal(i, type) {
   const basis=price+rehab;
   const cap=basis?noi/basis:null;
   const beOcc=gsi>0?(opex+ads)/gsi:null;   // occupancy needed to break even
-  // 5-yr hold: value appreciates, cash flow grows with rents, loans amortize.
-  const value5=basis*Math.pow(1+n_(i.apprPct)/100,5);
-  const bal5=fin.loans.reduce((s,l)=>s+loanBalAfter(l.amt, l.rate, l.amYrs, 60), 0);
-  let cum=0, cfy=cf;
-  for (let y=0;y<5;y++){ cum+=cfy; cfy*=1+n_(i.rentGrowthPct)/100; }
-  const equity5=value5-bal5;
-  const profit5=equity5+cum-cashIn;
-  const totRet5=cashIn>0?profit5/cashIn:null;
-  const ann5=(totRet5!=null && totRet5>-1)?Math.pow(1+totRet5,1/5)-1:null;
+  // Hold projections across horizons: value appreciates, cash flow grows with
+  // rents, loans amortize toward payoff. loanBalAfter caps at the loan term, so a
+  // hold longer than the amortization simply shows a paid-off (0) balance.
+  const appr=n_(i.apprPct)/100, rg=n_(i.rentGrowthPct)/100;
+  const hold = RE_HOLD_YEARS.map(yrs => {
+    const value = basis*Math.pow(1+appr, yrs);
+    const bal = fin.loans.reduce((s,l)=>s+loanBalAfter(l.amt, l.rate, l.amYrs, yrs*12), 0);
+    let cum=0, cfy=cf;
+    for (let y=0;y<yrs;y++){ cum+=cfy; cfy*=1+rg; }
+    const equity = value-bal;
+    const profit = equity+cum-cashIn;
+    const totRet = cashIn>0 ? profit/cashIn : null;
+    const ann = (totRet!=null && totRet>-1) ? Math.pow(1+totRet, 1/yrs)-1 : null;
+    return { yrs, value, bal, equity, cumCF:cum, profit, ann };
+  });
   return {
     loan, pmt, ads, cashIn, gsi, egi, opex, noi, cf, cfMo:cf/12, cap, beOcc, fin,
     coc: cashIn>0?cf/cashIn:null,
@@ -5217,7 +5253,7 @@ function calcIncomeDeal(i, type) {
     perUnit: units>0?price/units:null,
     perSF: n_(i.sqft)>0?price/n_(i.sqft):null,
     capValue: (type==="commercial" && n_(i.marketCapPct)>0) ? noi/(n_(i.marketCapPct)/100) : null,
-    value5, bal5, equity5, cumCF5:cum, profit5, ann5,
+    hold,
   };
 }
 function calcFlipDeal(i) {
@@ -5622,16 +5658,7 @@ function REBuyAnalyzer({ deals, onSaveDeals, aiEnabled, profile }) {
             {type==="commercial" && <REMetric label="Price / SF" value={fmt$(m.perSF, 0)}/>}
             {type==="commercial" && m.capValue!=null && <REMetric label={`Value @ ${inp.marketCapPct}% cap`} value={fmt$(m.capValue)} col={m.capValue>=n_(inp.price)?C.up:C.down} sub={m.capValue>=n_(inp.price)?"NOI supports the price":"NOI says you're overpaying"}/>}
           </div>
-          <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"13px 16px" }}>
-            <div style={{ fontSize:11, fontWeight:700, color:C.ink, marginBottom:6 }}>5-year hold <span style={{ fontSize:9.5, color:C.faint, fontWeight:400 }}>· {inp.apprPct}% appreciation, {inp.rentGrowthPct}% rent growth, loan amortizing</span></div>
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:10 }}>
-              <REMetric label="Value in 5 yrs" value={fmt$(m.value5)}/>
-              <REMetric label="Equity in 5 yrs" value={fmt$(m.equity5)} sub={`loan down to ${fmt$(m.bal5)}`}/>
-              <REMetric label="Cumulative cash flow" value={fmt$(m.cumCF5)} col={m.cumCF5>=0?C.up:C.down}/>
-              <REMetric label="Total 5-yr profit" value={fmt$(m.profit5)} col={m.profit5>=0?C.up:C.down} sub="equity gain + cash flow − cash in"/>
-              <REMetric label="Annualized return" value={fmtPc(m.ann5)} sub="approx, before sale costs & tax"/>
-            </div>
-          </div>
+          <REHoldTable hold={m.hold} apprPct={inp.apprPct} rentGrowthPct={inp.rentGrowthPct}/>
         </>
       )}
 

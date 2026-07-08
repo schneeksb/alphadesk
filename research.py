@@ -1316,7 +1316,7 @@ def _chat_ticker_context(t):
     return line
 
 
-def chat_reply(message, history=None, profile="", portfolio=None, watchlist=None):
+def chat_reply(message, history=None, profile="", portfolio=None, watchlist=None, finance=None):
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     known = list(watchlist or []) + [p.get("ticker") for p in (portfolio or []) if p.get("ticker")]
     tickers = extract_tickers(message, extra=known)
@@ -1343,6 +1343,12 @@ def chat_reply(message, history=None, profile="", portfolio=None, watchlist=None
         if rows:
             port_ctx = "USER PORTFOLIO (live):\n" + "\n".join(rows)
 
+    fin_ctx = ""
+    if isinstance(finance, dict) and (finance.get("total_assets") or finance.get("income", {}).get("streams")):
+        fin_ctx = ("YOUR COMPLETE FINANCIAL PICTURE (the user's own data across the whole app — "
+                   "aggregate and calculate with these exact figures; $ unless noted):\n"
+                   + json.dumps(finance, indent=None))
+
     data_ctx = ""
     if ctx_blocks:
         data_ctx += "LIVE DATA CONTEXT (use these exact numbers):\n" + "\n".join(ctx_blocks) + "\n"
@@ -1350,30 +1356,38 @@ def chat_reply(message, history=None, profile="", portfolio=None, watchlist=None
         data_ctx += "\n" + port_ctx + "\n"
     if watchlist:
         data_ctx += f"\nWatchlist: {', '.join(watchlist[:40])}\n"
+    if fin_ctx:
+        data_ctx += "\n" + fin_ctx + "\n"
     if not data_ctx:
         data_ctx = "(No specific ticker data resolved for this question — answer from general market knowledge and ask for a ticker if needed.)"
 
     prof_block = _profile_ctx(profile)
     today = datetime.date.today()
     system = (
-        "You are AlphaDesk's research assistant — a sharp, concise markets analyst helping a retail "
-        "investor reason about their watchlist, holdings, and specific stocks using the LIVE DATA provided.\n\n"
+        "You are Thrive Invest's assistant — a sharp, concise financial analyst helping a retail investor "
+        "reason across their ENTIRE financial picture: watchlist and specific stocks, portfolio holdings, "
+        "real estate, cash, debts, net worth, and income — using the LIVE DATA provided.\n\n"
         f"TODAY'S DATE: {today.isoformat()} ({today.strftime('%A, %B %d, %Y')}). Your training data predates "
         "this — for anything after your knowledge cutoff, trust the LIVE DATA numbers in context over your "
         "memory, and never claim it is an earlier year.\n\n"
         + (prof_block + "\n\n" if prof_block else "")
         + ANALYST_WEIGHT_BLOCK + "\n\n"
         "RULES:\n"
-        "- Ground every claim in the LIVE DATA CONTEXT. Cite the actual numbers (price, RSI, P/E, targets, P&L).\n"
-        "- If the data needed isn't in context, say so plainly and ask for the ticker rather than inventing figures.\n"
-        "- For buy/sell/timing questions, give a BALANCED read: the bull case, the bear case, the key levels "
-        "(entry / stop / target if inferable), and what would change the thesis — not a bare 'yes/no'.\n"
+        "- Ground every claim in the context. Cite actual numbers (price, RSI, P/E, targets, P&L, net worth, balances).\n"
+        "- When a YOUR COMPLETE FINANCIAL PICTURE block is present, AGGREGATE AND CALCULATE with it: net worth, "
+        "asset allocation, savings capacity from income, monthly interest drag, pay-off-debt vs invest trade-offs, "
+        "how a stock/property decision fits the whole balance sheet, and rough projections. Show the quick math.\n"
+        "- Give prioritized, decision-first guidance (e.g. 'your 22.9% card outruns expected market returns — clear "
+        "it before adding to holdings'). Be specific to THIS person's numbers, not generic.\n"
+        "- If data needed isn't in context, say so plainly and ask rather than inventing figures.\n"
+        "- For buy/sell/timing questions, give a BALANCED read: bull case, bear case, key levels (entry/stop/target "
+        "if inferable), and what would change the thesis — not a bare 'yes/no'.\n"
         "- Tailor the lens to the user's trader profile above.\n"
         "- Be tight and conversational: 2-4 short paragraphs or a few bullets, no filler.\n"
         "- FORMAT for a narrow chat window: short paragraphs and simple '- ' bullet lists only. "
-        "Use **bold** sparingly for key numbers/tickers. Do NOT use markdown headers (#) or tables.\n"
-        "- For any specific buy/sell/timing question, END with exactly one line: "
-        "\"This is analysis to inform your own decision — not personalized financial advice.\"\n"
+        "Use **bold** sparingly for key numbers. Do NOT use markdown headers (#) or tables.\n"
+        "- For any specific money decision, END with exactly one line: "
+        "\"This is analysis to inform your own decision — not personalized financial or tax advice.\"\n"
     )
     msgs = []
     # Keep the last 6 turns, each capped — old full-length replies were costing
@@ -2401,6 +2415,7 @@ Emit via the tool:
                 profile=body.get("profile") or "",
                 portfolio=body.get("portfolio") or [],
                 watchlist=body.get("watchlist") or [],
+                finance=body.get("finance"),
             )
         except Exception as e:
             return {"reply": f"Sorry — I hit an error answering that ({str(e)[:80]}). Try again.", "ai_error": str(e)}

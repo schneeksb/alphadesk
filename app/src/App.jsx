@@ -6062,18 +6062,28 @@ function RealEstatePage({ properties, onSaveProperties, deals, onSaveDeals, aiEn
 // from the rest of the app; the user adds any other assets/liabilities by hand.
 const NW_ASSET_CATS = ["Cash & savings","Retirement (401k/IRA)","Brokerage (other)","Crypto wallet","Vehicle","Business equity","Collectibles","Other asset"];
 const NW_LIAB_CATS  = ["Credit card","Student loan","Auto loan","Personal loan","Other mortgage","Tax owed","Other debt"];
+const NW_INCOME_CATS = ["Employment","Side gig / freelance","Spouse / partner","Rental income","Business","Investment income","Future income","Other income"];
 const NW_SEG_COLS   = [C.cold, C.up, C.violet, C.amber];   // holdings · cash · real estate · other
+const NW_HOLD_YEARS = [5, 10, 15, 20, 25, 30];
 
 function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, properties=[], positionsCount=0, items=[], onSaveItems, onGoto }) {
-  const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"", ratePct:"" });
+  const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"", ratePct:"", future:false });
   const reValue = properties.reduce((s,p)=>s+n_(p.value),0);
   const reDebt  = properties.reduce((s,p)=>s+n_(p.loanBalance),0);
   const moInt   = (bal, rate) => n_(bal)*n_(rate)/100/12;   // estimated monthly interest accrued
 
   const manualAssets = items.filter(i=>i.kind==="asset");
   const manualLiabs  = items.filter(i=>i.kind==="liability");
+  const income       = items.filter(i=>i.kind==="income");
+  const incomeActive = income.filter(i=>!i.future).reduce((s,i)=>s+n_(i.amount),0);   // annual $, current
   const manualAssetTot = manualAssets.reduce((s,a)=>s+n_(a.amount),0);
   const manualLiabTot  = manualLiabs.reduce((s,l)=>s+n_(l.amount),0);
+
+  // Projection assumptions — savings track a fifth of current income until edited.
+  const [savingsAnnual, setSavingsAnnual] = useState(()=>Math.round(incomeActive*0.2));
+  const [returnPct, setReturnPct] = useState(7);
+  const savingsTouched = useRef(false);
+  useEffect(()=>{ if(!savingsTouched.current) setSavingsAnnual(Math.round(incomeActive*0.2)); },[incomeActive]);
 
   // Real-estate loans: blended rate + total monthly interest across properties.
   const reMoInt = properties.reduce((s,p)=>s+moInt(p.loanBalance, p.ratePct), 0);
@@ -6104,16 +6114,28 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, propert
     { label:"Other", amount:manualAssetTot, col:NW_SEG_COLS[3] },
   ].filter(s=>s.amount>0);
 
+  const NW_CATS = { asset:NW_ASSET_CATS, liability:NW_LIAB_CATS, income:NW_INCOME_CATS };
   const add = () => {
     const amt = n_(draft.amount);
     if (!amt) return;
     const it = { id:newId(), kind:draft.kind, name:(draft.name||"").trim()||draft.category, category:draft.category, amount:Math.abs(amt) };
     if (draft.kind==="liability" && n_(draft.ratePct)>0) it.ratePct = n_(draft.ratePct);
+    if (draft.kind==="income" && draft.future) it.future = true;
     onSaveItems([...items, it]);
-    setDraft(d=>({ kind:d.kind, name:"", category:d.category, amount:"", ratePct:"" }));
+    setDraft(d=>({ kind:d.kind, name:"", category:d.category, amount:"", ratePct:"", future:false }));
   };
   const remove = (id) => onSaveItems(items.filter(i=>i.id!==id));
-  const setKind = (k) => setDraft(d=>({ ...d, kind:k, category:(k==="asset"?NW_ASSET_CATS:NW_LIAB_CATS)[0] }));
+  const setKind = (k) => setDraft(d=>({ ...d, kind:k, category:NW_CATS[k][0], future:false }));
+
+  // Net-worth projection: current NW compounds at returnPct, plus annual savings.
+  const r = returnPct/100;
+  const projection = NW_HOLD_YEARS.map(yrs => {
+    const grown = netWorth * Math.pow(1+r, yrs);
+    const contrib = savingsAnnual * yrs;
+    const fromSavings = r>0 ? savingsAnnual*((Math.pow(1+r,yrs)-1)/r) : contrib;
+    const fv = grown + fromSavings;
+    return { yrs, fv, contrib, growth: fv - netWorth - contrib };
+  });
 
   // rate/mo = interest rate % and estimated monthly interest accrued (liabilities).
   const Row = ({ label, note, amount, col, tab, onDel, muted, rate, mo }) => (
@@ -6189,28 +6211,94 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, propert
         </div>
       </div>
 
+      {/* Income streams */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px", marginBottom:14 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:2 }}>
+          <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>Annual Income</span>
+          <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:800, color:C.up }}>{fmt$(incomeActive)}/yr</span>
+        </div>
+        <div style={{ fontSize:10.5, color:C.faint, marginBottom:2 }}>≈{fmt$(incomeActive/12)}/mo · employment, side gigs & other streams · feeds the projection below</div>
+        {income.length===0 ? (
+          <div style={{ fontSize:11.5, color:C.faint, padding:"10px 0 4px" }}>No income yet — add your job, a side gig, or a future stream (like a spouse returning to work) below.</div>
+        ) : income.map(i=>(
+          <div key={i.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 0", borderTop:`1px solid ${C.panel2}` }}>
+            <div style={{ minWidth:0, flex:1 }}>
+              <div style={{ fontSize:12.5, color:i.future?C.sub:C.ink, fontWeight:600 }}>{i.name}{i.future && <span style={{ fontSize:8.5, color:C.amber, background:`${C.amber}18`, borderRadius:5, padding:"1px 6px", marginLeft:7, fontWeight:800, letterSpacing:"0.04em" }}>PLANNED</span>}</div>
+              <div style={{ fontSize:10, color:C.faint }}>{i.category} · ≈{fmt$(n_(i.amount)/12)}/mo</div>
+            </div>
+            <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:i.future?C.faint:C.ink, whiteSpace:"nowrap" }}>{fmt$(n_(i.amount))}/yr</div>
+            <button onClick={()=>remove(i.id)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}><Trash2 size={13}/></button>
+          </div>
+        ))}
+      </div>
+
+      {/* Net worth projection */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px", marginBottom:14 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:2 }}>Net Worth Projection</div>
+        <div style={{ fontSize:10.5, color:C.faint, marginBottom:10 }}>From today's {fmt$(netWorth)}, compounding your net worth and adding savings each year.</div>
+        <div style={{ display:"flex", gap:12, flexWrap:"wrap", marginBottom:12 }}>
+          <div style={{ flex:"1 1 170px" }}>
+            <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase" }}>Annual savings</div>
+            <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px" }}>
+              <span style={{ fontSize:12, color:C.faint }}>$</span>
+              <input type="number" step="any" value={savingsAnnual} onChange={e=>{ savingsTouched.current=true; setSavingsAnnual(n_(e.target.value)); }} style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+            </div>
+            {incomeActive>0 && <div style={{ fontSize:9.5, color:C.faint, marginTop:3 }}>{((savingsAnnual/incomeActive)*100).toFixed(0)}% of income · <span onClick={()=>{ savingsTouched.current=false; setSavingsAnnual(Math.round(incomeActive*0.2)); }} style={{ color:C.cold, cursor:"pointer" }}>use 20%</span></div>}
+          </div>
+          <div style={{ flex:"0 1 130px" }}>
+            <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase" }}>Expected return / yr</div>
+            <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px" }}>
+              <input type="number" step="any" value={returnPct} onChange={e=>setReturnPct(n_(e.target.value))} style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+              <span style={{ fontSize:12, color:C.faint }}>%</span>
+            </div>
+          </div>
+        </div>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <div style={{ minWidth:460 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"64px repeat(3, minmax(96px,1fr))", borderBottom:`1px solid ${C.line}` }}>
+              {["In","Projected net worth","You'll add","Growth"].map((c,i)=>(<div key={i} style={{ padding:"6px 10px", fontSize:9, color:C.faint, textTransform:"uppercase", letterSpacing:"0.04em", textAlign:i?"right":"left", whiteSpace:"nowrap" }}>{c}</div>))}
+            </div>
+            {projection.map((p,ri)=>(
+              <div key={p.yrs} style={{ display:"grid", gridTemplateColumns:"64px repeat(3, minmax(96px,1fr))", borderTop:ri?`1px solid ${C.panel2}`:"none", alignItems:"center" }}>
+                <div style={{ padding:"8px 10px", fontSize:11.5, fontWeight:700, color:C.ink }}>{p.yrs} yr</div>
+                <div style={{ padding:"8px 10px", fontFamily:C.mono, fontSize:12.5, fontWeight:800, color:C.up, textAlign:"right", whiteSpace:"nowrap" }}>{fmt$(p.fv)}</div>
+                <div style={{ padding:"8px 10px", fontFamily:C.mono, fontSize:11.5, color:C.sub, textAlign:"right", whiteSpace:"nowrap" }}>{fmt$(p.contrib)}</div>
+                <div style={{ padding:"8px 10px", fontFamily:C.mono, fontSize:11.5, color:C.cold, textAlign:"right", whiteSpace:"nowrap" }}>{fmt$(p.growth)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{ fontSize:9.5, color:C.faint, marginTop:7 }}>Projected net worth = today's net worth compounded at {returnPct}% plus {fmt$(savingsAnnual)}/yr in new savings. A simplified model — real returns vary and it ignores taxes, inflation and spending changes.</div>
+      </div>
+
       {/* Add manual item */}
       <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px" }}>
-        <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:10 }}>Add an asset or liability <span style={{ fontSize:10, color:C.faint, fontWeight:400 }}>· anything the app doesn't already track</span></div>
+        <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:10 }}>Add an asset, liability or income <span style={{ fontSize:10, color:C.faint, fontWeight:400 }}>· anything the app doesn't already track</span></div>
         <div style={{ display:"flex", gap:2, background:C.panel2, borderRadius:9, padding:3, border:`1px solid ${C.line}`, width:"fit-content", marginBottom:10 }}>
-          {[["asset","Asset"],["liability","Liability"]].map(([k,l])=>(
+          {[["asset","Asset"],["liability","Liability"],["income","Income"]].map(([k,l])=>(
             <button key={k} onClick={()=>setKind(k)} style={{ padding:"6px 16px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:draft.kind===k?C.line:"transparent", color:draft.kind===k?C.ink:C.sub }}>{l}</button>
           ))}
         </div>
         <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
           <select value={draft.category} onChange={e=>setDraft(d=>({ ...d, category:e.target.value }))} style={{ ...inp, flex:"1 1 160px" }}>
-            {(draft.kind==="asset"?NW_ASSET_CATS:NW_LIAB_CATS).map(c=><option key={c} value={c}>{c}</option>)}
+            {NW_CATS[draft.kind].map(c=><option key={c} value={c}>{c}</option>)}
           </select>
-          <input value={draft.name} onChange={e=>setDraft(d=>({ ...d, name:e.target.value }))} placeholder={draft.kind==="liability"?"Name (e.g. Chase Visa)":"Name (e.g. Fidelity 401k)"} style={{ ...inp, flex:"2 1 180px" }}/>
+          <input value={draft.name} onChange={e=>setDraft(d=>({ ...d, name:e.target.value }))} placeholder={draft.kind==="liability"?"Name (e.g. Chase Visa)":draft.kind==="income"?"Name (e.g. My salary, wife's job)":"Name (e.g. Fidelity 401k)"} style={{ ...inp, flex:"2 1 180px" }}/>
           <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px", flex:"1 1 120px" }}>
             <span style={{ fontSize:12, color:C.faint }}>$</span>
-            <input type="number" step="any" value={draft.amount} onChange={e=>setDraft(d=>({ ...d, amount:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="balance" style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+            <input type="number" step="any" value={draft.amount} onChange={e=>setDraft(d=>({ ...d, amount:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder={draft.kind==="income"?"per year":draft.kind==="liability"?"balance":"amount"} style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+            {draft.kind==="income" && <span style={{ fontSize:10.5, color:C.faint, whiteSpace:"nowrap" }}>/yr</span>}
           </div>
           {draft.kind==="liability" && (
             <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px", flex:"0 1 96px" }} title="Interest rate (APR) — used to estimate monthly interest">
               <input type="number" step="any" value={draft.ratePct} onChange={e=>setDraft(d=>({ ...d, ratePct:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="rate" style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
               <span style={{ fontSize:12, color:C.faint }}>%</span>
             </div>
+          )}
+          {draft.kind==="income" && (
+            <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:11.5, color:C.sub, cursor:"pointer", padding:"9px 4px", whiteSpace:"nowrap" }} title="Not earning this yet — excluded from current income, shown as planned">
+              <input type="checkbox" checked={draft.future} onChange={e=>setDraft(d=>({ ...d, future:e.target.checked }))}/> Future / planned
+            </label>
           )}
           <button onClick={add} style={{ background:C.up, border:"none", borderRadius:8, padding:"9px 16px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:700, display:"flex", gap:6, alignItems:"center" }}><Plus size={14}/> Add</button>
         </div>
@@ -6475,17 +6563,19 @@ function renderRich(text) {
 }
 
 const CHAT_SUGGESTIONS = [
-  "How's my portfolio positioned right now?",
-  "Is NVDA cheap or expensive at these levels?",
-  "What are the biggest risks in my watchlist this week?",
+  "What's my net worth and how is it allocated?",
+  "Should I pay down debt or invest right now?",
+  "How's my portfolio positioned, and what are the risks?",
 ];
 
-function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
+function ChatAssistant({ aiEnabled, profile, watchlist, portfolio, finance }) {
   const [open, setOpen] = useState(false);
   const [msgs, setMsgs] = useState([]);   // {role, content}
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [unread, setUnread] = useState(false);   // answer arrived while minimized
   const scrollRef = useRef(null);
+  const openRef = useRef(open); openRef.current = open;   // read latest open inside async send
   useEffect(()=>{ if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; },[msgs, busy, open]);
 
   const send = async (text) => {
@@ -6495,24 +6585,27 @@ function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
     const next = [...msgs, { role:"user", content:q }];
     setMsgs(next); setInput(""); setBusy(true);
     try {
-      const d = await fetchChat({ message:q, history, profile, watchlist,
+      const d = await fetchChat({ message:q, history, profile, watchlist, finance,
         portfolio: (portfolio||[]).map(p=>({ ticker:p.ticker, type:p.type, qty:p.qty, current_val:p.current_val, pnl:p.pnl, day_change:p.day_change, error:p.error })) });
       setMsgs(m => [...m, { role:"assistant", content: d.reply || "…" }]);
     } catch {
       setMsgs(m => [...m, { role:"assistant", content:"Sorry — I couldn't reach the server. Is the backend running?" }]);
     }
     setBusy(false);
+    if (!openRef.current) setUnread(true);   // notify on the launcher if minimized
   };
+  const toggle = () => setOpen(o=>{ if(!o) setUnread(false); return !o; });
 
   const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
   return (
     <>
-      {/* Floating launcher */}
-      <button onClick={()=>setOpen(o=>!o)} title="Ask Thrive Invest"
+      {/* Floating launcher — spins while a minimized answer is generating, dots when one's ready */}
+      <button onClick={toggle} title="Ask Thrive Invest"
         style={{ position:"fixed", right:18, bottom:18, zIndex:80, width:54, height:54, borderRadius:"50%",
           background:C.cold, border:"none", boxShadow:"0 8px 28px rgba(0,0,0,0.35)", cursor:"pointer",
           display:"flex", alignItems:"center", justifyContent:"center", color:"#fff" }}>
-        {open ? <X size={22}/> : <MessageCircle size={24}/>}
+        {open ? <X size={22}/> : busy ? <Loader2 size={22} style={{ animation:"spin 1s linear infinite" }}/> : <MessageCircle size={24}/>}
+        {!open && unread && <span style={{ position:"absolute", top:11, right:11, width:11, height:11, borderRadius:"50%", background:C.up, border:`2px solid ${C.cold}` }}/>}
       </button>
 
       {open && (
@@ -6527,12 +6620,13 @@ function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
               <div style={{ width:30, height:30, borderRadius:9, background:`${C.cold}1c`, display:"flex", alignItems:"center", justifyContent:"center" }}><Zap size={16} color={C.cold}/></div>
               <div>
                 <div style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>Thrive Invest Assistant</div>
-                <div style={{ fontSize:10.5, color:C.faint }}>grounded in your live data</div>
+                <div style={{ fontSize:10.5, color:C.faint }}>knows your whole financial picture</div>
               </div>
             </div>
-            <div style={{ display:"flex", gap:6 }}>
+            <div style={{ display:"flex", gap:6, alignItems:"center" }}>
               {msgs.length>0 && <button onClick={()=>setMsgs([])} title="Clear chat" style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:7, padding:"5px 8px", color:C.faint, cursor:"pointer", fontSize:11 }}>Clear</button>}
-              <button onClick={()=>setOpen(false)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", display:"flex" }}><X size={18}/></button>
+              <button onClick={()=>setOpen(false)} title="Minimize — keeps the chat and finishes any answer in the background" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", display:"flex" }}><Minus size={19}/></button>
+              <button onClick={()=>{ setOpen(false); }} title="Close" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", display:"flex" }}><X size={18}/></button>
             </div>
           </div>
 
@@ -6540,7 +6634,7 @@ function ChatAssistant({ aiEnabled, profile, watchlist, portfolio }) {
           <div ref={scrollRef} style={{ flex:1, overflowY:"auto", padding:"14px 14px", display:"flex", flexDirection:"column", gap:10 }}>
             {msgs.length===0 && (
               <div style={{ color:C.sub }}>
-                <div style={{ fontSize:13, lineHeight:1.6, marginBottom:12 }}>Ask about any ticker, your holdings, or the market. I read your live prices, valuations, and P&amp;L to answer.</div>
+                <div style={{ fontSize:13, lineHeight:1.6, marginBottom:12 }}>Ask about a stock, your holdings, or your whole financial picture — net worth, real estate, debts and income. I read your live data and do the math.</div>
                 <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
                   {CHAT_SUGGESTIONS.map(s=>(
                     <button key={s} onClick={()=>send(s)} disabled={!aiEnabled}
@@ -6704,6 +6798,34 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
     ? ((Number(margin)||0)*(Number(marginRate)||0)
         + accounts.reduce((s,a)=>s+(Number(a.margin)||0)*(Number(a.marginRate)||0),0)) / totalMargin
     : 0;
+
+  // Whole-app financial snapshot for the assistant — net worth, real estate, debts
+  // + their interest, and income — so it can aggregate and calculate across the app.
+  const financeCtx = useMemo(()=>{
+    const num = v => Number(v)||0;
+    const holdings = portfolio?.analytics?.total_value || 0;
+    const reVal  = reProperties.reduce((s,p)=>s+num(p.value),0);
+    const reDebt = reProperties.reduce((s,p)=>s+num(p.loanBalance),0);
+    const reMoInt= reProperties.reduce((s,p)=>s+num(p.loanBalance)*num(p.ratePct)/100/12,0);
+    const mAssets = nwItems.filter(i=>i.kind==="asset"), mLiabs = nwItems.filter(i=>i.kind==="liability"), inc = nwItems.filter(i=>i.kind==="income");
+    const mAssetTot = mAssets.reduce((s,i)=>s+num(i.amount),0), mLiabTot = mLiabs.reduce((s,i)=>s+num(i.amount),0);
+    const marginMoInt = totalMargin*num(blendedRate)/100/12;
+    const manualMoInt = mLiabs.reduce((s,l)=>s+num(l.amount)*num(l.ratePct)/100/12,0);
+    const totalAssets = holdings + totalCash + reVal + mAssetTot;
+    const totalLiabs  = totalMargin + reDebt + mLiabTot;
+    return {
+      net_worth: Math.round(totalAssets-totalLiabs),
+      total_assets: Math.round(totalAssets), total_liabilities: Math.round(totalLiabs),
+      assets: { investment_holdings: Math.round(holdings), cash: Math.round(totalCash), real_estate_value: Math.round(reVal),
+                other: mAssets.map(a=>({ name:a.name, category:a.category, amount:Math.round(num(a.amount)) })) },
+      liabilities: { margin_loan: Math.round(totalMargin), real_estate_loans: Math.round(reDebt),
+                other: mLiabs.map(l=>({ name:l.name, category:l.category, amount:Math.round(num(l.amount)), rate_pct:l.ratePct??null })) },
+      monthly_interest_total: Math.round(reMoInt+marginMoInt+manualMoInt),
+      real_estate: reProperties.map(p=>({ name:p.name||"unnamed", type:p.type, value:Math.round(num(p.value)), loan:Math.round(num(p.loanBalance)), rate_pct:p.ratePct??null })),
+      income: { annual_active: Math.round(inc.filter(i=>!i.future).reduce((s,i)=>s+num(i.amount),0)),
+                streams: inc.map(i=>({ name:i.name, category:i.category, annual:Math.round(num(i.amount)), future:!!i.future })) },
+    };
+  },[portfolio, totalCash, totalMargin, blendedRate, reProperties, nwItems]);
 
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
@@ -7036,6 +7158,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         </div>
       )}
       <ChatAssistant aiEnabled={aiEnabled} watchlist={watchlist} portfolio={portfolio?.positions}
+        finance={financeCtx}
         profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap, FolderPlus, Check, MessageCircle, Send, Home, Building2 } from "lucide-react";
 import { DndContext, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDroppable, closestCorners } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
@@ -2637,6 +2637,7 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEd
 // color dot, name, position count, total value and total P&L. `dropId` is the
 // account id (or UNASSIGNED) used to route a dropped position.
 function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRename, onDelete, rowProps,
+  editingPos=null, accounts=[], onSubmitEdit, onCloseEdit,
   cash=0, margin=0, marginRate=0, onSetFunds }) {
   const isUnassigned = dropId===UNASSIGNED;
   // Outer node = sortable for reordering the account itself (Unassigned is pinned).
@@ -2742,7 +2743,20 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
                 <div/>
               </div>
               <SortableContext items={items.map(p=>p.id)} strategy={verticalListSortingStrategy}>
-                {items.map(p => <PositionRow key={p.id} p={p} groupId={dropId} {...rowProps}/>)}
+                {items.map(p => (
+                  <Fragment key={p.id}>
+                    <PositionRow p={p} groupId={dropId} {...rowProps}/>
+                    {editingPos?.id === p.id && (
+                      // Inline edit form drops in directly beneath the row so you
+                      // change qty/cost/expiry/etc. right where you clicked — no
+                      // scrolling to the form at the top of the page.
+                      <div style={{ minWidth:POS_MINW, background:C.panel2+"55", borderTop:`1px solid ${C.line}` }}>
+                        <PositionForm key={editingPos.id} initial={editingPos} accounts={accounts}
+                          onSubmit={(pos)=>onSubmitEdit(editingPos.id, pos)} onClose={onCloseEdit}/>
+                      </div>
+                    )}
+                  </Fragment>
+                ))}
               </SortableContext>
             </div>
           )}
@@ -2927,8 +2941,13 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
     if (act.data.current?.type==="account") handleAccountReorder(act.data.current.accountId, over.id);
     else movePosition(act.id, over.id);
   };
-  const rowProps = { onOpen, onEdit:(p)=>{ setEditing(p); setShowForm(false); }, onRemove, onPayoff:setPayoff,
+  const rowProps = { onOpen, onEdit:(p)=>{ setEditing(prev=> prev?.id===p.id ? null : p); setShowForm(false); }, onRemove, onPayoff:setPayoff,
     onQuickEdit:(id, patch)=>onUpdate(id, patch) };
+  // An active position edits INLINE (form drops in under its own row — no scroll
+  // to the top). Expired/errored positions have no live row, so they still use
+  // the top form.
+  const editingActive = editing && active.some(p=>p.id===editing.id);
+  const closeEdit = ()=>{ setEditing(null); setShowForm(false); };
 
   const Stat = ({ label, value, sub, col }) => (
     <div style={{ flex:"1 1 180px", background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, padding:"15px 18px" }}>
@@ -2952,13 +2971,13 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         </div>
       </div>
 
-      {(showForm || editing) && (
+      {(showForm || (editing && !editingActive)) && (
         <PositionForm
           key={editing?.id || "new"}
           initial={editing}
           accounts={accounts}
           onSubmit={(pos)=>{ if (editing) onUpdate(editing.id, pos); else onAdd(pos); }}
-          onClose={()=>{ setEditing(null); setShowForm(false); }}
+          onClose={closeEdit}
         />
       )}
 
@@ -3016,12 +3035,14 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                 <AccountFolder dropId={UNASSIGNED} name="Unassigned" color={C.faint}
                   items={groups[UNASSIGNED]} collapsed={!!accountCollapsed[UNASSIGNED]}
                   onToggle={onToggleAccountCollapse} rowProps={rowProps}
+                  editingPos={editingActive?editing:null} accounts={accounts} onSubmitEdit={onUpdate} onCloseEdit={closeEdit}
                   cash={cash} margin={margin} marginRate={marginRate} onSetFunds={onSetFunds}/>
                 {accounts.map(acc => (
                   <AccountFolder key={acc.id} dropId={acc.id} name={acc.name} color={acc.color}
                     items={groups[acc.id] || []} collapsed={!!accountCollapsed[acc.id]}
                     onToggle={onToggleAccountCollapse} onRename={onRenameAccount} onDelete={onDeleteAccount}
                     rowProps={rowProps}
+                    editingPos={editingActive?editing:null} accounts={accounts} onSubmitEdit={onUpdate} onCloseEdit={closeEdit}
                     cash={acc.cash} margin={acc.margin} marginRate={acc.marginRate} onSetFunds={onSetFunds}/>
                 ))}
               </SortableContext>

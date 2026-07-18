@@ -468,6 +468,19 @@ def _profile_ctx(profile: str) -> str:
     return "\n".join(lines)
 
 
+def _profile_line(profile: str) -> str:
+    """One-line render of 'risk|goal1,goal2|style1,style2|level' for per-account
+    prompt blocks (the full _profile_ctx framework is rendered once globally)."""
+    if not profile:
+        return ""
+    parts = profile.split("|")
+    seg = lambda i: (parts[i] if len(parts) > i else "").strip()
+    goals  = ", ".join(g.strip() for g in seg(1).split(",") if g.strip()) or "growth"
+    styles = ", ".join(s.strip() for s in seg(2).split(",") if s.strip()) or "swing"
+    return (f"Risk: {seg(0) or 'moderate'} | Goals: {goals} | "
+            f"Styles: {styles} | Level: {seg(3) or 'intermediate'}")
+
+
 def research(ticker, ai=False, profile: str = ""):
     """Full research bundle for one ticker. AI layer only runs when ai=True.
     Always returns price/technicals so the card loads even when AI is off."""
@@ -2783,14 +2796,50 @@ Be direct. Specific numbers. No hedging. No "it could go either way." Take a pos
         except Exception as e:
             return {"error":str(e)}
 
+    # Static system block for /portfolio-analysis — cacheable across requests
+    # (cache_control), so only the dynamic portfolio/context data is re-billed.
+    _PF_ANALYSIS_SYSTEM = """You are a senior portfolio manager reviewing a client's brokerage accounts.
+
+Analyze the portfolio as a WHOLE BOOK — not a list of isolated stocks. Weigh, in strict priority order:
+  1. MACRO & SECTOR ROTATION — is each position with or against where institutional money is flowing?
+  2. ANALYST PULSE — the client's followed analysts' current reads ([1] = most trusted; treat low-weight short-term voices as noise unless they agree with the macro reads).
+  3. TRADER PROFILE — each account gets advice calibrated to ITS OWN profile; accounts without an override use the global profile.
+  4. POSITION MECHANICS — P&L, Greeks, DTE, IV, stop distance.
+
+The client's core question is always: for each holding, should I SELL, TRIM, HOLD, or BUY MORE — and why NOW?
+
+Respond with JSON ONLY (no markdown, no prose outside the JSON):
+{
+  "health_score": "Strong"|"Balanced"|"At Risk"|"Needs Attention",
+  "health_summary": "<one-line overall portfolio health — specific, not generic>",
+  "context_read": "<2-3 sentences: what the sector rotation, macro read and analyst pulse together imply for THIS book right now — name the specific sectors/analysts that matter>",
+  "concentration": "<concentration risk in plain English: what is too heavy, what % it is, why it matters for THIS client>",
+  "greeks_plain": "<net delta and daily theta in real terms — e.g. 'You lose $X/day to theta and need a Y% move in Z days to break even'>",
+  "opportunity": {"ticker":"<ticker>","reason":"<1-2 sentences: why THIS position has the most upside right now, specific>"},
+  "risk": {"ticker":"<ticker>","reason":"<1-2 sentences: what makes THIS the most vulnerable right now, what to watch>"},
+  "account_recs": [{"account":"<account name>","stance":"ADD RISK"|"HOLD STEADY"|"REBALANCE"|"DE-RISK","recommendation":"<1-2 sentences tailored to THAT account's profile and available cash>"}],
+  "actions": [{"ticker":"<ticker>","account":"<account name>","action":"BUY MORE"|"HOLD"|"TRIM"|"SELL"|"ROLL","reason":"<why NOW — cite rotation/pulse/profile/Greeks evidence>"}],
+  "recommendation": "<2-3 sentences: the single most important thing this portfolio needs right now — a specific action>"
+}
+
+Rules:
+- account_recs: one entry per account shown in the data; use [] when there is only one account.
+- actions: the 3-5 highest-conviction moves across the whole book, most urgent first. Include a HOLD only when the client might be tempted to sell and shouldn't.
+- Personalize per account: an aggressive/degen account KEEPS concentrated bets (never flag concentration there); a conservative account gets capital-preservation advice. Never give one-size-fits-all advice when accounts have different profiles.
+- Be direct and specific with numbers. No hedging. This is research input, not financial advice — but take a clear position."""
+
     @app.post("/portfolio-analysis")
     def portfolio_analysis_endpoint(payload: dict = Body(default={}), authorization: str = Header(None)):
-        """AI analysis of the full portfolio as a book. Not cached — always fresh."""
+        """AI analysis of the full portfolio as a book — grouped by account (each
+        account may carry its own trader profile), grounded in sector rotation,
+        macro and the Market Pulse analyst summaries. Not cached — always fresh."""
         require_user(authorization)
         positions_in = payload.get("positions") or []
         analytics    = payload.get("analytics") or {}
         cash_val     = float(payload.get("cash") or 0)
         profile_str  = payload.get("profile") or ""
+        accounts_in  = payload.get("accounts") or []   # [{id,name,profile,cash}]
+        macro_in     = payload.get("macro") or {}      # /value's macro block, passed through
 
         if not positions_in:
             return {"error": "No positions provided"}
@@ -2798,39 +2847,88 @@ Be direct. Specific numbers. No hedging. No "it could go either way." Take a pos
             client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
             profile_block = _profile_ctx(profile_str)
-            profile_parts = profile_str.split("|") if profile_str else []
-            risk  = profile_parts[0] if len(profile_parts) > 0 else "moderate"
-            goal  = profile_parts[1] if len(profile_parts) > 1 else "growth"
-            style = profile_parts[2] if len(profile_parts) > 2 else "swing"
 
-            # Summarize positions
-            pos_lines = []
-            for p in positions_in:
-                ticker = p.get("ticker","?")
-                typ    = p.get("type","?")
-                strike = p.get("strike")
-                expiry = p.get("expiry","")
-                qty    = p.get("qty",0)
+            # ── Market context: sector rotation + macro + analyst pulse ──
+            ctx_parts = []
+            try:
+                rot = sector_rotation_endpoint()
+                by_q = {"Leading": [], "Improving": [], "Weakening": [], "Lagging": []}
+                for s in (rot.get("sectors") or []):
+                    by_q.setdefault(s.get("quadrant", "?"), []).append(f"{s['sector']} {s['rs']:+.1f}")
+                if any(by_q.values()):
+                    ctx_parts.append(
+                        "SECTOR ROTATION vs SPY (20d relative strength — institutional money flow):\n"
+                        + "\n".join(f"  {q}: {', '.join(v)}" for q, v in by_q.items() if v))
+            except Exception:
+                pass
+            if macro_in:
+                ctx_parts.append(f"MACRO: {macro_in.get('label','neutral')} — VIX {macro_in.get('vix','?')}"
+                                 f" · SPY {float(macro_in.get('spy_change') or 0)*100:+.1f}% today")
+            try:
+                pulse = yt_insights_endpoint()
+                rows = []
+                for a in (pulse.get("analysts") or []):
+                    ins = sorted(a.get("insights") or [],
+                                 key=lambda x: str(x.get("published") or ""), reverse=True)
+                    if not ins:
+                        continue
+                    take = (ins[0].get("takeaway") or ins[0].get("summary") or "").strip().replace("\n", " ")
+                    if not take:
+                        continue
+                    rows.append(f"  [{a.get('weight')}] {a.get('name')} ({a.get('label')}) — "
+                                f"{ins[0].get('sentiment','neutral')}: {take[:240]}")
+                if rows:
+                    stale_s = " — STALE (>24h old, treat as background)" if pulse.get("stale") else ""
+                    rows.sort()   # weight [1] first
+                    ctx_parts.append("ANALYST PULSE (the client's followed YouTube analysts; [1]=most trusted)"
+                                     + stale_s + ":\n" + "\n".join(rows))
+            except Exception:
+                pass
+            ctx_block = ("MARKET CONTEXT:\n\n" + "\n\n".join(ctx_parts) + "\n\n") if ctx_parts else ""
+
+            def fmt_pos(p):
+                ticker = p.get("ticker","?"); typ = p.get("type","?")
+                strike = p.get("strike"); qty = p.get("qty",0)
                 pnl    = p.get("pnl") or 0
                 pnl_pct= (p.get("pnl_pct") or 0)*100
                 val    = p.get("current_val") or 0
                 dte    = p.get("dte")
-                stage  = p.get("stage","")
-                conv   = p.get("conviction","")
-                delta  = p.get("delta")
-                theta  = p.get("theta")
+                stage  = p.get("stage","") or ""; conv = p.get("conviction","") or ""
+                delta  = p.get("delta"); theta = p.get("theta")
                 iv_raw = p.get("iv")
                 iv     = f"{iv_raw*100:.0f}%" if iv_raw else "—"
+                label  = f"{ticker} ${strike}{typ[0]}" if strike else f"{ticker} {typ}"
+                dte_s  = f"DTE {dte}d · " if dte else ""
+                greeks_s = f" | Δ{delta:.2f} Θ${theta:.2f}/day" if (delta is not None and theta is not None) else ""
+                return (f"  • {label} qty={qty} | ${val:,.0f} val | P&L ${pnl:+,.0f} ({pnl_pct:+.1f}%) | "
+                        f"{dte_s}IV {iv} | {stage} {conv}{greeks_s}")
 
-                label = f"{ticker} ${strike}{typ[0]}" if strike else f"{ticker} {typ}"
-                dte_s = f"DTE {dte}d · " if dte else ""
-                greeks_s = ""
-                if delta is not None and theta is not None:
-                    greeks_s = f" | Δ{delta:.2f} Θ${theta:.2f}/day"
-                pos_lines.append(
-                    f"  • {label} qty={qty} | ${val:,.0f} val | P&L ${pnl:+,.0f} ({pnl_pct:+.1f}%) | "
-                    f"{dte_s}IV {iv} | {stage} {conv}{greeks_s}"
-                )
+            # ── Group positions by account; each account may override the profile ──
+            acct_meta = [dict(a) for a in accounts_in if a.get("id")]
+            if not any(str(a.get("id")) == "unassigned" for a in acct_meta):
+                acct_meta.insert(0, {"id": "unassigned", "name": "Unassigned", "profile": "", "cash": 0})
+            groups = {str(a["id"]): [] for a in acct_meta}
+            for p in positions_in:
+                groups.setdefault(str(p.get("account") or "unassigned"), []).append(p)
+            known = {str(a["id"]) for a in acct_meta}
+            acct_meta += [{"id": k, "name": k, "profile": "", "cash": 0}
+                          for k in groups if k not in known]
+
+            sections = []
+            for a in acct_meta:
+                plist  = groups.get(str(a["id"])) or []
+                cash_a = float(a.get("cash") or 0)
+                if not plist and cash_a <= 0:
+                    continue          # empty account with no dry powder — nothing to advise on
+                val = sum(float(p.get("current_val") or 0) for p in plist)
+                pnl = sum(float(p.get("pnl") or 0) for p in plist)
+                ps  = str(a.get("profile") or "").strip()
+                prof_line = ("  ACCOUNT PROFILE (overrides global for these positions): " + _profile_line(ps)
+                             if ps else "  ACCOUNT PROFILE: global profile (above)")
+                body = "\n".join(fmt_pos(p) for p in plist) if plist else "  (no positions — dry powder)"
+                sections.append(f"■ {a.get('name') or a['id']} — value ${val:,.0f} · "
+                                f"P&L ${pnl:+,.0f} · cash ${cash_a:,.0f}\n{prof_line}\n{body}")
+            accounts_block = f"ACCOUNTS ({len(sections)}):\n\n" + "\n\n".join(sections)
 
             total_val  = analytics.get("total_value") or 0
             total_pnl  = analytics.get("total_pnl") or 0
@@ -2839,35 +2937,20 @@ Be direct. Specific numbers. No hedging. No "it could go either way." Take a pos
             sector_alloc = analytics.get("sector_alloc") or {}
             sector_s   = " · ".join(f"{k} {v*100:.0f}%" for k,v in sorted(sector_alloc.items(), key=lambda x:-x[1]))
 
-            prompt = f"""You are a senior portfolio manager reviewing a client's holdings on {datetime.date.today()}.
+            prompt = f"""Date: {datetime.date.today()}.
 
-{profile_block}
+{profile_block or "TRADER PROFILE: none set — assume moderate risk, growth goal, swing style."}
 
-PORTFOLIO SNAPSHOT:
+{ctx_block}PORTFOLIO SNAPSHOT:
 Total Value: ${total_val:,.0f} | Cash: ${cash_val:,.0f} | Combined: ${total_val+cash_val:,.0f}
 Total P&L: ${total_pnl:+,.0f} | Net Delta: {net_delta:.0f} | Daily Theta: ${daily_theta:.2f}/day
 Sector Exposure: {sector_s or "—"}
 
-POSITIONS:
-{chr(10).join(pos_lines)}
+{accounts_block}"""
 
-Analyze this portfolio as a WHOLE BOOK — not individual stocks. Think like a portfolio manager.
-Personalize every insight to the trader's profile above.
-
-JSON ONLY — no markdown:
-{{
-  "health_score": "Strong"|"Balanced"|"At Risk"|"Needs Attention",
-  "health_summary": "<one-line overall portfolio health — specific, not generic>",
-  "concentration": "<concentration risk in plain English: what is too heavy, what % it is, why it matters for THIS trader's profile>",
-  "greeks_plain": "<Greeks in plain English: what the net delta and daily theta MEAN in real terms — e.g. 'You lose $X/day to theta and need X% up move in Y days to break even'. Calibrate urgency to trader profile.>",
-  "opportunity": {{"ticker":"<ticker>","reason":"<1-2 sentences: why THIS position has the most upside right now, specific>"}},
-  "risk": {{"ticker":"<ticker>","reason":"<1-2 sentences: what makes THIS the most vulnerable right now, what to watch>"}},
-  "recommendation": "<2-3 sentences: what this specific portfolio needs right now — specific action, e.g. trim X to reduce concentration, add hedge in Y, take profits on Z. Calibrated to their risk profile.>"
-}}
-
-Be direct, specific, and personalized. Do NOT flag concentration as a problem for aggressive/degen traders — that's their style."""
-
-            r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
+            r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1600,
+                system=[{"type": "text", "text": _PF_ANALYSIS_SYSTEM,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role":"user","content":prompt}])
             from scanner import _lenient_json
             data = _lenient_json(r.content[0].text)

@@ -395,15 +395,19 @@ async function fetchPositioning() {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
-async function fetchPortfolioAnalysis(positions, analytics, cash, profile) {
+async function fetchPortfolioAnalysis(positions, analytics, cash, profile, accounts = [], macro = null) {
   const r = await fetch(`${API}/portfolio-analysis`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ positions, analytics, cash, profile }),
+    body: JSON.stringify({ positions, analytics, cash, profile, accounts, macro }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+// Serialize a structured trader profile ({riskTolerance, goal[], style[], level}) into
+// the canonical "risk|goal1,goal2|style1,style2|level" string the backend prompts expect
+// (arrays comma-join via template interpolation).
+const profileToStr = (p) => p ? `${p.riskTolerance}|${p.goal}|${p.style}|${p.level}` : "";
 
 // ── SUPABASE CROSS-DEVICE SYNC ────────────────────────────────────────
 async function sbLoad(uid) {
@@ -2401,7 +2405,7 @@ function PositionForm({ initial, onSubmit, onClose, accounts=[] }) {
 }
 
 // ── AI PORTFOLIO ANALYSIS ─────────────────────────────────────────────
-function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
+function PortfolioAnalysis({ data, aiEnabled, cash, profile, accounts = [], unassignedCash = 0 }) {
   const [analysis, setAnalysis] = useState(null);
   const [loading, setLoading]   = useState(false);
   const [err, setErr]           = useState(null);
@@ -2412,15 +2416,20 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
     if (!aiEnabled || !data?.positions?.length) return;
     setLoading(true); setErr(null);
     try {
+      // Per-account grouping + each account's own trader profile ("" = use global).
+      const acctPayload = [
+        { id:"unassigned", name:"Unassigned", profile:"", cash:Number(unassignedCash)||0 },
+        ...accounts.map(a => ({ id:a.id, name:a.name, profile:profileToStr(a.profile), cash:Number(a.cash)||0 })),
+      ];
       const result = await fetchPortfolioAnalysis(
-        data.positions, data.analytics, cash,
-        profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""
+        data.positions, data.analytics, cash, profileToStr(profile),
+        acctPayload, data.macro || null
       );
       if (result.error) setErr(result.error);
       else setAnalysis(result);
     } catch(e) { setErr(e.message); }
     finally { setLoading(false); }
-  }, [aiEnabled, data, cash, profile]);
+  }, [aiEnabled, data, cash, profile, accounts, unassignedCash]);
 
   // Only auto-run once when positions first become non-empty — don't re-run on every
   // valuation refresh (which fires whenever individual position values update).
@@ -2457,6 +2466,7 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
         <span style={{ fontSize:13.5, fontWeight:700, color:C.ink }}>AI Portfolio Analysis</span>
         {profile && <span style={{ fontSize:10, color:C.faint, fontStyle:"italic" }}>
           {({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[profile.riskTolerance]||"")} · {({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day Trader"}[profile.style]||"")} profile
+          {accounts.some(a=>a.profile) && <span style={{ color:C.cold }}> · per-account profiles on</span>}
         </span>}
         <button onClick={run} disabled={loading} style={{ marginLeft:"auto", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:7, padding:"5px 12px", color:loading?C.faint:C.sub, fontSize:11, cursor:loading?"wait":"pointer", display:"flex", alignItems:"center", gap:5 }}>
           {loading ? <><Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/> Analyzing…</> : <><RefreshCw size={11}/> Refresh</>}
@@ -2480,6 +2490,14 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
             <span style={{ fontSize:13, color:C.ink }}>{analysis.health_summary}</span>
           </div>
 
+          {/* Market context: sector rotation + macro + analyst pulse, read against this book */}
+          {analysis.context_read && (
+            <div style={{ background:C.panel2, borderRadius:10, padding:"12px 16px", marginBottom:14, borderLeft:`3px solid ${C.violet}` }}>
+              <div style={{ fontSize:9.5, color:C.violet, letterSpacing:"0.07em", marginBottom:6 }}>MARKET CONTEXT · SECTOR ROTATION + ANALYST PULSE + MACRO</div>
+              <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.6 }}>{analysis.context_read}</div>
+            </div>
+          )}
+
           {/* 4-section grid */}
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:14 }}>
             <div style={{ background:C.panel2, borderRadius:10, padding:"12px 14px" }}>
@@ -2501,6 +2519,51 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile }) {
               <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.5 }}>{analysis.risk?.reason}</div>
             </div>
           </div>
+
+          {/* Per-account recommendations — each tailored to that account's own profile */}
+          {Array.isArray(analysis.account_recs) && analysis.account_recs.length>0 && (
+            <div style={{ marginBottom:14 }}>
+              <div style={{ fontSize:9.5, color:C.sub, letterSpacing:"0.07em", marginBottom:8 }}>BY ACCOUNT — TAILORED TO EACH ACCOUNT'S PROFILE</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))", gap:10 }}>
+                {analysis.account_recs.map((ar,i)=>{
+                  const acc = accounts.find(a=>a.name===ar.account);
+                  const st  = (ar.stance||"").toUpperCase();
+                  const stCol = ({"ADD RISK":C.up,"HOLD STEADY":C.cold,"REBALANCE":C.amber,"DE-RISK":C.down})[st] || C.sub;
+                  return (
+                    <div key={i} style={{ background:C.panel2, borderRadius:10, padding:"11px 14px", borderTop:`2px solid ${acc?.color||C.line}` }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
+                        <span style={{ width:8, height:8, borderRadius:"50%", background:acc?.color||C.faint, flexShrink:0 }}/>
+                        <span style={{ fontSize:11.5, fontWeight:700, color:C.ink }}>{ar.account}</span>
+                        {st && <span style={{ marginLeft:"auto", fontSize:9, fontWeight:800, letterSpacing:"0.06em", color:stCol }}>{st}</span>}
+                      </div>
+                      <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.55 }}>{ar.recommendation}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Top moves — position-level buy-more / trim / sell calls */}
+          {Array.isArray(analysis.actions) && analysis.actions.length>0 && (
+            <div style={{ background:C.panel2, borderRadius:10, padding:"12px 16px", marginBottom:14 }}>
+              <div style={{ fontSize:9.5, color:C.sub, letterSpacing:"0.07em", marginBottom:4 }}>TOP MOVES</div>
+              {analysis.actions.map((ac,i)=>{
+                const A = (ac.action||"").toUpperCase();
+                const col = A.includes("BUY") ? C.up : (A==="SELL"||A==="TRIM") ? C.down : A==="ROLL" ? C.amber : C.sub;
+                return (
+                  <div key={i} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"9px 0", borderTop: i?`1px solid ${C.line}`:"none" }}>
+                    <span style={{ flexShrink:0, minWidth:76, textAlign:"center", fontSize:9.5, fontWeight:800, letterSpacing:"0.05em", color:col, border:`1px solid ${col}55`, borderRadius:6, padding:"3px 8px", background:`${col}0c` }}>{A||"—"}</span>
+                    <div style={{ minWidth:0 }}>
+                      <span style={{ fontSize:12, fontWeight:700, color:C.ink, fontFamily:C.mono }}>{ac.ticker}</span>
+                      {ac.account && <span style={{ fontSize:10, color:C.faint, marginLeft:7 }}>{ac.account}</span>}
+                      <div style={{ fontSize:11.5, color:C.sub, lineHeight:1.5, marginTop:2 }}>{ac.reason}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Recommendation */}
           <div style={{ background:C.panel2, borderRadius:10, padding:"12px 16px", borderLeft:`3px solid ${C.cold}` }}>
@@ -2638,7 +2701,7 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEd
 // account id (or UNASSIGNED) used to route a dropped position.
 function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRename, onDelete, rowProps,
   editingPos=null, accounts=[], onSubmitEdit, onCloseEdit,
-  cash=0, margin=0, marginRate=0, onSetFunds }) {
+  cash=0, margin=0, marginRate=0, onSetFunds, traderProfile=null, onEditProfile }) {
   const isUnassigned = dropId===UNASSIGNED;
   // Outer node = sortable for reordering the account itself (Unassigned is pinned).
   const sortable = useSortable({ id:`acct:${dropId}`, data:{ type:"account", accountId:dropId }, disabled:isUnassigned });
@@ -2726,6 +2789,22 @@ function AccountFolder({ dropId, name, color, items, collapsed, onToggle, onRena
                   <span>💵 Cash <b style={{ color:(cash||0)>0?C.cold:C.faint, fontFamily:C.mono }}>${(Number(cash)||0).toLocaleString()}</b></span>
                   <span>📉 Margin <b style={{ color:(margin||0)>0?C.amber:C.faint, fontFamily:C.mono }}>${(Number(margin)||0).toLocaleString()}</b>{(margin||0)>0 && <span style={{ color:C.faint }}> @ {marginRate||0}%</span>}</span>
                   <Pencil size={11} color={C.faint}/>
+                  {/* Per-account trader profile: tailors the AI Portfolio Analysis to
+                      THIS account (e.g. conservative Roth vs degen options account). */}
+                  {onEditProfile && (
+                    <span onClick={e=>{ e.stopPropagation(); onEditProfile(); }}
+                      title={traderProfile ? "This account has its own trader profile — AI analysis tailors its advice to it. Click to edit."
+                                           : "Uses your global trader profile — click to set one just for this account"}
+                      style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:5, cursor:"pointer",
+                        color: traderProfile?C.cold:C.faint, border:`1px solid ${traderProfile?C.cold+"55":C.line}`,
+                        borderRadius:20, padding:"2px 10px", fontSize:10.5 }}>
+                      👤 <b style={{ fontWeight:600 }}>
+                        {traderProfile
+                          ? `${({conservative:"Conservative",moderate:"Moderate",aggressive:"Aggressive",degen:"Degen"}[traderProfile.riskTolerance]||"?")} · ${(Array.isArray(traderProfile.style)?traderProfile.style:[traderProfile.style]).map(s=>({longterm:"Long-Term",swing:"Swing",options:"Options",daytrader:"Day"}[s]||s)).join("+")}`
+                          : "Global profile"}
+                      </b>
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -2848,11 +2927,13 @@ function PortfolioMarketAlignment({ analytics }) {
 
 function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash,
   totalCash=0, totalMargin=0, blendedRate=0, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
-  accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onReorderPositions, onReorderAccounts, onSetFunds }) {
+  accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onReorderPositions, onReorderAccounts, onSetFunds,
+  onSetAccountProfile, onOpenGlobalProfile }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
   const [payoff, setPayoff]           = useState(null);
+  const [profileFor, setProfileFor]   = useState(null);    // account whose trader profile is being edited
   const [adding, setAdding]           = useState(false);   // "+ Add Account" inline input open
   const [newName, setNewName]         = useState("");
   const [activeDrag, setActiveDrag]   = useState(null);    // currently-dragged position (for overlay)
@@ -3009,7 +3090,8 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
               sub={totalMargin>0 ? `${blendedRate.toFixed(2)}% blended · $${num(a.margin_interest_daily,2)}/day` : "edit in account below"}/>
           </div>
 
-          <PortfolioAnalysis data={data} aiEnabled={aiEnabled} cash={totalCash} profile={profile}/>
+          <PortfolioAnalysis data={data} aiEnabled={aiEnabled} cash={totalCash} profile={profile}
+            accounts={accounts} unassignedCash={cash}/>
 
           {/* Accounts — drag positions between collapsible buckets */}
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, flexWrap:"wrap", gap:8 }}>
@@ -3036,6 +3118,7 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                   items={groups[UNASSIGNED]} collapsed={!!accountCollapsed[UNASSIGNED]}
                   onToggle={onToggleAccountCollapse} rowProps={rowProps}
                   editingPos={editingActive?editing:null} accounts={accounts} onSubmitEdit={onUpdate} onCloseEdit={closeEdit}
+                  traderProfile={null} onEditProfile={onOpenGlobalProfile}
                   cash={cash} margin={margin} marginRate={marginRate} onSetFunds={onSetFunds}/>
                 {accounts.map(acc => (
                   <AccountFolder key={acc.id} dropId={acc.id} name={acc.name} color={acc.color}
@@ -3043,6 +3126,7 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                     onToggle={onToggleAccountCollapse} onRename={onRenameAccount} onDelete={onDeleteAccount}
                     rowProps={rowProps}
                     editingPos={editingActive?editing:null} accounts={accounts} onSubmitEdit={onUpdate} onCloseEdit={closeEdit}
+                    traderProfile={acc.profile||null} onEditProfile={onSetAccountProfile ? ()=>setProfileFor(acc) : null}
                     cash={acc.cash} margin={acc.margin} marginRate={acc.marginRate} onSetFunds={onSetFunds}/>
                 ))}
               </SortableContext>
@@ -3126,6 +3210,16 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         </>
       )}
       {payoff && <PayoffModal position={payoff} onClose={()=>setPayoff(null)}/>}
+      {profileFor && (
+        <TraderProfileModal
+          profile={profileFor.profile || profile}
+          title={`Profile — ${profileFor.name}`}
+          subtitle="Tailors the AI Portfolio Analysis to this account (overrides your global profile)"
+          onSave={(p)=>onSetAccountProfile(profileFor.id, p)}
+          onClear={profileFor.profile ? ()=>onSetAccountProfile(profileFor.id, null) : null}
+          onClose={()=>setProfileFor(null)}
+        />
+      )}
     </div>
   );
 }
@@ -3758,7 +3852,7 @@ const PROFILE_OPTIONS = {
   },
 };
 
-function TraderProfileModal({ profile, onSave, onClose }) {
+function TraderProfileModal({ profile, onSave, onClose, title, subtitle, onClear }) {
   const defaults = { riskTolerance:"moderate", goal:["growth"], style:["swing"], level:"intermediate" };
   // Goals/style are multi-select (arrays); older saved profiles stored strings — normalize.
   const norm = (p) => ({ ...defaults, ...p,
@@ -3778,8 +3872,8 @@ function TraderProfileModal({ profile, onSave, onClose }) {
       <div style={{ background:C.bg, border:`1px solid ${C.line}`, borderRadius:16, padding:"28px 30px", width:"100%", maxWidth:520, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 24px 80px rgba(0,0,0,0.5)" }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:22 }}>
           <div>
-            <div style={{ fontSize:18, fontWeight:700, color:C.ink }}>Trader Profile</div>
-            <div style={{ fontSize:11.5, color:C.sub, marginTop:3 }}>Personalizes all AI analysis to your style</div>
+            <div style={{ fontSize:18, fontWeight:700, color:C.ink }}>{title || "Trader Profile"}</div>
+            <div style={{ fontSize:11.5, color:C.sub, marginTop:3 }}>{subtitle || "Personalizes all AI analysis to your style"}</div>
           </div>
           <button onClick={onClose} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:4 }}><X size={18}/></button>
         </div>
@@ -3816,6 +3910,12 @@ function TraderProfileModal({ profile, onSave, onClose }) {
             style={{ flex:1, background:C.cold, border:"none", borderRadius:10, padding:"11px 0", color:"#fff", fontSize:13.5, fontWeight:700, cursor:"pointer" }}>
             Save Profile
           </button>
+          {onClear && (
+            <button onClick={()=>{ onClear(); onClose(); }} title="Remove this account's override and fall back to your global profile"
+              style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:10, padding:"11px 14px", color:C.amber, fontSize:12.5, cursor:"pointer" }}>
+              Use Global
+            </button>
+          )}
           <button onClick={onClose}
             style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:10, padding:"11px 18px", color:C.sub, fontSize:13, cursor:"pointer" }}>
             Cancel
@@ -6951,6 +7051,10 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   };
   // Reorder the account folders themselves.
   const onReorderAccounts = (nextAccounts) => setAccounts(nextAccounts);
+  // Per-account trader profile (null clears the override → account falls back to
+  // the global profile). Persists with the accounts array (localStorage + Supabase).
+  const setAccountProfile = (id, prof) =>
+    setAccounts(a => a.map(x => x.id===id ? { ...x, profile: prof || undefined } : x));
 
   const addTicker    = (t)=>{ const T=normalizeTicker(t); if(T){ setWatchlist(w=>w.includes(T)?w:[...w,T]); setRadar(r=>r.filter(x=>x!==T)); } };
   const removeTicker = (t)=> setWatchlist(w=>w.filter(x=>x!==t));
@@ -7156,7 +7260,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds} onSetAccountProfile={setAccountProfile} onOpenGlobalProfile={()=>setShowProfile(true)}/>}
           {tab==="realestate" && <RealEstatePage properties={reProperties} onSaveProperties={setREProperties}
             deals={reDeals} onSaveDeals={setREDeals} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>}

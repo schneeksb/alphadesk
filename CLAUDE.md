@@ -58,7 +58,10 @@ Recommendations are research input, not financial advice.
   the brief agent loop. The AI stage-read has its own 30-min `aian:` cache separate from
   technicals. `_cached` = 10-min TTL; `_cached_swr(key, fn, ttl, stale_ttl)` = stale-while-revalidate.
 - Trader profile string `risk|goal1,goal2|style1,style2|level` (goals/styles are multi-select
-  arrays in the frontend, comma-joined). `_profile_ctx()` renders it for prompts.
+  arrays in the frontend, comma-joined). `_profile_ctx()` renders it for prompts; `_profile_line()`
+  is the compact one-liner. Portfolio accounts may carry a per-account `profile` override
+  (structured object, same shape as global) — `/portfolio-analysis` groups positions by account,
+  applies each account's profile, and grounds the read in sector rotation + macro + Market Pulse.
 - FastAPI endpoints are module attrs (e.g. `research.sector_rotation_endpoint()` callable directly
   — the brief agent's tools do this).
 

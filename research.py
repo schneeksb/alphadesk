@@ -1540,25 +1540,60 @@ def _next_periods(last_label, mode, n=2):
     return out
 
 
-def _recommend(score, pnl_pct, dte, conviction=None):
-    """HOLD / BUY / SELL from stage conviction + position state."""
-    if pnl_pct is not None and pnl_pct <= -0.25:
-        return "SELL"                                   # stop-loss discipline always
+def _profile_knobs(profile: str) -> dict:
+    """Deterministic thresholds derived from a 'risk|goals|styles|level' profile
+    string — calibrate the per-position Signal (_recommend) and Stop
+    (_stop_recommendation) columns to the profile of the ACCOUNT holding the
+    position. Moderate/swing (the defaults) reproduce the original hardcoded
+    behavior exactly (loss cut -25%, take-profit +50%/+60%, DTE exit <21,
+    8%/15% stop bands)."""
+    parts  = (profile or "").split("|")
+    risk   = (parts[0] if len(parts) > 0 else "").strip() or "moderate"
+    styles = {s.strip() for s in (parts[2] if len(parts) > 2 else "").split(",") if s.strip()} or {"swing"}
+    R = {
+        #                cut losses  take-profit  stop adding  bail on     stop width
+        #                at…         (neutral)    (conviction) short DTE…  multiplier
+        "conservative": dict(loss=-0.15, gain=0.30, hold=0.40, dte=30, stop=0.75),
+        "moderate":     dict(loss=-0.25, gain=0.50, hold=0.60, dte=21, stop=1.00),
+        "aggressive":   dict(loss=-0.35, gain=0.80, hold=0.90, dte=14, stop=1.30),
+        "degen":        dict(loss=-0.50, gain=1.20, hold=1.50, dte=7,  stop=1.60),
+    }
+    k = R.get(risk) or R["moderate"]
+    # Style sets the base stop width (horizon: how much room a trade gets)
+    if   "daytrader" in styles:                          base = 0.04
+    elif "longterm" in styles and "swing" not in styles: base = 0.15
+    elif "longterm" in styles:                           base = 0.11   # blended core + tactical
+    else:                                                base = 0.08
+    return {"risk": risk, "styles": styles, "loss_cut": k["loss"], "gain_trim": k["gain"],
+            "gain_hold": k["hold"], "dte_exit": k["dte"], "stop_mult": k["stop"], "stop_base": base}
+
+
+def _recommend(score, pnl_pct, dte, conviction=None, profile=""):
+    """HOLD / BUY / TRIM / SELL from stage conviction + position state, calibrated
+    to the holding account's trader profile: conservative cuts losses and takes
+    profits earlier; aggressive/degen rides both further; short-DTE tolerance
+    scales with risk appetite; long-term holders don't get a SELL on price action
+    alone while the AI read still calls the setup strong."""
+    k = _profile_knobs(profile)
+    longterm = "longterm" in k["styles"]
+    if pnl_pct is not None and pnl_pct <= k["loss_cut"]:
+        if not (longterm and conviction == "Strong Setup"):
+            return "SELL"                               # stop-loss discipline
     if conviction == "Risky Setup":
         return "SELL"                                   # AI says risk > reward
-    if dte is not None and dte < 21 and conviction != "Strong Setup" and (score is None or score < 6):
+    if dte is not None and dte < k["dte_exit"] and conviction != "Strong Setup" and (score is None or score < 6):
         return "SELL"                                   # theta bleeding, no conviction to hold
     if conviction == "Strong Setup":
-        return "HOLD" if (pnl_pct or 0) >= 0.6 else "BUY"
+        return "HOLD" if (pnl_pct or 0) >= k["gain_hold"] else "BUY"
     # Fallback: numeric score (backward compat with cached research)
     if score is None:
         return "HOLD"
     if score >= 7:
-        return "HOLD" if (pnl_pct or 0) >= 0.6 else "BUY"
+        return "HOLD" if (pnl_pct or 0) >= k["gain_hold"] else "BUY"
     if score <= 3.5:
         return "SELL"
-    if pnl_pct is not None and pnl_pct >= 0.5:
-        return "SELL"                                   # neutral conviction + big gain → take profits
+    if pnl_pct is not None and pnl_pct >= k["gain_trim"]:
+        return "TRIM" if longterm else "SELL"           # take profits; long-term scales out
     return "HOLD"
 
 
@@ -1574,11 +1609,17 @@ def _apply_margin(analytics, margin, rate):
     return a
 
 
-def _stop_recommendation(pos_type, spot):
-    """A starting-suggestion stop level: ~8% below spot for shares, ~15% for (leveraged) options."""
+def _stop_recommendation(pos_type, spot, profile=""):
+    """A starting-suggestion stop level on the underlying, calibrated to the
+    holding account's profile: trading style sets the base width (day ~4% /
+    swing ~8% / long-term ~15%), risk tolerance scales it (conservative ×0.75
+    bails earlier … degen ×1.6 gives trades room), and leveraged options/crypto
+    keep the same ~1.9× wider band vs shares as before."""
     if not spot:
         return None
-    band = 0.15 if pos_type != "SHARES" else 0.08
+    k = _profile_knobs(profile)
+    band = k["stop_base"] * (1.0 if pos_type == "SHARES" else 1.9)
+    band = min(0.5, band * k["stop_mult"])
     return round(spot * (1 - band), 2)
 
 
@@ -3032,6 +3073,10 @@ JSON ONLY:
         margin = float(payload.get("margin") or 0)
         rate   = float(payload.get("margin_rate") or 0)
         profile = str(payload.get("profile") or "")   # tunes alert thresholds/wording
+        # Per-account trader-profile overrides ([{id, profile}]): a position held in
+        # an account with its own profile gets Signal/Stop calibrated to THAT profile.
+        prof_by_acct = {str(a.get("id")): str(a.get("profile") or "")
+                        for a in (payload.get("accounts") or []) if a.get("id")}
         from run_daily import (layer1_data_valuation, layer2_portfolio_analytics,
                                get_macro_score, layer4_alerts)
         macro = get_macro_score()
@@ -3065,9 +3110,12 @@ JSON ONLY:
             p["conviction"] = conviction
             p["reason"]       = rb.get("reason")
             p["trade_levels"] = rb.get("trade_levels")
-            rec = _recommend(sc, p.get("pnl_pct"), p.get("dte"), conviction)
+            acct_prof   = prof_by_acct.get(str(p.get("account") or ""))
+            eff_profile = acct_prof or profile
+            p["prof_scope"] = "account" if acct_prof else "global"
+            rec = _recommend(sc, p.get("pnl_pct"), p.get("dte"), conviction, profile=eff_profile)
             spot = p.get("spot")
-            p["stop_rec"] = _stop_recommendation(p.get("type"), spot)
+            p["stop_rec"] = _stop_recommendation(p.get("type"), spot, profile=eff_profile)
             st = p.get("stop")
             if st and spot:
                 p["stop_dist"] = round((spot - st) / spot, 4)   # cushion above the stop (fraction)

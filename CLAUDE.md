@@ -62,6 +62,11 @@ Recommendations are research input, not financial advice.
   is the compact one-liner. Portfolio accounts may carry a per-account `profile` override
   (structured object, same shape as global) — `/portfolio-analysis` groups positions by account,
   applies each account's profile, and grounds the read in sector rotation + macro + Market Pulse.
+  `/value` also takes `accounts` [{id, profile}]: each position's Signal (`rec`, via `_recommend`)
+  and Stop (`stop_rec`, via `_stop_recommendation`) are calibrated to its account's profile through
+  `_profile_knobs` (loss-cut/profit-take/DTE/stop-width thresholds; moderate|swing = legacy values;
+  `prof_scope` on each position says which profile applied). Frontend re-values on profile or
+  account-assignment changes (`acctProfSig` + account in `valSig`).
 - FastAPI endpoints are module attrs (e.g. `research.sector_rotation_endpoint()` callable directly
   — the brief agent's tools do this).
 

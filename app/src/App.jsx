@@ -351,11 +351,11 @@ async function fetchBriefRefresh(body) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
-async function fetchValue(positions, margin = 0, margin_rate = 0, profile = "") {
+async function fetchValue(positions, margin = 0, margin_rate = 0, profile = "", accounts = []) {
   const r = await fetch(`${API}/value`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ positions, margin, margin_rate, profile }),
+    body: JSON.stringify({ positions, margin, margin_rate, profile, accounts }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2666,7 +2666,7 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEd
             <span style={{ fontSize:8.5, fontWeight:700, color: p.stop_hit?C.down:C.up }}>{p.stop_hit?"HIT":`+${((p.stop_dist||0)*100).toFixed(0)}%`}</span>
           </div>
         ) : (
-          <span style={{ color:C.faint, fontSize:10 }} title="recommended stop">rec ${p.stop_rec ?? "—"}</span>
+          <span style={{ color:C.faint, fontSize:10 }} title={p.prof_scope==="account" ? "recommended stop — calibrated to this account's trader profile" : "recommended stop — calibrated to your global trader profile"}>rec ${p.stop_rec ?? "—"}</span>
         )}
       </div>
       <div style={{ position:"relative" }} onMouseEnter={()=>setTip(true)} onMouseLeave={()=>setTip(false)}>
@@ -6950,14 +6950,24 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
   // Arrays (multi-select goals/styles) serialize to comma lists via template join.
   const profileStr = profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : "";
+  // Per-account profile overrides go along so the backend can calibrate each
+  // position's Signal/Stop to the account holding it. Signature only covers
+  // id+profile, so renames/cash edits don't trigger a re-valuation.
+  const acctProfSig = accounts.map(a=>`${a.id}:${profileToStr(a.profile)}`).join(";");
   const valuePortfolio = useCallback((list, m=0, r=0)=>{
     setPfErr(null); setPfLoading(true);
-    fetchValue(list, m, r, profileStr).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
-  },[profileStr]);
-  // Re-value when positions' CONTENTS or the combined margin/rate change — not when merely reordered.
-  const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis,p.stop].join("|")).sort().join(",");
+    const acctProfiles = accountsRef.current.map(a=>({ id:a.id, profile:profileToStr(a.profile) }));
+    fetchValue(list, m, r, profileStr, acctProfiles).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[profileStr, acctProfSig]);
+  // Re-value when positions' CONTENTS, the combined margin/rate, or any profile
+  // change — not when merely reordered WITHIN an account. Account assignment is
+  // part of the signature because it decides which profile calibrates Signal/Stop.
+  const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis,p.stop,p.account??""].join("|")).sort().join(",");
   useEffect(()=>{ valuePortfolio(positionsRef.current, totalMargin, blendedRate); },[valSig, totalMargin, blendedRate, valuePortfolio]);
 
   // Merge portfolio + stop-hit alerts into persistent history whenever valuation updates

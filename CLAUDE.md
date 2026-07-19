@@ -92,6 +92,11 @@ prod deploy, CI on main is only a post-hoc signal.
 ## Deploy / verify
 - `git push origin main` → Render (backend) + Vercel (frontend) auto-deploy. Scheduled brief:
   GitHub Actions `.github/workflows/market-brief.yml` (weekdays 11:47 UTC, secrets in repo settings).
+  Scheduled Market Pulse: `.github/workflows/market-pulse.yml` (weekdays 11:20 UTC, before the
+  brief) runs `fetch_transcripts.py` in the cloud — needs `WEBSHARE_USER/PASS` (or `YT_PROXY`)
+  repo secrets since YouTube blocks datacenter IPs; `_proxy_url()` routes BOTH discovery and
+  transcripts through the residential proxy. Idempotent vs the local Task Scheduler job (skips
+  archived videos), so both can coexist.
 - Preview: `.claude/launch.json` name "AlphaDesk" (Vite :5173, use `localhost` not `127.0.0.1`).
   Backend must run separately on :8000. Kill stale python before restart (`taskkill //F //IM python.exe`).
 - Always run `python -c "import ast; ast.parse(open('research.py').read())"` before restarting.

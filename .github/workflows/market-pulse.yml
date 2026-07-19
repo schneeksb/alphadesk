@@ -1,0 +1,62 @@
+# Scheduled Market Pulse — fetches the YouTube analyst transcripts, extracts
+# insights with Claude, and writes them to Supabase (market_pulse + archive).
+# Runs in the cloud so it no longer depends on your PC being awake.
+#
+# WHY A PROXY IS REQUIRED: YouTube IP-blocks caption downloads (and often channel
+# discovery) from datacenter IPs like GitHub Actions. fetch_transcripts.py routes
+# every YouTube request through a residential proxy when one is configured.
+#
+# Setup (one time): repo → Settings → Secrets and variables → Actions → add:
+#   ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY   (same as the brief)
+#   WEBSHARE_USER, WEBSHARE_PASS                                 (Webshare proxy creds)
+# Get the Webshare creds: sign up at webshare.io → Dashboard → Proxy → "Proxy
+# Settings" shows your Username and Password. The free tier's rotating residential
+# endpoint (p.webshare.io:80) is what the script defaults to. If your plan uses a
+# different endpoint, add a YT_PROXY secret with the full http://user:pass@host:port
+# URL instead and it takes precedence.
+#
+# Notes:
+# - Cron is UTC. 11:20 ≈ 7:20am ET (daylight); it runs BEFORE the 11:47 brief so the
+#   brief agent reads fresh pulse. GitHub may delay scheduled runs 5-15 min.
+# - The run is idempotent: it skips videos already in the archive, so re-runs and
+#   the local Task Scheduler job can't double-process or clash.
+# - "Run workflow" button (workflow_dispatch) triggers it manually.
+
+name: Market Pulse
+
+on:
+  schedule:
+    - cron: "20 11 * * 1-5"
+  workflow_dispatch: {}
+
+concurrency:
+  group: market-pulse
+  cancel-in-progress: false
+
+jobs:
+  pulse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch Market Pulse (via residential proxy)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WEBSHARE_USER: ${{ secrets.WEBSHARE_USER }}
+          WEBSHARE_PASS: ${{ secrets.WEBSHARE_PASS }}
+          YT_PROXY: ${{ secrets.YT_PROXY }}
+          # Rotating proxy gives each request a fresh IP, so we can pace faster
+          # than the proxy-less local run's 12s without tripping burst detection.
+          YT_THROTTLE_S: "4"
+        run: python fetch_transcripts.py

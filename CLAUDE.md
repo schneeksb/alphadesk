@@ -61,9 +61,14 @@ prod deploy, CI on main is only a post-hoc signal.
 - YouTube blocks transcript downloads (IP-level) → Market Pulse runs locally, throttled
   (`YT_THROTTLE_S`), merges per-analyst into `market_pulse` (public-read table). Optional proxy:
   `WEBSHARE_USER/PASS` or `YT_PROXY`. Every run also appends to `market_pulse_archive`
-  (dedupe on analyst+video_link) — the analyst knowledge base. `/portfolio-analysis` merges
-  archive + live pulse into per-analyst dated timelines (weight ≤ 3 get up to 5 entries,
-  weight 1 gets latest-video detail) so the AI reads each analyst's EVOLVING view.
+  (dedupe on analyst+video_link) — the analyst knowledge base. The daily run reads the
+  archive's `video_link`s first and SKIPS already-summarized videos (recency-sorted), so the
+  limited transcript budget goes to genuinely NEW videos — fresher, and more analysts clear
+  the IP block before it trips. `/portfolio-analysis` merges archive + live pulse into
+  per-analyst dated timelines (weight ≤ 3 get up to 5 entries, weight 1 gets latest-video
+  detail) so the AI reads each analyst's EVOLVING view. `/yt-insights` also attaches a
+  trust-weighted panel `summary` (haiku via `_pulse_summary`, cached per fetch: mood /
+  bottom_line / themes / divergence / standout) rendered atop the Market Pulse panel.
 - yfinance quirks: no `show_errors` kwarg; quarterly statements ≈ 5-6 quarters only; RSI must be
   Wilder's (ewm alpha=1/14) to match TradingView — frontend `calcRSI` mirrors it.
 - AI prompts MUST include `datetime.date.today()` (model assumes training-era year otherwise).

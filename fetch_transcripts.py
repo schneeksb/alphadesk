@@ -290,6 +290,24 @@ def sb_request(method, path, body=None, prefer="return=minimal"):
         return r.status
 
 
+def archived_links():
+    """Video links already in the knowledge base (market_pulse_archive). Lets the
+    daily run SKIP videos it has already summarized — so it spends its limited
+    transcript-request budget only on genuinely NEW videos (fresher insights, and
+    more analysts get through before YouTube's IP block trips). Best-effort:
+    returns an empty set if the archive table isn't there yet."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/market_pulse_archive?select=video_link"
+        req = urllib.request.Request(url, headers={
+            "apikey": SERVICE_KEY, "Authorization": f"Bearer {SERVICE_KEY}",
+            "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return {row.get("video_link") for row in json.loads(r.read()) if row.get("video_link")}
+    except Exception as e:
+        print(f"  (archive lookup skipped: {e})")
+        return set()
+
+
 def save_to_supabase(rows):
     """Per-analyst merge, not a full wipe. YouTube's IP block often cuts a run
     short partway down the trust list — replacing only the analysts this run
@@ -323,6 +341,9 @@ def main():
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     all_rows, summary = [], []
     _fetches = 0   # transcript downloads so far (drives the inter-request throttle)
+    seen = archived_links()   # videos already summarized — skip to prioritize NEW content
+    if seen:
+        print(f"Knowledge base has {len(seen)} archived video(s) — skipping those, fetching only new.")
 
     for a in ANALYSTS:  # already in trust/weight order
         print(f"\n[{a['weight']}] {a['name']} …")
@@ -332,17 +353,24 @@ def main():
             print(f"    ! RSS failed: {e}")
             summary.append((a["name"], 0)); continue
 
+        # Newest-first (RSS carries publish dates; scrape entries have none and sort
+        # last) so a daily run always reaches the freshest videos before the budget
+        # runs out. shorts_first analysts keep shorts ahead, newest within each group.
+        entries.sort(key=lambda e: e.get("pub") or "", reverse=True)
         if a.get("shorts_first"):
             entries = [e for e in entries if e["is_short"]] + [e for e in entries if not e["is_short"]]
 
         target = min(int(a.get("videos", 2)), 3)   # collect up to 2-3 insight videos
-        found = 0
-        for v in entries[:MAX_SCAN]:
-            if found >= target:
+        found, attempts = 0, 0
+        for v in entries:
+            if found >= target or attempts >= MAX_SCAN:
                 break
+            if v["link"] in seen:                    # already in the knowledge base
+                print(f"    · already archived: {v['title'][:52]}")
+                continue                             # free skip — no request, no throttle
             if _fetches:
                 time.sleep(THROTTLE_S)   # pace requests so the run doesn't trip the burst detector
-            _fetches += 1
+            _fetches += 1; attempts += 1
             transcript = get_transcript(v["vid"])
             if not transcript or len(transcript) < 120:
                 print(f"    - no transcript: {v['title'][:60]}")
@@ -351,6 +379,7 @@ def main():
             if not ins:
                 print(f"    - no insight (promo/empty): {v['title'][:60]}")
                 continue
+            seen.add(v["link"])                      # don't re-fetch within this run either
             all_rows.append({
                 "analyst_id":     a["id"],
                 "analyst_name":   a["name"],

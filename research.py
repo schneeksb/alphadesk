@@ -2672,6 +2672,10 @@ Emit via the tool:
                    "stale": stale}
             if stale:
                 out["message"] = STALE_MSG
+            # High-level panel summary (trust-weighted, cached per fetch).
+            summary = _pulse_summary(analysts_out, out["fetched_at"] or "none")
+            if summary:
+                out["summary"] = summary
             return _json_safe(out)
 
         # Light cache so repeated UI hits don't re-query Supabase on every request.
@@ -2860,6 +2864,45 @@ Be direct. Specific numbers. No hedging. No "it could go either way." Take a pos
             except Exception:
                 return []
         return _cached_swr("pulse-archive", produce, ttl=1800, stale_ttl=86400)
+
+    def _pulse_summary(analysts_out, cache_tag):
+        """High-level AI read across ALL analysts — the one-glance 'what is the
+        Market Pulse saying' summary. Trust-weighted (top analysts count more).
+        Cached on cache_tag (the newest fetched_at) so the haiku call fires only
+        once per fetch, not per page load. Returns None on any error so the panel
+        renders fine without it."""
+        digest = []
+        for a in analysts_out:
+            for i in (a.get("insights") or [])[:2]:
+                take = (i.get("takeaway") or i.get("summary") or "").strip().replace("\n", " ")
+                if take:
+                    digest.append(f"[{a['weight']}] {a['name']} ({a.get('label','')}) "
+                                  f"{i.get('sentiment','neutral')}: {take[:200]}")
+        if len(digest) < 2:
+            return None
+        def produce():
+            try:
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                prompt = (
+                    f"Today: {datetime.date.today()}. Below are the latest takeaways from a panel of "
+                    f"YouTube market analysts, each tagged [weight] where 1 = most trusted (macro/cycle) "
+                    f"and 9 = least (near-term noise). Weight the low numbers far more heavily.\n\n"
+                    + "\n".join(digest)
+                    + "\n\nSynthesize the PANEL as a whole. JSON ONLY:\n"
+                    "{\"mood\":\"risk-on\"|\"risk-off\"|\"mixed\"|\"cautious\","
+                    "\"bottom_line\":\"<2 sentences: the single high-level read a busy investor needs>\","
+                    "\"themes\":[\"<a theme multiple analysts share — name them>\"],"
+                    "\"divergence\":\"<where the panel disagrees, or empty string if aligned>\","
+                    "\"standout\":\"<the highest-conviction actionable call + which analyst>\"}\n"
+                    "2-4 themes. Be specific (tickers/sectors). Don't hedge. Lead with what the trusted voices say.")
+                r = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=600,
+                    messages=[{"role": "user", "content": prompt}])
+                from scanner import _lenient_json
+                data = _lenient_json(r.content[0].text)
+                return _json_safe(data) if isinstance(data, dict) else None
+            except Exception:
+                return None
+        return _cached_swr(f"pulse-summary:{cache_tag}", produce, ttl=6 * 3600, stale_ttl=86400)
 
     # Static system block for /portfolio-analysis — cacheable across requests
     # (cache_control), so only the dynamic portfolio/context data is re-billed.

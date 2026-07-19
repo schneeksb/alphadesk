@@ -3557,6 +3557,44 @@ const ANALYST_LABELS = {
   figuring_out_money:"Near Term",
 };
 
+// One-glance synthesis across the whole analyst panel (trust-weighted, AI-generated).
+function PulseSummary({ s }) {
+  if (!s || (!s.bottom_line && !(s.themes||[]).length)) return null;
+  const moodCol = ({"risk-on":C.up, "risk-off":C.down, cautious:C.amber, mixed:C.cold})[String(s.mood||"").toLowerCase()] || C.violet;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${moodCol}55`, borderRadius:12, padding:"15px 18px", marginBottom:16 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:8 }}>
+        <Activity size={15} color={moodCol}/>
+        <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>Panel Summary</span>
+        {s.mood && <span style={{ fontSize:9.5, fontWeight:800, letterSpacing:"0.06em", textTransform:"uppercase", color:moodCol, background:`${moodCol}18`, borderRadius:20, padding:"2px 10px" }}>{s.mood}</span>}
+        <span style={{ marginLeft:"auto", fontSize:9.5, color:C.faint, fontStyle:"italic" }}>AI · trust-weighted across all analysts</span>
+      </div>
+      {s.bottom_line && <div style={{ fontSize:13, color:C.ink, lineHeight:1.6, marginBottom:(s.themes?.length||s.standout||s.divergence)?12:0 }}>{s.bottom_line}</div>}
+      {(Array.isArray(s.themes) && s.themes.length>0) && (
+        <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:(s.standout||s.divergence)?12:0 }}>
+          {s.themes.map((t,i)=>(
+            <span key={i} style={{ fontSize:11, color:C.sub, background:C.panel2, border:`1px solid ${C.line}`, borderRadius:7, padding:"5px 10px", lineHeight:1.4 }}>{t}</span>
+          ))}
+        </div>
+      )}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:10 }}>
+        {s.standout && (
+          <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}30`, borderRadius:9, padding:"9px 12px" }}>
+            <div style={{ fontSize:9, color:C.up, letterSpacing:"0.07em", marginBottom:4 }}>STANDOUT CALL</div>
+            <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.5 }}>{s.standout}</div>
+          </div>
+        )}
+        {s.divergence && (
+          <div style={{ background:`${C.amber}0c`, border:`1px solid ${C.amber}30`, borderRadius:9, padding:"9px 12px" }}>
+            <div style={{ fontSize:9, color:C.amber, letterSpacing:"0.07em", marginBottom:4 }}>WHERE THEY DISAGREE</div>
+            <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.5 }}>{s.divergence}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MarketPulsePanel({ refreshTick=0 }) {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
@@ -3650,6 +3688,7 @@ function MarketPulsePanel({ refreshTick=0 }) {
               <AlertCircle size={13}/> {data.message || "Insights are over 24h old."} {data.fetched_at && <span style={{ color:C.faint }}>· last updated {new Date(data.fetched_at).toLocaleString()}</span>}
             </div>
           )}
+          {data.summary && <PulseSummary s={data.summary}/>}
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:12 }}>
             {data.analysts.map((a, i) => (
               <AnalystCard key={a.id || i} analyst={a} rank={i+1}/>

@@ -331,6 +331,19 @@ def save_to_supabase(rows):
         print(f"    ! archive write skipped ({e}) — run supabase/market_pulse_archive.sql")
 
 
+def _round_robin(plans):
+    """Breadth-first iteration order over analysts' candidate videos: one video per
+    analyst per round (round 0 = everyone's newest, round 1 = everyone's 2nd, …).
+    Pure and testable — the actual transcript fetch, found/target accounting and
+    IP-block stop live in the caller. This is what lets the low-trust tail get a
+    caption request in before YouTube's block trips."""
+    max_rounds = max((len(p["cands"]) for p in plans), default=0)
+    for round_i in range(max_rounds):
+        for p in plans:
+            if round_i < len(p["cands"]):
+                yield p, p["cands"][round_i]
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     missing = [n for n, v in [("SUPABASE_URL", SUPABASE_URL),
@@ -340,63 +353,78 @@ def main():
         raise SystemExit(f"Missing env vars: {', '.join(missing)} (set them in .env)")
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    all_rows, summary = [], []
+    all_rows = []
     _fetches = 0   # transcript downloads so far (drives the inter-request throttle)
     seen = archived_links()   # videos already summarized — skip to prioritize NEW content
     if seen:
         print(f"Knowledge base has {len(seen)} archived video(s) — skipping those, fetching only new.")
 
-    for a in ANALYSTS:  # already in trust/weight order
+    # ── Phase 1: DISCOVERY only (RSS/scrape isn't the blocked endpoint) ──────────
+    # Build each analyst's list of NEW (not-yet-archived) candidate videos, newest
+    # first. No transcript downloads here, so nothing counts against the IP-block
+    # budget yet.
+    plans = []
+    for a in ANALYSTS:  # trust/weight order
         print(f"\n[{a['weight']}] {a['name']} …")
         try:
             entries = fetch_entries(a["channel_id"])
         except Exception as e:
-            print(f"    ! RSS failed: {e}")
-            summary.append((a["name"], 0)); continue
-
-        # Newest-first (RSS carries publish dates; scrape entries have none and sort
-        # last) so a daily run always reaches the freshest videos before the budget
-        # runs out. shorts_first analysts keep shorts ahead, newest within each group.
-        entries.sort(key=lambda e: e.get("pub") or "", reverse=True)
+            print(f"    ! discovery failed: {e}")
+            entries = []
+        entries.sort(key=lambda e: e.get("pub") or "", reverse=True)   # newest first
         if a.get("shorts_first"):
             entries = [e for e in entries if e["is_short"]] + [e for e in entries if not e["is_short"]]
-
-        target = min(int(a.get("videos", 2)), 3)   # collect up to 2-3 insight videos
-        found, attempts = 0, 0
+        cands = []
         for v in entries:
-            if found >= target or attempts >= MAX_SCAN:
-                break
-            if v["link"] in seen:                    # already in the knowledge base
+            if v["link"] in seen:
                 print(f"    · already archived: {v['title'][:52]}")
-                continue                             # free skip — no request, no throttle
-            if _fetches:
-                time.sleep(THROTTLE_S)   # pace requests so the run doesn't trip the burst detector
-            _fetches += 1; attempts += 1
-            transcript = get_transcript(v["vid"])
-            if not transcript or len(transcript) < 120:
-                print(f"    - no transcript: {v['title'][:60]}")
                 continue
-            ins = extract_insights(a, v, transcript)
-            if not ins:
-                print(f"    - no insight (promo/empty): {v['title'][:60]}")
-                continue
-            seen.add(v["link"])                      # don't re-fetch within this run either
-            all_rows.append({
-                "analyst_id":     a["id"],
-                "analyst_name":   a["name"],
-                "label":          a["label"],
-                "weight":         a["weight"],
-                "video_title":    v["title"],
-                "video_link":     v["link"],
-                "published_date": v["pub"],
-                "insight_summary": "\n".join(ins["insights"]),
-                "key_takeaway":   ins["takeaway"],
-                "sentiment":      ins["sentiment"],
-                "fetched_at":     now_iso,
-            })
-            found += 1
-            print(f"    ✓ {v['title'][:60]}  [{ins['sentiment']}]")
-        summary.append((a["name"], found))
+            cands.append(v)
+            if len(cands) >= MAX_SCAN:
+                break
+        plans.append({"a": a, "cands": cands, "target": min(int(a.get("videos", 2)), 3), "found": 0})
+
+    # ── Phase 2: ROUND-ROBIN the transcript fetches ─────────────────────────────
+    # One video per analyst per round, so EVERY analyst gets a shot before anyone
+    # gets seconds. YouTube's IP block trips partway through a run (~a dozen caption
+    # requests in), so breadth-first is the only way the low-trust tail (FX Evolution,
+    # Figuring Out Money) ever clears it. Once the block is detected we stop — further
+    # fetches are doomed and would just burn the throttle delay.
+    print(f"\n— fetching transcripts (round-robin across {len(plans)} analysts) —")
+    for p, v in _round_robin(plans):
+        if _IP_BLOCKED:                              # block tripped — remaining fetches would fail
+            break
+        if p["found"] >= p["target"]:               # this analyst already has enough
+            continue
+        a = p["a"]
+        if _fetches:
+            time.sleep(THROTTLE_S)   # pace requests so the run doesn't trip the burst detector
+        _fetches += 1
+        transcript = get_transcript(v["vid"])
+        if not transcript or len(transcript) < 120:
+            print(f"    [{a['weight']}] - no transcript: {v['title'][:50]}")
+            continue
+        ins = extract_insights(a, v, transcript)
+        if not ins:
+            print(f"    [{a['weight']}] - no insight (promo/empty): {v['title'][:50]}")
+            continue
+        seen.add(v["link"])                          # don't re-fetch within this run either
+        all_rows.append({
+            "analyst_id":     a["id"],
+            "analyst_name":   a["name"],
+            "label":          a["label"],
+            "weight":         a["weight"],
+            "video_title":    v["title"],
+            "video_link":     v["link"],
+            "published_date": v["pub"],
+            "insight_summary": "\n".join(ins["insights"]),
+            "key_takeaway":   ins["takeaway"],
+            "sentiment":      ins["sentiment"],
+            "fetched_at":     now_iso,
+        })
+        p["found"] += 1
+        print(f"    [{a['weight']}] ✓ {v['title'][:50]}  [{ins['sentiment']}]")
+    summary = [(p["a"]["name"], p["found"]) for p in plans]
 
     total = sum(n for _, n in summary)
     if all_rows:

@@ -60,7 +60,10 @@ prod deploy, CI on main is only a post-hoc signal.
   tool), the `/outlook` prompt, and the Brief-tab `PositioningPanel`. Macro/index-level, not per-stock.
 - YouTube blocks transcript downloads (IP-level) → Market Pulse runs locally, throttled
   (`YT_THROTTLE_S`), merges per-analyst into `market_pulse` (public-read table). Optional proxy:
-  `WEBSHARE_USER/PASS` or `YT_PROXY`.
+  `WEBSHARE_USER/PASS` or `YT_PROXY`. Every run also appends to `market_pulse_archive`
+  (dedupe on analyst+video_link) — the analyst knowledge base. `/portfolio-analysis` merges
+  archive + live pulse into per-analyst dated timelines (weight ≤ 3 get up to 5 entries,
+  weight 1 gets latest-video detail) so the AI reads each analyst's EVOLVING view.
 - yfinance quirks: no `show_errors` kwarg; quarterly statements ≈ 5-6 quarters only; RSI must be
   Wilder's (ewm alpha=1/14) to match TradingView — frontend `calcRSI` mirrors it.
 - AI prompts MUST include `datetime.date.today()` (model assumes training-era year otherwise).

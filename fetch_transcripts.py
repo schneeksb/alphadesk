@@ -277,14 +277,14 @@ def extract_insights(analyst, video, transcript):
 
 
 # ── Supabase REST (service role → bypasses RLS to write) ──────────────────────
-def sb_request(method, path, body=None):
+def sb_request(method, path, body=None, prefer="return=minimal"):
     url = f"{SUPABASE_URL}/rest/v1/{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
         "apikey": SERVICE_KEY,
         "Authorization": f"Bearer {SERVICE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=minimal",
+        "Prefer": prefer,
     })
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.status
@@ -301,6 +301,15 @@ def save_to_supabase(rows):
     id_list = ",".join(f'"{i}"' for i in fetched_ids)
     sb_request("DELETE", f"market_pulse?analyst_id=in.({id_list})")
     sb_request("POST", "market_pulse", rows)
+    # Append-only knowledge base: market_pulse is a rolling cache, the archive
+    # keeps every insight forever so the AI can read each analyst's EVOLVING view
+    # (see market_pulse_archive.sql). Deduped on (analyst_id, video_link) so
+    # re-runs are idempotent; best-effort so a missing table can't break the run.
+    try:
+        sb_request("POST", "market_pulse_archive?on_conflict=analyst_id,video_link", rows,
+                   prefer="return=minimal,resolution=ignore-duplicates")
+    except Exception as e:
+        print(f"    ! archive write skipped ({e}) — run supabase/market_pulse_archive.sql")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

@@ -2600,14 +2600,15 @@ function PortfolioAnalysis({ data, aiEnabled, cash, profile, accounts = [], unas
 }
 
 // Shared grid + number formatter for the portfolio position rows / folders.
-const POS_GRID = "minmax(140px,2fr) minmax(62px,0.9fr) minmax(84px,1.2fr) minmax(60px,1fr) minmax(76px,1.1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
+const POS_GRID = "minmax(140px,2fr) minmax(78px,1.1fr) minmax(62px,0.9fr) minmax(84px,1.2fr) minmax(60px,1fr) minmax(76px,1.1fr) minmax(70px,1fr) minmax(60px,1fr) minmax(44px,0.7fr) minmax(80px,1.1fr) minmax(130px,1.8fr) 60px";
 // Sum of the grid's min column widths. Rows carry this as minWidth and the folder
 // body scrolls horizontally below it — so on a phone the full P&L/Signal/actions
 // columns stay reachable by swiping instead of being clipped off-screen.
-const POS_MINW = 866;
+const POS_MINW = 944;
 const fmtNum = (v, d=2) => (v===null||v===undefined) ? "—" : Number(v).toFixed(d);
 const POS_COLS = [
-  {label:"Position", align:"left"},  {label:"Qty", align:"right"},  {label:"Cost Basis", align:"right"},
+  {label:"Position", align:"left"},  {label:"Value", align:"right"},
+  {label:"Qty", align:"right"},      {label:"Cost Basis", align:"right"},
   {label:"Spot", align:"right"},     {label:"Today", align:"right"},
   {label:"P&L", align:"right"},      {label:"P&L %", align:"right"},{label:"DTE", align:"right"},
   {label:"Stop", align:"right"},     {label:"Signal", align:"right"},
@@ -2663,6 +2664,9 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEd
           <span style={{ fontWeight:700, fontFamily:"inherit" }}>{label}</span>
           {isOpt && <span style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap" }}>exp {p.expiry}</span>}
         </div>
+      </div>
+      <div style={{ textAlign:"right", fontFamily:C.mono, fontSize:12, fontWeight:700 }} title="Current market value of this position">
+        ${Math.round(p.current_val||0).toLocaleString()}
       </div>
       {editableCell("qty", p.qty,
         Number(p.qty||0).toLocaleString(undefined,{maximumFractionDigits:6}),

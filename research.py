@@ -2837,13 +2837,37 @@ Be direct. Specific numbers. No hedging. No "it could go either way." Take a pos
         except Exception as e:
             return {"error":str(e)}
 
+    def _pulse_archive():
+        """Analyst knowledge base: full insight history from the append-only
+        market_pulse_archive table (every video ever fetched, vs market_pulse
+        which only holds the latest batch). 30-min SWR cache; [] on any error
+        so the caller can fall back to the live pulse."""
+        SB_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+        SB_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
+        def produce():
+            if not SB_URL or not SB_KEY:
+                return []
+            import urllib.request as _ur
+            url = (f"{SB_URL}/rest/v1/market_pulse_archive"
+                   "?select=analyst_id,analyst_name,label,weight,video_title,"
+                   "published_date,key_takeaway,insight_summary,sentiment"
+                   "&order=published_date.desc&limit=200")
+            req = _ur.Request(url, headers={"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
+                                            "Accept": "application/json"})
+            try:
+                with _ur.urlopen(req, timeout=10) as r:
+                    return json.loads(r.read()) or []
+            except Exception:
+                return []
+        return _cached_swr("pulse-archive", produce, ttl=1800, stale_ttl=86400)
+
     # Static system block for /portfolio-analysis — cacheable across requests
     # (cache_control), so only the dynamic portfolio/context data is re-billed.
     _PF_ANALYSIS_SYSTEM = """You are a senior portfolio manager reviewing a client's brokerage accounts.
 
 Analyze the portfolio as a WHOLE BOOK — not a list of isolated stocks. Weigh, in strict priority order:
   1. MACRO & SECTOR ROTATION — is each position with or against where institutional money is flowing?
-  2. ANALYST PULSE — the client's followed analysts' current reads ([1] = most trusted; treat low-weight short-term voices as noise unless they agree with the macro reads).
+  2. ANALYST PULSE — the client's followed analysts' dated insight timelines ([1] = most trusted; treat low-weight short-term voices as noise unless they agree with the macro reads). Read each analyst's view as a TREND — a macro analyst turning from bullish to cautious across entries matters more than any single take.
   3. TRADER PROFILE — each account gets advice calibrated to ITS OWN profile; accounts without an override use the global profile.
   4. POSITION MECHANICS — P&L, Greeks, DTE, IV, stop distance.
 
@@ -2906,23 +2930,56 @@ Rules:
                 ctx_parts.append(f"MACRO: {macro_in.get('label','neutral')} — VIX {macro_in.get('vix','?')}"
                                  f" · SPY {float(macro_in.get('spy_change') or 0)*100:+.1f}% today")
             try:
-                pulse = yt_insights_endpoint()
-                rows = []
-                for a in (pulse.get("analysts") or []):
-                    ins = sorted(a.get("insights") or [],
-                                 key=lambda x: str(x.get("published") or ""), reverse=True)
-                    if not ins:
-                        continue
-                    take = (ins[0].get("takeaway") or ins[0].get("summary") or "").strip().replace("\n", " ")
-                    if not take:
-                        continue
-                    rows.append(f"  [{a.get('weight')}] {a.get('name')} ({a.get('label')}) — "
-                                f"{ins[0].get('sentiment','neutral')}: {take[:240]}")
-                if rows:
-                    stale_s = " — STALE (>24h old, treat as background)" if pulse.get("stale") else ""
-                    rows.sort()   # weight [1] first
-                    ctx_parts.append("ANALYST PULSE (the client's followed YouTube analysts; [1]=most trusted)"
-                                     + stale_s + ":\n" + "\n".join(rows))
+                # Per-analyst insight TIMELINE: archive history (evolving views) merged
+                # with the live pulse (freshest batch), deduped per analyst+video title.
+                # High-trust analysts (weight ≤ 3, e.g. Crown macro) contribute several
+                # dated entries so the model reads how their thesis is SHIFTING; the
+                # top analyst also gets the detailed points of their latest video.
+                timeline = {}   # analyst_id -> {"name","label","weight","entries":[...]}
+                def _add(aid, name, label, weight, title, published, sentiment, takeaway, points):
+                    takeaway = (takeaway or "").strip().replace("\n", " ")
+                    if not takeaway:
+                        return
+                    t = timeline.setdefault(aid, {"name": name, "label": label,
+                                                  "weight": weight, "entries": []})
+                    key = (title or takeaway[:60]).strip().lower()
+                    if any(e["key"] == key for e in t["entries"]):
+                        return
+                    t["entries"].append({"key": key, "published": str(published or ""),
+                                         "sentiment": sentiment or "neutral",
+                                         "takeaway": takeaway[:240], "points": points or []})
+                for r0 in _pulse_archive():
+                    _add(r0.get("analyst_id"), r0.get("analyst_name"), r0.get("label"),
+                         r0.get("weight"), r0.get("video_title"), r0.get("published_date"),
+                         r0.get("sentiment"), r0.get("key_takeaway"),
+                         [p.strip() for p in (r0.get("insight_summary") or "").split("\n") if p.strip()])
+                pulse = {}
+                try:
+                    pulse = yt_insights_endpoint()
+                    for a in (pulse.get("analysts") or []):
+                        for i0 in (a.get("insights") or []):
+                            _add(a.get("id"), a.get("name"), a.get("label"), a.get("weight"),
+                                 i0.get("title"), i0.get("published"), i0.get("sentiment"),
+                                 i0.get("takeaway") or i0.get("summary"), i0.get("points"))
+                except Exception:
+                    pass
+                blocks = []
+                for aid, t in sorted(timeline.items(), key=lambda kv: kv[1]["weight"] or 99):
+                    entries = sorted(t["entries"], key=lambda e: e["published"], reverse=True)
+                    depth = 5 if (t["weight"] or 99) <= 3 else 1
+                    lines = [f"  [{t['weight']}] {t['name']} ({t['label']}):"]
+                    for j, e in enumerate(entries[:depth]):
+                        d = e["published"][:10] or "undated"
+                        lines.append(f"      {d} {e['sentiment']} — {e['takeaway']}")
+                        if t["weight"] == 1 and j == 0:      # top analyst: latest video in detail
+                            lines += [f"        • {p[:150]}" for p in e["points"][:3]]
+                    blocks.append("\n".join(lines))
+                if blocks:
+                    stale_s = " — latest batch STALE (>24h old)" if pulse.get("stale") else ""
+                    ctx_parts.append(
+                        "ANALYST PULSE (the client's followed YouTube analysts; [1]=most trusted; "
+                        "entries are dated, newest first — read each analyst's TREND, not just the "
+                        "latest take)" + stale_s + ":\n" + "\n\n".join(blocks))
             except Exception:
                 pass
             ctx_block = ("MARKET CONTEXT:\n\n" + "\n\n".join(ctx_parts) + "\n\n") if ctx_parts else ""

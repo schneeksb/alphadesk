@@ -6378,8 +6378,23 @@ const NW_INCOME_CATS = ["Employment","Side gig / freelance","Spouse / partner","
 const NW_SEG_COLS   = [C.cold, C.up, C.violet, C.amber];   // holdings · cash · real estate · other
 const NW_HOLD_YEARS = [5, 10, 15, 20, 25, 30];
 
+// Income streams are time-aware: each carries an optional annual raise (growthPct)
+// and a start/end calendar year. nwAmountIn() gives a stream's $ in a given year —
+// its start-year amount compounded by the raise — and is 0 outside [start, end].
+// Legacy items with a `future` flag but no start year are treated as starting next
+// year (still "planned"); items with neither default to active-from-this-year.
+const NW_YEAR = new Date().getFullYear();
+const nwStreamStart = i => n_(i.startYear) || (i.future ? NW_YEAR + 1 : NW_YEAR);
+const nwStreamEnd   = i => n_(i.endYear) || Infinity;
+const nwAmountIn = (i, yr) => {
+  const start = nwStreamStart(i);
+  if (yr < start || yr > nwStreamEnd(i)) return 0;
+  return n_(i.amount) * Math.pow(1 + n_(i.growthPct) / 100, Math.max(0, yr - start));
+};
+const nwIncomeIn = (items, yr) => items.filter(i => i.kind === "income").reduce((s, i) => s + nwAmountIn(i, yr), 0);
+
 function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, properties=[], positionsCount=0, items=[], onSaveItems, onGoto }) {
-  const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"", ratePct:"", future:false });
+  const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"", ratePct:"", growthPct:"", startYear:"", endYear:"" });
   const reValue = properties.reduce((s,p)=>s+n_(p.value),0);
   const reDebt  = properties.reduce((s,p)=>s+n_(p.loanBalance),0);
   const moInt   = (bal, rate) => n_(bal)*n_(rate)/100/12;   // estimated monthly interest accrued
@@ -6387,15 +6402,13 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, propert
   const manualAssets = items.filter(i=>i.kind==="asset");
   const manualLiabs  = items.filter(i=>i.kind==="liability");
   const income       = items.filter(i=>i.kind==="income");
-  const incomeActive = income.filter(i=>!i.future).reduce((s,i)=>s+n_(i.amount),0);   // annual $, current
+  const incomeActive = nwIncomeIn(items, NW_YEAR);   // annual $ earned THIS calendar year (active streams, grown)
   const manualAssetTot = manualAssets.reduce((s,a)=>s+n_(a.amount),0);
   const manualLiabTot  = manualLiabs.reduce((s,l)=>s+n_(l.amount),0);
 
-  // Projection assumptions — savings track a fifth of current income until edited.
-  const [savingsAnnual, setSavingsAnnual] = useState(()=>Math.round(incomeActive*0.2));
+  // Projection assumptions — you save a % of each year's (growing) income.
+  const [savingsRate, setSavingsRate] = useState(20);   // % of income saved per year
   const [returnPct, setReturnPct] = useState(7);
-  const savingsTouched = useRef(false);
-  useEffect(()=>{ if(!savingsTouched.current) setSavingsAnnual(Math.round(incomeActive*0.2)); },[incomeActive]);
 
   // Real-estate loans: blended rate + total monthly interest across properties.
   const reMoInt = properties.reduce((s,p)=>s+moInt(p.loanBalance, p.ratePct), 0);
@@ -6432,22 +6445,33 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, propert
     if (!amt) return;
     const it = { id:newId(), kind:draft.kind, name:(draft.name||"").trim()||draft.category, category:draft.category, amount:Math.abs(amt) };
     if (draft.kind==="liability" && n_(draft.ratePct)>0) it.ratePct = n_(draft.ratePct);
-    if (draft.kind==="income" && draft.future) it.future = true;
+    if (draft.kind==="income") {
+      if (n_(draft.growthPct)) it.growthPct = n_(draft.growthPct);
+      it.startYear = n_(draft.startYear) || NW_YEAR;
+      if (n_(draft.endYear)) it.endYear = n_(draft.endYear);
+    }
     onSaveItems([...items, it]);
-    setDraft(d=>({ kind:d.kind, name:"", category:d.category, amount:"", ratePct:"", future:false }));
+    setDraft(d=>({ kind:d.kind, name:"", category:d.category, amount:"", ratePct:"", growthPct:"", startYear:"", endYear:"" }));
   };
   const remove = (id) => onSaveItems(items.filter(i=>i.id!==id));
-  const setKind = (k) => setDraft(d=>({ ...d, kind:k, category:NW_CATS[k][0], future:false }));
+  const update = (id, patch) => onSaveItems(items.map(i=> i.id===id ? { ...i, ...patch } : i));
+  const setKind = (k) => setDraft(d=>({ ...d, kind:k, category:NW_CATS[k][0] }));
 
-  // Net-worth projection: current NW compounds at returnPct, plus annual savings.
+  // Net-worth projection, simulated year by year: net worth compounds at returnPct,
+  // and each year you add savingsRate% of THAT year's income — which itself grows and
+  // starts/stops per each stream's raise % and start/end years.
   const r = returnPct/100;
-  const projection = NW_HOLD_YEARS.map(yrs => {
-    const grown = netWorth * Math.pow(1+r, yrs);
-    const contrib = savingsAnnual * yrs;
-    const fromSavings = r>0 ? savingsAnnual*((Math.pow(1+r,yrs)-1)/r) : contrib;
-    const fv = grown + fromSavings;
-    return { yrs, fv, contrib, growth: fv - netWorth - contrib };
-  });
+  const projIncome = yr => nwIncomeIn(items, yr);   // total income earned in a calendar year
+  const projection = (() => {
+    const out = [], marks = new Set(NW_HOLD_YEARS);
+    let nw = netWorth, contrib = 0;
+    for (let y=1; y<=NW_HOLD_YEARS[NW_HOLD_YEARS.length-1]; y++) {
+      const save = projIncome(NW_YEAR + y) * (savingsRate/100);
+      nw = nw*(1+r) + save; contrib += save;
+      if (marks.has(y)) out.push({ yrs:y, fv:nw, contrib, growth: nw - netWorth - contrib });
+    }
+    return out;
+  })();
 
   // rate/mo = interest rate % and estimated monthly interest accrued (liabilities).
   const Row = ({ label, note, amount, col, tab, onDel, muted, rate, mo }) => (
@@ -6529,33 +6553,54 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, propert
           <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>Annual Income</span>
           <span style={{ fontFamily:C.mono, fontSize:14, fontWeight:800, color:C.up }}>{fmt$(incomeActive)}/yr</span>
         </div>
-        <div style={{ fontSize:10.5, color:C.faint, marginBottom:2 }}>≈{fmt$(incomeActive/12)}/mo · employment, side gigs & other streams · feeds the projection below</div>
+        <div style={{ fontSize:10.5, color:C.faint, marginBottom:2 }}>≈{fmt$(incomeActive/12)}/mo this year · edit any field inline · a raise %/yr and start/end year feed the projection below</div>
         {income.length===0 ? (
           <div style={{ fontSize:11.5, color:C.faint, padding:"10px 0 4px" }}>No income yet — add your job, a side gig, or a future stream (like a spouse returning to work) below.</div>
-        ) : income.map(i=>(
-          <div key={i.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 0", borderTop:`1px solid ${C.panel2}` }}>
-            <div style={{ minWidth:0, flex:1 }}>
-              <div style={{ fontSize:12.5, color:i.future?C.sub:C.ink, fontWeight:600 }}>{i.name}{i.future && <span style={{ fontSize:8.5, color:C.amber, background:`${C.amber}18`, borderRadius:5, padding:"1px 6px", marginLeft:7, fontWeight:800, letterSpacing:"0.04em" }}>PLANNED</span>}</div>
-              <div style={{ fontSize:10, color:C.faint }}>{i.category} · ≈{fmt$(n_(i.amount)/12)}/mo</div>
+        ) : income.map(i=>{
+          const start = nwStreamStart(i), end = n_(i.endYear) || null;
+          const upcoming = start > NW_YEAR, ended = end && end < NW_YEAR;
+          const nowAmt = nwAmountIn(i, NW_YEAR);
+          const lbl = { fontSize:8, color:C.faint, letterSpacing:"0.03em", textTransform:"uppercase", marginBottom:2 };
+          const fld = (label, node) => <label style={{ display:"flex", flexDirection:"column" }}><span style={lbl}>{label}</span>{node}</label>;
+          const num = (val, onCh, w, ph) => <input type="number" step="any" value={val ?? ""} placeholder={ph}
+            onChange={e=>onCh(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") e.currentTarget.blur(); }}
+            style={{ width:w, background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 6px", color:C.ink, fontSize:11.5, fontFamily:C.mono, outline:"none" }}/>;
+          return (
+            <div key={i.id} style={{ padding:"10px 0", borderTop:`1px solid ${C.panel2}` }}>
+              <div style={{ display:"flex", gap:8, alignItems:"flex-end", flexWrap:"wrap" }}>
+                {fld("Source", <input value={i.name||""} onChange={e=>update(i.id,{name:e.target.value})}
+                  style={{ width:150, background:C.panel2, border:`1px solid ${C.line}`, borderRadius:6, padding:"5px 8px", color:(upcoming||ended)?C.sub:C.ink, fontSize:12.5, fontWeight:600, outline:"none" }}/>)}
+                {fld("$ / year", num(i.amount, v=>update(i.id,{amount:v}), 100))}
+                {fld("Raise %/yr", num(i.growthPct, v=>update(i.id,{growthPct:v}), 78, "0"))}
+                {fld("Start yr", num(i.startYear, v=>update(i.id,{startYear:v}), 66, String(NW_YEAR)))}
+                {fld("End yr", num(i.endYear, v=>update(i.id,{endYear:v}), 66, "ongoing"))}
+                <button onClick={()=>remove(i.id)} title="Remove" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:"6px 2px", display:"flex" }}><Trash2 size={13}/></button>
+              </div>
+              <div style={{ fontSize:10, color:C.faint, marginTop:5 }}>
+                {i.category}
+                {upcoming ? <span style={{ color:C.amber, marginLeft:6 }}>· starts {start} — not in current income yet</span>
+                  : ended ? <span style={{ marginLeft:6 }}>· ended {end}</span>
+                  : <> · this year ≈<b style={{ color:C.ink }}>{fmt$(nowAmt)}</b> ({fmt$(nowAmt/12)}/mo)</>}
+                {n_(i.growthPct)>0 && <span style={{ marginLeft:6 }}>· {n_(i.growthPct)}%/yr raise</span>}
+                {end && !ended && <span style={{ marginLeft:6 }}>· through {end}</span>}
+              </div>
             </div>
-            <div style={{ fontFamily:C.mono, fontSize:13, fontWeight:700, color:i.future?C.faint:C.ink, whiteSpace:"nowrap" }}>{fmt$(n_(i.amount))}/yr</div>
-            <button onClick={()=>remove(i.id)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}><Trash2 size={13}/></button>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Net worth projection */}
       <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px", marginBottom:14 }}>
         <div style={{ fontSize:13, fontWeight:700, color:C.ink, marginBottom:2 }}>Net Worth Projection</div>
-        <div style={{ fontSize:10.5, color:C.faint, marginBottom:10 }}>From today's {fmt$(netWorth)}, compounding your net worth and adding savings each year.</div>
+        <div style={{ fontSize:10.5, color:C.faint, marginBottom:10 }}>From today's {fmt$(netWorth)}, compounding your net worth and adding a slice of each year's income — which grows and starts/stops per your streams above.</div>
         <div style={{ display:"flex", gap:12, flexWrap:"wrap", marginBottom:12 }}>
           <div style={{ flex:"1 1 170px" }}>
-            <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase" }}>Annual savings</div>
+            <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase" }}>Savings rate</div>
             <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px" }}>
-              <span style={{ fontSize:12, color:C.faint }}>$</span>
-              <input type="number" step="any" value={savingsAnnual} onChange={e=>{ savingsTouched.current=true; setSavingsAnnual(n_(e.target.value)); }} style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+              <input type="number" step="any" value={savingsRate} onChange={e=>setSavingsRate(n_(e.target.value))} style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+              <span style={{ fontSize:12, color:C.faint }}>%</span>
             </div>
-            {incomeActive>0 && <div style={{ fontSize:9.5, color:C.faint, marginTop:3 }}>{((savingsAnnual/incomeActive)*100).toFixed(0)}% of income · <span onClick={()=>{ savingsTouched.current=false; setSavingsAnnual(Math.round(incomeActive*0.2)); }} style={{ color:C.cold, cursor:"pointer" }}>use 20%</span></div>}
+            {incomeActive>0 && <div style={{ fontSize:9.5, color:C.faint, marginTop:3 }}>of income · ≈{fmt$(incomeActive*savingsRate/100)}/yr now</div>}
           </div>
           <div style={{ flex:"0 1 130px" }}>
             <div style={{ fontSize:9, color:C.faint, letterSpacing:"0.05em", marginBottom:3, textTransform:"uppercase" }}>Expected return / yr</div>
@@ -6580,7 +6625,7 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, propert
             ))}
           </div>
         </div>
-        <div style={{ fontSize:9.5, color:C.faint, marginTop:7 }}>Projected net worth = today's net worth compounded at {returnPct}% plus {fmt$(savingsAnnual)}/yr in new savings. A simplified model — real returns vary and it ignores taxes, inflation and spending changes.</div>
+        <div style={{ fontSize:9.5, color:C.faint, marginTop:7 }}>Projected net worth = today's net worth compounded at {returnPct}%, plus {savingsRate}% of each year's income saved (income grows and starts/stops per your streams). A simplified model — real returns vary and it ignores taxes, inflation and spending changes.</div>
       </div>
 
       {/* Add manual item */}
@@ -6608,9 +6653,16 @@ function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, propert
             </div>
           )}
           {draft.kind==="income" && (
-            <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:11.5, color:C.sub, cursor:"pointer", padding:"9px 4px", whiteSpace:"nowrap" }} title="Not earning this yet — excluded from current income, shown as planned">
-              <input type="checkbox" checked={draft.future} onChange={e=>setDraft(d=>({ ...d, future:e.target.checked }))}/> Future / planned
-            </label>
+            <div style={{ display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px", flex:"0 1 90px" }} title="Annual raise / growth % (optional)">
+              <input type="number" step="any" value={draft.growthPct} onChange={e=>setDraft(d=>({ ...d, growthPct:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="raise" style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+              <span style={{ fontSize:11, color:C.faint }}>%/yr</span>
+            </div>
+          )}
+          {draft.kind==="income" && (
+            <input type="number" value={draft.startYear} onChange={e=>setDraft(d=>({ ...d, startYear:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder={`start ${NW_YEAR}`} title="Start year (blank = this year; a future year marks it planned)" style={{ ...inp, flex:"0 1 96px", fontFamily:C.mono }}/>
+          )}
+          {draft.kind==="income" && (
+            <input type="number" value={draft.endYear} onChange={e=>setDraft(d=>({ ...d, endYear:e.target.value }))} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="end (ongoing)" title="End year (blank = ongoing)" style={{ ...inp, flex:"0 1 110px", fontFamily:C.mono }}/>
           )}
           <button onClick={add} style={{ background:C.up, border:"none", borderRadius:8, padding:"9px 16px", color:"#06080d", cursor:"pointer", fontSize:12.5, fontWeight:700, display:"flex", gap:6, alignItems:"center" }}><Plus size={14}/> Add</button>
         </div>
@@ -7138,8 +7190,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
                 other: mLiabs.map(l=>({ name:l.name, category:l.category, amount:Math.round(num(l.amount)), rate_pct:l.ratePct??null })) },
       monthly_interest_total: Math.round(reMoInt+marginMoInt+manualMoInt),
       real_estate: reProperties.map(p=>({ name:p.name||"unnamed", type:p.type, value:Math.round(num(p.value)), loan:Math.round(num(p.loanBalance)), rate_pct:p.ratePct??null })),
-      income: { annual_active: Math.round(inc.filter(i=>!i.future).reduce((s,i)=>s+num(i.amount),0)),
-                streams: inc.map(i=>({ name:i.name, category:i.category, annual:Math.round(num(i.amount)), future:!!i.future })) },
+      income: { annual_active: Math.round(nwIncomeIn(nwItems, NW_YEAR)),
+                streams: inc.map(i=>({ name:i.name, category:i.category, annual:Math.round(num(i.amount)),
+                  growth_pct:num(i.growthPct)||0, start_year:nwStreamStart(i), end_year:i.endYear?num(i.endYear):null })) },
     };
   },[portfolio, totalCash, totalMargin, blendedRate, reProperties, nwItems]);
 

@@ -60,34 +60,6 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
 
-def _proxy_url():
-    """Effective HTTP proxy for YouTube requests. Explicit YT_PROXY wins; otherwise
-    derive Webshare's rotating residential endpoint from WEBSHARE_USER/PASS. None →
-    direct connection (fine on a residential IP; needed on datacenter IPs like
-    GitHub Actions, where both discovery AND transcripts must route through it).
-    If your Webshare plan uses a different endpoint than p.webshare.io:80, set
-    YT_PROXY to the full proxy URL from your dashboard instead."""
-    p = os.getenv("YT_PROXY", "").strip()
-    if p:
-        return p
-    u = os.getenv("WEBSHARE_USER", "").strip()
-    w = os.getenv("WEBSHARE_PASS", "").strip()
-    if u and w:
-        return f"http://{u}-rotate:{w}@p.webshare.io:80"
-    return None
-
-
-def _url_open(req, timeout=15):
-    """urllib.urlopen that honors _proxy_url(), so channel discovery survives on
-    datacenter IPs the same way the transcript fetch does."""
-    proxy = _proxy_url()
-    if proxy:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-        return opener.open(req, timeout=timeout)
-    return urllib.request.urlopen(req, timeout=timeout)
-
-
 # ── Latest videos per channel (RSS first, HTML scrape fallback) ────────────────
 # YouTube's RSS feed endpoint (feeds/videos.xml) began returning 404 for all
 # channels, so we fall back to scraping the channel's /videos page and pulling
@@ -95,7 +67,7 @@ def _url_open(req, timeout=15):
 def _fetch_entries_rss(channel_id):
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with _url_open(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=10) as r:
         root = ET.fromstring(r.read())
     out = []
     for entry in root.findall("atom:entry", _YT_NS)[:12]:
@@ -141,7 +113,7 @@ def _extract_balanced_json(html, marker):
 def _fetch_entries_scrape(channel_id):
     url = f"https://www.youtube.com/channel/{channel_id}/videos"
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"})
-    with _url_open(req, timeout=15) as r:
+    with urllib.request.urlopen(req, timeout=15) as r:
         html = r.read().decode("utf-8", "replace")
     blob = _extract_balanced_json(html, "ytInitialData")
     out, seen = [], set()

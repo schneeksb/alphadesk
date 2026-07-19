@@ -1103,22 +1103,26 @@ Respond with JSON only, no markdown:
     return _lenient_json(r.content[0].text)
 
 
-def _ai_json(client, prompt, max_tokens, schema, model="claude-sonnet-4-6"):
+def _ai_json(client, prompt, max_tokens, schema, model="claude-sonnet-4-6", system=None):
     """Structured-output call via forced tool use with a REAL schema: the API
     validates the tool input server-side, so the returned dict is guaranteed-parsed
     JSON — no lenient-parse games with unescaped quotes or missing commas. (An
     empty {"type":"object"} schema makes the model emit {}, so schemas are required.)
-    One retry for transient errors or empty emissions."""
+    Optional `system` (a list of content blocks, may carry cache_control) is passed
+    through for prompt caching. One retry for transient errors or empty emissions."""
     last_err = None
     for _ in range(2):
         try:
-            r = client.messages.create(
+            kwargs = dict(
                 model=model, max_tokens=max_tokens,
                 tools=[{"name": "emit_analysis",
                         "description": "Emit the final analysis object.",
                         "input_schema": schema}],
                 tool_choice={"type": "tool", "name": "emit_analysis"},
                 messages=[{"role": "user", "content": prompt}])
+            if system is not None:
+                kwargs["system"] = system
+            r = client.messages.create(**kwargs)
             for block in r.content:
                 if block.type == "tool_use" and isinstance(block.input, dict) and block.input:
                     return block.input
@@ -2936,6 +2940,21 @@ Rules:
 - Personalize per account: an aggressive/degen account KEEPS concentrated bets (never flag concentration there); a conservative account gets capital-preservation advice. Never give one-size-fits-all advice when accounts have different profiles.
 - Be direct and specific with numbers. No hedging. This is research input, not financial advice — but take a clear position."""
 
+    # Schema for the forced-tool-use call — the API validates it server-side, so the
+    # response is guaranteed-parsed (no lenient-JSON fragility on a long output).
+    _PF_SCHEMA = _s(
+        health_score={"type": "string", "enum": ["Strong", "Balanced", "At Risk", "Needs Attention"]},
+        health_summary="str",
+        context_read="str",
+        concentration="str",
+        greeks_plain="str",
+        opportunity=_s(ticker="str", reason="str"),
+        risk=_s(ticker="str", reason="str"),
+        account_recs=_arr(_s(account="str", stance="str", recommendation="str")),
+        actions=_arr(_s(ticker="str", account="str", action="str", reason="str")),
+        recommendation="str",
+    )
+
     @app.post("/portfolio-analysis")
     def portfolio_analysis_endpoint(payload: dict = Body(default={}), authorization: str = Header(None)):
         """AI analysis of the full portfolio as a book — grouped by account (each
@@ -3089,12 +3108,9 @@ Sector Exposure: {sector_s or "—"}
 
 {accounts_block}"""
 
-            r = client.messages.create(model="claude-sonnet-4-6", max_tokens=1600,
+            data = _ai_json(client, prompt, max_tokens=2200, schema=_PF_SCHEMA,
                 system=[{"type": "text", "text": _PF_ANALYSIS_SYSTEM,
-                         "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role":"user","content":prompt}])
-            from scanner import _lenient_json
-            data = _lenient_json(r.content[0].text)
+                         "cache_control": {"type": "ephemeral"}}])
             return _json_safe({"generated_at": datetime.datetime.now().isoformat(), **data})
         except Exception as e:
             return {"error": str(e)}

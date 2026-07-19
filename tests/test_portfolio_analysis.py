@@ -38,8 +38,10 @@ LIVE = {"stale": False, "analysts": [
 def prompt(monkeypatch):
     captured = {}
 
-    class _Msg:
-        content = [type("B", (), {"text": json.dumps({"health_score": "Balanced"})})()]
+    # The endpoint uses forced tool use (_ai_json), so the fake response must carry
+    # a tool_use block whose `.input` is the (already-validated) result dict.
+    _block = type("B", (), {"type": "tool_use", "input": {"health_score": "Balanced"}})()
+    _Msg = type("R", (), {"content": [_block], "stop_reason": "tool_use"})
 
     class _Messages:
         def create(self, **kw):

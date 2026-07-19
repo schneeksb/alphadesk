@@ -269,9 +269,9 @@ def get_macro_score():
         score   = 1 if vix_v < 20 and breadth > 0.5 else (-1 if vix_v > 30 else 0)
         return {"vix": round(vix_v,2), "breadth": round(breadth,2),
                 "score": score, "label": {1:"bullish",0:"neutral",-1:"bearish"}[score],
-                "spy_change": round(spy_c,4)}
+                "spy_change": round(spy_c,4), "spy_close": round(float(spy.iloc[-1]),2)}
     except Exception:
-        return {"vix":18.0,"breadth":0.55,"score":0,"label":"neutral","spy_change":0.0}
+        return {"vix":18.0,"breadth":0.55,"score":0,"label":"neutral","spy_change":0.0,"spy_close":None}
 
 
 def get_ai_sentiment(tickers):

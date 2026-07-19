@@ -6,6 +6,10 @@ dashboard + sell-vs-keep — all calculator-driven from user inputs, no market A
 (analyze/statements/compare/projections/filings), Brief (agentic morning Market Brief).
 Recommendations are research input, not financial advice.
 
+Tests: `pytest tests/ -q` (no network — valuation layers stubbed) + `npm run build` in `app/`;
+both run in CI (`.github/workflows/ci.yml`). Run them before pushing — push to main IS the
+prod deploy, CI on main is only a post-hoc signal.
+
 ## Architecture
 - **Backend**: `research.py` — FastAPI app AND the whole data layer (yfinance). All endpoints
   defined inside the `try: from fastapi...` block at module level. Run: `python -m uvicorn
@@ -20,9 +24,16 @@ Recommendations are research input, not financial advice.
   Pulse YouTube pipeline), `supabase/*.sql` (schema; run manually in SQL editor).
 
 ## Persistence & auth (CRITICAL rules)
-- Per-user state (positions, watchlist+radar, baselines, profile, screens, projection
-  scenarios, RE properties+deals, briefs) lives in Supabase with RLS (`auth.uid() = user_id`). Frontend also mirrors to localStorage (anonymous/
+- Per-user state (positions, closed-position ledger, watchlist+radar, baselines, profile,
+  screens, projection scenarios, RE properties+deals, briefs) lives in Supabase with RLS
+  (`auth.uid() = user_id`). Frontend also mirrors to localStorage (anonymous/
   localhost mode is localStorage-only; auth disabled on localhost).
+- Daily snapshots: `portfolio_snapshots` (one row per user+day, RLS) upserted by the frontend
+  on every valuation AND by run_market_brief.py (service key) on weekday mornings — powers the
+  Portfolio Performance panel (equity vs SPY). "Close" on a position books realized P&L into
+  `closedPositions` (in the portfolios blob); "Remove" erases without recording.
+- `/value` requires auth in prod (same `require_user` as AI endpoints) — it does real yfinance
+  work per call; frontend sends `authHeaders()`.
 - `SUPABASE_SERVICE_ROLE_KEY`: local `.env` + GitHub Actions secrets ONLY. NEVER frontend, NEVER
   the Render web service. Render gets SUPABASE_URL + SUPABASE_ANON_KEY only.
 - AI endpoints require a verified Supabase login (`require_user`), enforced when `RENDER` or

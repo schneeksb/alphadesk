@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap, FolderPlus, Check, MessageCircle, Send, Home, Building2 } from "lucide-react";
+import { Search, Plus, X, Flame, Snowflake, ChevronLeft, RefreshCw, ArrowUpRight, ArrowDownRight, Minus, Star, Newspaper, Loader2, AlertCircle, Bell, Activity, Archive, ChevronDown, Trash2, Settings, Sun, Moon, Pencil, LineChart, GripVertical, ArrowUp, ArrowDown, LogOut, Calendar, Target, Zap, FolderPlus, Check, MessageCircle, Send, Home, Building2, CheckCircle, History } from "lucide-react";
 import { DndContext, DragOverlay, PointerSensor, TouchSensor, useSensor, useSensors, useDroppable, closestCorners } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -78,6 +78,10 @@ const saveBaselines = (m) => { try { localStorage.setItem(BASE_KEY, JSON.stringi
 const POS_KEY = "alphadesk:positions";
 const loadPositions = () => { try { return JSON.parse(localStorage.getItem(POS_KEY)) || []; } catch { return []; } };
 const savePositions = (l) => { try { localStorage.setItem(POS_KEY, JSON.stringify(l)); } catch {} };
+// Closed-position ledger — realized P&L history ("Close" keeps the record; "Remove" doesn't)
+const CLOSED_KEY = "alphadesk:closedPositions";
+const loadClosed = () => { try { return JSON.parse(localStorage.getItem(CLOSED_KEY)) || []; } catch { return []; } };
+const saveClosed = (l) => { try { localStorage.setItem(CLOSED_KEY, JSON.stringify(l)); } catch {} };
 const newId = () => (typeof crypto!=="undefined" && crypto.randomUUID) ? crypto.randomUUID() : `p_${Math.random().toString(36).slice(2)}`;
 
 // ── ACCOUNT BUCKETS (drag-and-drop portfolio organization) ────────────
@@ -354,7 +358,7 @@ async function fetchBriefRefresh(body) {
 async function fetchValue(positions, margin = 0, margin_rate = 0, profile = "", accounts = []) {
   const r = await fetch(`${API}/value`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ positions, margin, margin_rate, profile, accounts }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -424,6 +428,25 @@ async function sbSave(uid, payload) {
     { onConflict: "user_id" }
   );
   if (error) console.error("[sb] save error:", error.message);
+}
+// Daily portfolio snapshots — one row per (user, day), upserted on each valuation
+// (the scheduled brief runner also writes them server-side on weekday mornings).
+// Powers the Performance panel: value/P&L over time vs SPY.
+async function sbUpsertSnapshot(uid, snap) {
+  if (!supabase || !uid) return;
+  const { error } = await supabase.from("portfolio_snapshots").upsert(
+    { user_id: uid, ...snap, updated_at: new Date().toISOString() },
+    { onConflict: "user_id,snap_date" }
+  );
+  if (error) console.error("[sb] snapshot save error:", error.message);
+}
+async function sbLoadSnapshots(uid) {
+  if (!supabase || !uid) return [];
+  const { data, error } = await supabase
+    .from("portfolio_snapshots").select("*").eq("user_id", uid)
+    .order("snap_date", { ascending: true }).limit(400);
+  if (error) { console.error("[sb] snapshots load error:", error.message); return []; }
+  return data || [];
 }
 // Market Brief artifacts (agent output + tool log) — RLS user-keyed table
 async function sbLoadBrief(uid) {
@@ -2594,7 +2617,7 @@ const POS_COLS = [
 // point, so clicking elsewhere on the row still opens the ticker detail.
 // Qty and Cost Basis are click-to-edit in place (Enter/blur saves, Esc cancels)
 // so tweaking a position doesn't require the top edit form.
-function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEdit }) {
+function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEdit, onClose }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: p.id, data:{ type:"position", account: groupId } });
   const [tip, setTip] = useState(false);
@@ -2689,8 +2712,9 @@ function PositionRow({ p, groupId, onOpen, onEdit, onRemove, onPayoff, onQuickEd
       </div>
       <div style={{ display:"flex", gap:9, justifyContent:"flex-end", alignItems:"center" }}>
         {isOpt && <button onClick={(e)=>{e.stopPropagation();onPayoff(p);}} title="Payoff diagram" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><LineChart size={13}/></button>}
+        {onClose && <button onClick={(e)=>{e.stopPropagation();onClose(p);}} title="Close position — record realized P&L" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.up} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><CheckCircle size={13}/></button>}
         <button onClick={(e)=>{e.stopPropagation();onEdit(p);}} title="Edit" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Pencil size={12}/></button>
-        <button onClick={(e)=>{e.stopPropagation();onRemove(p.id);}} title="Remove" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Trash2 size={13}/></button>
+        <button onClick={(e)=>{e.stopPropagation();onRemove(p.id);}} title="Remove without recording P&L" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Trash2 size={13}/></button>
       </div>
     </div>
   );
@@ -2925,14 +2949,84 @@ function PortfolioMarketAlignment({ analytics }) {
   );
 }
 
+// Book the exit: one field (total proceeds, prefilled with the live mark) →
+// realized P&L into the ledger. Works the same for shares/options/crypto/expired.
+function ClosePositionModal({ position: p, onConfirm, onCancel }) {
+  const [proceeds, setProceeds] = useState(String(Math.round(p.current_val ?? 0)));
+  const isOpt = p.type==="CALL"||p.type==="PUT";
+  const label = isOpt ? `${displaySym(p.ticker)} $${p.strike}${(p.type||"")[0]} · exp ${p.expiry}` : displaySym(p.ticker);
+  const cb = Number(p.cost_basis)||0, pr = parseFloat(proceeds);
+  const pnl = isNaN(pr) ? null : pr - cb;
+  return (
+    <div style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
+      onClick={e=>{ if(e.target===e.currentTarget) onCancel(); }}>
+      <div style={{ background:C.bg, border:`1px solid ${C.line}`, borderRadius:16, padding:"24px 26px", width:"100%", maxWidth:400, boxShadow:"0 24px 80px rgba(0,0,0,0.5)" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+          <div>
+            <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Close Position</div>
+            <div style={{ fontSize:11.5, color:C.sub, marginTop:3, fontFamily:C.mono }}>{label} · {p.qty}x</div>
+          </div>
+          <button onClick={onCancel} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:4 }}><X size={18}/></button>
+        </div>
+        <label style={{ display:"block", fontSize:9.5, color:C.faint, letterSpacing:"0.06em", marginBottom:5 }}>TOTAL PROCEEDS ($) — what you sold it for</label>
+        <input autoFocus type="number" step="any" value={proceeds} onChange={e=>setProceeds(e.target.value)}
+          onKeyDown={e=>{ if(e.key==="Enter" && !isNaN(pr) && pr>=0) onConfirm(pr); if(e.key==="Escape") onCancel(); }}
+          style={{ width:"100%", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:9, padding:"10px 12px", color:C.ink, fontSize:14, fontFamily:C.mono, outline:"none" }}/>
+        <div style={{ display:"flex", justifyContent:"space-between", fontSize:11.5, color:C.sub, marginTop:10, fontFamily:C.mono }}>
+          <span>cost basis ${cb.toLocaleString()}</span>
+          {pnl!=null && <span style={{ color:pnl>=0?C.up:C.down, fontWeight:700 }}>
+            realized {pnl>=0?"+":"−"}${Math.abs(pnl).toLocaleString(undefined,{maximumFractionDigits:0})}{cb>0 && ` (${pnl>=0?"+":""}${((pnl/cb)*100).toFixed(1)}%)`}
+          </span>}
+        </div>
+        <div style={{ display:"flex", gap:9, marginTop:18 }}>
+          <button disabled={isNaN(pr)||pr<0} onClick={()=>onConfirm(pr)}
+            style={{ flex:1, background:(isNaN(pr)||pr<0)?C.line:C.up, border:"none", borderRadius:10, padding:"11px 0", color:"#06080d", fontSize:13.5, fontWeight:700, cursor:(isNaN(pr)||pr<0)?"default":"pointer" }}>
+            Close & Record
+          </button>
+          <button onClick={onCancel} style={{ background:"none", border:`1px solid ${C.line}`, borderRadius:10, padding:"11px 18px", color:C.sub, fontSize:13, cursor:"pointer" }}>Cancel</button>
+        </div>
+        <div style={{ fontSize:9.5, color:C.faint, marginTop:10 }}>Removes it from the live book and keeps the realized P&L in the Closed ledger below.</div>
+      </div>
+    </div>
+  );
+}
+
+// Account equity over time (daily snapshots) with SPY overlay normalized to the
+// same starting point — "am I beating just holding the index?"
+function PerformancePanel({ snapshots=[] }) {
+  const rows = snapshots.filter(s=>s.total_value!=null);
+  if (rows.length < 2) return null;   // needs history: appears from the 2nd day on
+  const data  = rows.map(s=>Math.round((s.total_value||0)+(s.cash||0)-(s.margin||0)));
+  const dates = rows.map(s=>s.snap_date);
+  const first = data[0] || 1;
+  const spyRaw = rows.map(s=>s.spy_close);
+  const spyBase = spyRaw.find(v=>v!=null);
+  const overlays = spyBase ? [{ label:"SPY", color:C.violet,
+    values: spyRaw.map(v=>v!=null ? +(v/spyBase*first).toFixed(0) : null) }] : [];
+  const chg = data[data.length-1] - first;
+  const pct = first ? (chg/first)*100 : 0;
+  return (
+    <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px", marginBottom:18 }}>
+      <div style={{ display:"flex", alignItems:"baseline", gap:10, marginBottom:10, flexWrap:"wrap" }}>
+        <span style={{ display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:700, color:C.ink }}><History size={15} color={C.faint}/> Performance</span>
+        <span style={{ fontFamily:C.mono, fontSize:12, fontWeight:700, color:chg>=0?C.up:C.down }}>{chg>=0?"+":"−"}${Math.abs(chg).toLocaleString()} ({pct>=0?"+":""}{pct.toFixed(1)}%)</span>
+        <span style={{ fontSize:10.5, color:C.faint }}>equity (value + cash − margin) since {dates[0]}{overlays.length ? " · " : ""}{overlays.length>0 && <span style={{ color:C.violet }}>SPY (same start) for comparison</span>}</span>
+      </div>
+      <InteractiveChart data={data} dates={dates} color={chg>=0?C.up:C.down} h={140} overlays={overlays}/>
+    </div>
+  );
+}
+
 function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash,
   totalCash=0, totalMargin=0, blendedRate=0, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
   accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onReorderPositions, onReorderAccounts, onSetFunds,
-  onSetAccountProfile, onOpenGlobalProfile }) {
+  onSetAccountProfile, onOpenGlobalProfile, closedPositions=[], onClosePosition, onRemoveClosed, snapshots=[] }) {
   const [showForm, setShowForm]       = useState(false);
   const [editing, setEditing]         = useState(null);
   const [showExpired, setShowExpired] = useState(false);
+  const [showClosed, setShowClosed]   = useState(false);
   const [payoff, setPayoff]           = useState(null);
+  const [closing, setClosing]         = useState(null);    // position being closed (realized P&L)
   const [profileFor, setProfileFor]   = useState(null);    // account whose trader profile is being edited
   const [adding, setAdding]           = useState(false);   // "+ Add Account" inline input open
   const [newName, setNewName]         = useState("");
@@ -3023,7 +3117,10 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
     else movePosition(act.id, over.id);
   };
   const rowProps = { onOpen, onEdit:(p)=>{ setEditing(prev=> prev?.id===p.id ? null : p); setShowForm(false); }, onRemove, onPayoff:setPayoff,
-    onQuickEdit:(id, patch)=>onUpdate(id, patch) };
+    onQuickEdit:(id, patch)=>onUpdate(id, patch), onClose:onClosePosition ? setClosing : null };
+  const realizedTotal = closedPositions.reduce((s,c)=>s+(Number(c.realized_pnl)||0),0);
+  const realizedYTD   = closedPositions.filter(c=>(c.closed_at||"").startsWith(String(new Date().getFullYear())))
+    .reduce((s,c)=>s+(Number(c.realized_pnl)||0),0);
   // An active position edits INLINE (form drops in under its own row — no scroll
   // to the top). Expired/errored positions have no live row, so they still use
   // the top form.
@@ -3082,6 +3179,11 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
               sub={`${((a.daily_change_pct||0)*100)>=0?"+":""}${((a.daily_change_pct||0)*100).toFixed(2)}% today`}
               col={(a.daily_change||0)>=0?C.up:C.down}/>
             <Stat label="TOTAL P&L"    value={`${(a.total_pnl||0)>=0?"+":""}$${Math.abs(a.total_pnl||0).toLocaleString()}`} sub={`${((a.total_pnl_pct||0)*100).toFixed(1)}%`} col={pnlCol}/>
+            {closedPositions.length>0 && (
+              <Stat label="REALIZED P&L" value={`${realizedTotal>=0?"+":"−"}$${Math.abs(Math.round(realizedTotal)).toLocaleString()}`}
+                sub={`${realizedYTD>=0?"+":"−"}$${Math.abs(Math.round(realizedYTD)).toLocaleString()} YTD · ${closedPositions.length} closed`}
+                col={realizedTotal>=0?C.up:C.down}/>
+            )}
             <Stat label="NET VALUE"    value={`$${(a.net_value ?? a.total_value ?? 0).toLocaleString()}`} sub={totalMargin>0?"equity after margin":"= total value"}/>
             <Stat label="DAILY THETA"  value={`$${num(a.daily_theta,0)}`} sub="time decay per day" col={(a.daily_theta||0)<0?C.down:C.sub}/>
             <Stat label="CASH"   value={`$${totalCash.toLocaleString()}`} col={totalCash>0?C.cold:C.ink}
@@ -3089,6 +3191,8 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
             <Stat label="MARGIN" value={`$${totalMargin.toLocaleString()}`} col={totalMargin>0?C.amber:C.ink}
               sub={totalMargin>0 ? `${blendedRate.toFixed(2)}% blended · $${num(a.margin_interest_daily,2)}/day` : "edit in account below"}/>
           </div>
+
+          <PerformancePanel snapshots={snapshots}/>
 
           <PortfolioAnalysis data={data} aiEnabled={aiEnabled} cash={totalCash} profile={profile}
             accounts={accounts} unassignedCash={cash}/>
@@ -3178,11 +3282,52 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
                       <div style={{ display:"flex", alignItems:"center", gap:14 }}>
                         <span style={{ color:(p.pnl||0)>=0?C.up:C.down }}>{(p.pnl||0)>=0?"+":""}${Math.abs(p.pnl||0).toLocaleString()}</span>
                         <button onClick={()=>setPayoff(p)} title="Payoff diagram" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><LineChart size={13}/></button>
+                        {onClosePosition && <button onClick={()=>setClosing(p)} title="Close — record realized P&L" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.up} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><CheckCircle size={13}/></button>}
                         <button onClick={()=>{setEditing(p);setShowForm(false);}} title="Edit / roll expiry" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.cold} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Pencil size={13}/></button>
                         <button onClick={()=>onRemove(p.id)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Trash2 size={14}/></button>
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Closed positions — the realized-P&L ledger ("did my calls make money?") */}
+          {closedPositions.length>0 && (
+            <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:12, overflow:"hidden", marginBottom:16 }}>
+              <button onClick={()=>setShowClosed(s=>!s)} style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", padding:"13px 16px", background:"none", border:"none", cursor:"pointer" }}>
+                <span style={{ display:"flex", alignItems:"center", gap:9, fontSize:13, fontWeight:600, color:C.ink }}>
+                  <CheckCircle size={15} color={C.faint}/> Closed <span style={{ color:C.faint, fontWeight:400 }}>· {closedPositions.length}</span>
+                  <span style={{ fontFamily:C.mono, fontSize:12, fontWeight:700, color:realizedTotal>=0?C.up:C.down }}>{realizedTotal>=0?"+":"−"}${Math.abs(Math.round(realizedTotal)).toLocaleString()} realized</span>
+                </span>
+                <ChevronDown size={16} color={C.faint} style={{ transform: showClosed?"rotate(180deg)":"none", transition:"transform .15s" }}/>
+              </button>
+              {showClosed && (
+                <div style={{ borderTop:`1px solid ${C.line}` }}>
+                  {closedPositions.map((c)=>{
+                    const acc = accounts.find(x=>x.id===c.account);
+                    const isOpt = c.type==="CALL"||c.type==="PUT";
+                    return (
+                      <div key={c.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, padding:"11px 16px", borderTop:`1px solid ${C.panel2}`, fontFamily:C.mono, fontSize:12, flexWrap:"wrap" }}>
+                        <div style={{ minWidth:0 }}>
+                          <span style={{ fontWeight:700, color:C.ink }}>{displaySym(c.ticker)}{isOpt?` $${c.strike}${(c.type||"")[0]}`:""}</span>
+                          <span style={{ fontSize:10, color:C.faint, marginLeft:8 }}>
+                            {c.qty}x · closed {c.closed_at}{c.opened_at?` · held since ${c.opened_at}`:""}{acc?` · ${acc.name}`:""}
+                          </span>
+                        </div>
+                        <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+                          <span style={{ fontSize:10.5, color:C.sub }}>${Number(c.cost_basis||0).toLocaleString()} → ${Number(c.proceeds||0).toLocaleString()}</span>
+                          <span style={{ color:(c.realized_pnl||0)>=0?C.up:C.down, fontWeight:700 }}>
+                            {(c.realized_pnl||0)>=0?"+":"−"}${Math.abs(c.realized_pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})}
+                            {c.realized_pnl_pct!=null && <span style={{ fontSize:10, marginLeft:5 }}>{(c.realized_pnl_pct*100)>=0?"+":""}{(c.realized_pnl_pct*100).toFixed(1)}%</span>}
+                          </span>
+                          {c.rec_at_close && <span title="Signal at close" style={{ fontSize:9, fontWeight:800, letterSpacing:"0.05em", color:recColor(c.rec_at_close) }}>{c.rec_at_close}</span>}
+                          {onRemoveClosed && <button onClick={()=>onRemoveClosed(c.id)} title="Delete ledger entry" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:0 }} onMouseEnter={e=>e.currentTarget.style.color=C.down} onMouseLeave={e=>e.currentTarget.style.color=C.faint}><Trash2 size={13}/></button>}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -3210,6 +3355,9 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         </>
       )}
       {payoff && <PayoffModal position={payoff} onClose={()=>setPayoff(null)}/>}
+      {closing && <ClosePositionModal position={closing}
+        onConfirm={(proceeds)=>{ onClosePosition(closing.id, proceeds); setClosing(null); }}
+        onCancel={()=>setClosing(null)}/>}
       {profileFor && (
         <TraderProfileModal
           profile={profileFor.profile || profile}
@@ -6806,6 +6954,8 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [baselines, setBaselines] = useState(loadBaselines); // conviction check-in snapshots
   const [detail, setDetail]       = useState(null);
   const [positions, setPositions] = useState(loadPositions);
+  const [closedPositions, setClosedPositions] = useState(loadClosed);  // realized P&L ledger
+  const [snapshots, setSnapshots] = useState([]);                      // daily valuation history (Supabase)
   const [portfolio, setPortfolio] = useState(null);
   const [pfErr, setPfErr]         = useState(null);
   const [pfLoading, setPfLoading] = useState(false);
@@ -6833,6 +6983,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveRadar(radar); },[radar]);
   useEffect(()=>{ saveBaselines(baselines); },[baselines]);
   useEffect(()=>{ savePositions(positions); },[positions]);
+  useEffect(()=>{ saveClosed(closedPositions); },[closedPositions]);
   useEffect(()=>{ saveAlerts(alertHistory); },[alertHistory]);
   useEffect(()=>{ saveAI(aiEnabled); },[aiEnabled]);
   useEffect(()=>{ if (profile) saveProfile(profile); },[profile]);
@@ -6863,6 +7014,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           return;
         }
         if (data.positions?.length)  setPositions(data.positions);
+        if (data.closedPositions?.length) setClosedPositions(data.closedPositions);
         if (data.watchlist?.length)  setWatchlist(data.watchlist);
         if (data.radar?.length)      setRadar(data.radar);
         if (data.baselines)          setBaselines(data.baselines);
@@ -6893,13 +7045,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems };
+  sbState.current = { positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, userId]);
+  },[positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, userId]);
 
   // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
   // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
@@ -6970,6 +7122,31 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const valSig = positions.map(p=>[p.ticker,p.type,p.strike,p.expiry,p.qty,p.cost_basis,p.stop,p.account??""].join("|")).sort().join(",");
   useEffect(()=>{ valuePortfolio(positionsRef.current, totalMargin, blendedRate); },[valSig, totalMargin, blendedRate, valuePortfolio]);
 
+  // ── Daily snapshots (logged-in only): upsert one row per day on each valuation;
+  // the scheduled brief runner fills weekday mornings the app isn't opened.
+  useEffect(()=>{ if (userId) sbLoadSnapshots(userId).then(setSnapshots); },[userId]);
+  useEffect(()=>{
+    if (!userId || !portfolio?.analytics || !(portfolio.positions||[]).length) return;
+    const a = portfolio.analytics;
+    const snap = {
+      snap_date: new Date().toISOString().slice(0,10),
+      total_value: Math.round(a.total_value||0), total_cost: Math.round(a.total_cost||0),
+      total_pnl: Math.round(a.total_pnl||0),
+      realized_pnl: Math.round(closedPositions.reduce((s,c)=>s+(Number(c.realized_pnl)||0),0)),
+      cash: Math.round(totalCash), margin: Math.round(totalMargin),
+      net_value: Math.round(a.net_value ?? a.total_value ?? 0),
+      spy_close: portfolio.macro?.spy_close ?? null,
+      positions_count: (portfolio.positions||[]).length,
+    };
+    sbUpsertSnapshot(userId, snap);
+    // Mirror into local state so the Performance chart reflects today immediately.
+    setSnapshots(list=>{
+      const rest = list.filter(s=>s.snap_date!==snap.snap_date);
+      return [...rest, { user_id:userId, ...snap }].sort((x,y)=>x.snap_date<y.snap_date?-1:1);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[portfolio, userId]);
+
   // Merge portfolio + stop-hit alerts into persistent history whenever valuation updates
   useEffect(()=>{
     if (!portfolio) return;
@@ -6984,9 +7161,26 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
 
   // Every change updates state AND (anonymous mode only) persists to the server.
   const commit         = (next)=>{ setPositions(next); syncServer(next); };
-  const addPosition    = (p)=> commit([...positions, { id:newId(), ...p }]);
+  const addPosition    = (p)=> commit([...positions, { id:newId(), opened_at:new Date().toISOString().slice(0,10), ...p }]);
   const updatePosition = (id, patch)=> commit(positions.map(p=> p.id===id ? { ...p, ...patch, id } : p));
   const removePosition = (id)=> commit(positions.filter(p=>p.id!==id));
+  // Close a position: book the exit into the realized-P&L ledger, then drop it from
+  // the live book. (Remove/trash stays as "erase without recording".)
+  const closePosition = (id, proceeds) => {
+    const p = positions.find(x=>x.id===id); if (!p) return;
+    const valued = [...(portfolio?.positions||[]), ...(portfolio?.expired||[])].find(x=>x.id===id) || {};
+    const cb = Number(p.cost_basis)||0, pr = Number(proceeds)||0;
+    setClosedPositions(cs=>[{
+      id:newId(), ticker:p.ticker, type:p.type, strike:p.strike??null, expiry:p.expiry??null,
+      qty:p.qty, cost_basis:cb, account:p.account??null, opened_at:p.opened_at??null,
+      closed_at:new Date().toISOString().slice(0,10),
+      proceeds:pr, realized_pnl:+(pr-cb).toFixed(2),
+      realized_pnl_pct: cb>0 ? +((pr-cb)/cb).toFixed(4) : null,
+      rec_at_close: valued.rec ?? null,
+    }, ...cs]);
+    commit(positions.filter(x=>x.id!==id));
+  };
+  const removeClosed = (id)=> setClosedPositions(cs=>cs.filter(c=>c.id!==id));
   // Drag-to-reorder: persist the new order but skip re-valuation; reorder the already-valued
   // rows locally so the table updates instantly.
   const reorderById = (arr, dragId, dropId) => {
@@ -7270,7 +7464,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds} onSetAccountProfile={setAccountProfile} onOpenGlobalProfile={()=>setShowProfile(true)}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds} onSetAccountProfile={setAccountProfile} onOpenGlobalProfile={()=>setShowProfile(true)} closedPositions={closedPositions} onClosePosition={closePosition} onRemoveClosed={removeClosed} snapshots={snapshots}/>}
           {tab==="realestate" && <RealEstatePage properties={reProperties} onSaveProperties={setREProperties}
             deals={reDeals} onSaveDeals={setREDeals} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>}

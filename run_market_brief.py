@@ -31,12 +31,12 @@ SB_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SB_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
 
-def _sb(method, path, body=None):
+def _sb(method, path, body=None, prefer="return=minimal"):
     url = f"{SB_URL}/rest/v1/{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
         "apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
-        "Content-Type": "application/json", "Prefer": "return=minimal"})
+        "Content-Type": "application/json", "Prefer": prefer})
     with urllib.request.urlopen(req, timeout=30) as r:
         raw = r.read()
         return json.loads(raw) if raw else None
@@ -59,9 +59,16 @@ def load_user_state(user_id=None):
         return str(v) if v else default
     profile_str = (f"{_seg(prof.get('riskTolerance'),'moderate')}|{_seg(prof.get('goal'),'growth')}"
                    f"|{_seg(prof.get('style'),'longterm')}|{_seg(prof.get('level'),'intermediate')}") if prof else ""
+    accounts = d.get("accounts") or []
     return {"user_id": row["user_id"], "positions": d.get("positions") or [],
             "watchlist": d.get("watchlist") or [], "radar": d.get("radar") or [],
-            "profile": profile_str}
+            "profile": profile_str,
+            # Snapshot inputs: combined cash/margin (global + per-account) and the
+            # cumulative realized P&L from the Closed ledger.
+            "cash":   float(d.get("cash") or 0)   + sum(float(a.get("cash") or 0)   for a in accounts),
+            "margin": float(d.get("margin") or 0) + sum(float(a.get("margin") or 0) for a in accounts),
+            "realized_pnl": sum(float(c.get("realized_pnl") or 0)
+                                for c in (d.get("closedPositions") or []))}
 
 
 def main():
@@ -122,6 +129,30 @@ def main():
         "model": out["model"], "turns": out["turns"],
     })
     print("\nSaved to market_brief ✓")
+
+    # Daily portfolio snapshot (best-effort): fills weekday mornings the app isn't
+    # opened, so the Performance panel has a continuous history. Same upsert key
+    # as the frontend — (user_id, snap_date) — so double-writes are harmless.
+    if analytics:
+        try:
+            import datetime as _dt
+            from run_daily import get_macro_score
+            _sb("POST", "portfolio_snapshots", {
+                "user_id": state["user_id"],
+                "snap_date": _dt.date.today().isoformat(),
+                "total_value": round(analytics.get("total_value") or 0),
+                "total_cost":  round(analytics.get("total_cost") or 0),
+                "total_pnl":   round(analytics.get("total_pnl") or 0),
+                "realized_pnl": round(state.get("realized_pnl") or 0),
+                "cash":   round(state.get("cash") or 0),
+                "margin": round(state.get("margin") or 0),
+                "net_value": round((analytics.get("total_value") or 0) - (state.get("margin") or 0)),
+                "spy_close": (get_macro_score() or {}).get("spy_close"),
+                "positions_count": len([p for p in valued if not p.get("error") and not p.get("expired")]),
+            }, prefer="return=minimal,resolution=merge-duplicates")
+            print("Snapshot upserted ✓")
+        except Exception as e:
+            print(f"Snapshot skipped: {e}")
 
 
 if __name__ == "__main__":

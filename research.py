@@ -3066,9 +3066,12 @@ JSON ONLY:
         return _cached("portfolio", produce)
 
     @app.post("/value")
-    def value_endpoint(payload: dict = Body(default={})):
+    def value_endpoint(payload: dict = Body(default={}), authorization: str = Header(None)):
         # Value a user-supplied list of positions (entered/persisted in the browser).
         # Splits results into active / expired / errored; analytics & alerts use active only.
+        # Auth: enforced in prod (RENDER/REQUIRE_AUTH) like the AI endpoints — this does
+        # real yfinance work per call and must not be an open compute endpoint.
+        require_user(authorization)
         positions_in = payload.get("positions") or []
         margin = float(payload.get("margin") or 0)
         rate   = float(payload.get("margin_rate") or 0)

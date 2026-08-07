@@ -3021,7 +3021,7 @@ function PerformancePanel({ snapshots=[] }) {
   );
 }
 
-function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMargin, cash, onCash,
+function PortfolioPage({ positions, data, err, loading, warming, margin, marginRate, onMargin, cash, onCash,
   totalCash=0, totalMargin=0, blendedRate=0, aiEnabled, profile, onAdd, onUpdate, onRemove, onReorder, onRefresh, onOpen,
   accounts=[], accountCollapsed={}, onAddAccount, onRenameAccount, onDeleteAccount, onToggleAccountCollapse, onReorderPositions, onReorderAccounts, onSetFunds,
   onSetAccountProfile, onOpenGlobalProfile, closedPositions=[], onClosePosition, onRemoveClosed, snapshots=[] }) {
@@ -3163,7 +3163,8 @@ function PortfolioPage({ positions, data, err, loading, margin, marginRate, onMa
         />
       )}
 
-      {err && <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"12px 14px", color:C.down, fontSize:12.5, marginBottom:16 }}>Couldn't value portfolio: {err} — is the backend running on {API}?</div>}
+      {warming && !err && <div style={{ background:`${C.amber}12`, border:`1px solid ${C.amber}44`, borderRadius:10, padding:"12px 14px", color:C.amber, fontSize:12.5, marginBottom:16, display:"flex", alignItems:"center", gap:8 }}><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Waking up the backend… Render's free tier cold-starts in ~30–60s. Retrying automatically.</div>}
+      {err && <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"12px 14px", color:C.down, fontSize:12.5, marginBottom:16 }}>Couldn't value portfolio: {err} — is the backend running on {API}? <span onClick={onRefresh} style={{ color:C.cold, cursor:"pointer", textDecoration:"underline" }}>Retry</span></div>}
 
       {positions.length===0 ? (
         <div style={{ textAlign:"center", padding:"54px 20px", color:C.faint, background:C.panel, border:`1px dashed ${C.line}`, borderRadius:12 }}>
@@ -7054,6 +7055,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [portfolio, setPortfolio] = useState(null);
   const [pfErr, setPfErr]         = useState(null);
   const [pfLoading, setPfLoading] = useState(false);
+  const [pfWarming, setPfWarming] = useState(false);   // Render cold-start retry in progress
   const [margin, setMargin]       = useState(0);
   const [marginRate, setMarginRate] = useState(0);
   const [cash, setCash]           = useState(0);
@@ -7206,10 +7208,18 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // position's Signal/Stop to the account holding it. Signature only covers
   // id+profile, so renames/cash edits don't trigger a re-valuation.
   const acctProfSig = accounts.map(a=>`${a.id}:${profileToStr(a.profile)}`).join(";");
-  const valuePortfolio = useCallback((list, m=0, r=0)=>{
-    setPfErr(null); setPfLoading(true);
+  const valuePortfolio = useCallback((list, m=0, r=0, attempt=0)=>{
+    if (attempt===0) { setPfErr(null); setPfLoading(true); setPfWarming(false); }
     const acctProfiles = accountsRef.current.map(a=>({ id:a.id, profile:profileToStr(a.profile) }));
-    fetchValue(list, m, r, profileStr, acctProfiles).then(x=> x.error?setPfErr(x.error):setPortfolio(x)).catch(e=>setPfErr(e.message)).finally(()=>setPfLoading(false));
+    fetchValue(list, m, r, profileStr, acctProfiles)
+      .then(x=>{ x.error?setPfErr(x.error):setPortfolio(x); setPfWarming(false); setPfLoading(false); })
+      .catch(e=>{
+        // Render free tier cold-starts (~30-60s). A failed fetch is almost always the
+        // backend waking up, not a real outage — retry quietly a few times (keeping the
+        // loading state) before surfacing a hard error, like the Sector Map does.
+        if (attempt < 4) { setPfWarming(true); setTimeout(()=>valuePortfolio(list, m, r, attempt+1), 12000); }
+        else { setPfWarming(false); setPfLoading(false); setPfErr(e.message); }
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[profileStr, acctProfSig]);
   // Re-value when positions' CONTENTS, the combined margin/rate, or any profile
@@ -7560,7 +7570,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
               )}
             </div>
           )}
-          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds} onSetAccountProfile={setAccountProfile} onOpenGlobalProfile={()=>setShowProfile(true)} closedPositions={closedPositions} onClosePosition={closePosition} onRemoveClosed={removeClosed} snapshots={snapshots}/>}
+          {tab==="portfolio" && <PortfolioPage positions={positions} data={portfolio} err={pfErr} loading={pfLoading} warming={pfWarming} margin={margin} marginRate={marginRate} onMargin={onMargin} cash={cash} onCash={onCash} totalCash={totalCash} totalMargin={totalMargin} blendedRate={blendedRate} aiEnabled={aiEnabled} profile={profile} onAdd={addPosition} onUpdate={updatePosition} onRemove={removePosition} onReorder={reorderPosition} onRefresh={()=>valuePortfolio(positions, totalMargin, blendedRate)} onOpen={setDetail} accounts={accounts} accountCollapsed={accountCollapsed} onAddAccount={addAccount} onRenameAccount={renameAccount} onDeleteAccount={deleteAccount} onToggleAccountCollapse={toggleAccountCollapse} onReorderPositions={onReorderPositions} onReorderAccounts={onReorderAccounts} onSetFunds={setAccountFunds} onSetAccountProfile={setAccountProfile} onOpenGlobalProfile={()=>setShowProfile(true)} closedPositions={closedPositions} onClosePosition={closePosition} onRemoveClosed={removeClosed} snapshots={snapshots}/>}
           {tab==="realestate" && <RealEstatePage properties={reProperties} onSaveProperties={setREProperties}
             deals={reDeals} onSaveDeals={setREDeals} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}/>}

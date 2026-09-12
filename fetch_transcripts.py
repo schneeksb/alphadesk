@@ -344,6 +344,83 @@ def _round_robin(plans):
                 yield p, p["cands"][round_i]
 
 
+# ── Custom YouTube channels (the "YouTube" tab's deep layer) ──────────────────
+def _latest_custom_channels():
+    """The user's own channel list from their most-recent portfolios blob
+    (data.youtubeChannels = [{channel_id, name}]). Service-key read. [] on any miss."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/portfolios?select=data&order=updated_at.desc&limit=1"
+        req = urllib.request.Request(url, headers={
+            "apikey": SERVICE_KEY, "Authorization": f"Bearer {SERVICE_KEY}", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            rows = json.loads(r.read()) or []
+        chans = ((rows[0].get("data") or {}).get("youtubeChannels") if rows else None) or []
+        return [c for c in chans if c.get("channel_id")]
+    except Exception as e:
+        print(f"  (custom-channel list lookup skipped: {e})")
+        return []
+
+
+def _archived_custom_links():
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/yt_custom_archive?select=video_link"
+        req = urllib.request.Request(url, headers={
+            "apikey": SERVICE_KEY, "Authorization": f"Bearer {SERVICE_KEY}", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return {row.get("video_link") for row in json.loads(r.read()) if row.get("video_link")}
+    except Exception:
+        return set()
+
+
+def fetch_custom_channels(now_iso):
+    """Fetch full transcripts for the user's own YouTube channels and write them to
+    yt_custom_archive (dedup per channel+video), so the YouTube tab's AI review has
+    deep spoken content, not just titles. Runs after the analyst pass; if YouTube has
+    already IP-blocked this run, it simply writes nothing (the tab still has the
+    backend's instant RSS layer)."""
+    chans = _latest_custom_channels()
+    if not chans:
+        return
+    print(f"\n— custom YouTube channels ({len(chans)}) —")
+    seen = _archived_custom_links()
+    rows = []
+    for c in chans:
+        if _IP_BLOCKED:
+            break
+        cid, cname = c["channel_id"], (c.get("name") or c["channel_id"])
+        try:
+            entries = fetch_entries(cid)
+        except Exception as e:
+            print(f"    ! {cname}: discovery failed ({e})"); continue
+        entries.sort(key=lambda e: e.get("pub") or "", reverse=True)
+        got = 0
+        for v in entries:
+            if got >= 2 or _IP_BLOCKED:
+                break
+            if v["link"] in seen:
+                continue
+            time.sleep(THROTTLE_S)
+            transcript = get_transcript(v["vid"])
+            if not transcript or len(transcript) < 120:
+                print(f"    [{cname}] - no transcript: {v['title'][:48]}"); continue
+            ins = extract_insights({"name": cname, "label": "Custom channel", "weight": 5}, v, transcript)
+            if not ins:
+                continue
+            seen.add(v["link"]); got += 1
+            rows.append({"channel_id": cid, "channel_name": cname, "video_title": v["title"],
+                         "video_link": v["link"], "published_date": v["pub"],
+                         "insight_summary": "\n".join(ins["insights"]), "key_takeaway": ins["takeaway"],
+                         "sentiment": ins["sentiment"], "fetched_at": now_iso})
+            print(f"    [{cname}] ✓ {v['title'][:48]}  [{ins['sentiment']}]")
+    if rows:
+        try:
+            sb_request("POST", "yt_custom_archive?on_conflict=channel_id,video_link", rows,
+                       prefer="return=minimal,resolution=ignore-duplicates")
+            print(f"  wrote {len(rows)} custom-channel insight(s) to yt_custom_archive")
+        except Exception as e:
+            print(f"  ! custom archive write skipped ({e}) — run supabase/yt_custom_archive.sql")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     missing = [n for n, v in [("SUPABASE_URL", SUPABASE_URL),
@@ -432,6 +509,13 @@ def main():
         save_to_supabase(all_rows)
     else:
         print("\nNothing fetched — existing Market Pulse data left untouched.")
+
+    # Deep layer for the YouTube tab: the user's own channel list (see
+    # fetch_custom_channels). Best-effort — never let it break the pulse run.
+    try:
+        fetch_custom_channels(now_iso)
+    except Exception as e:
+        print(f"\nCustom YouTube channels skipped: {e}")
 
     print("\n" + "=" * 48)
     print("MARKET PULSE — fetch complete")

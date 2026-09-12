@@ -4,7 +4,8 @@ One user (Google login required in prod). Core pages: Watchlist (Conviction/Rada
 Portfolio, Real Estate (buy underwriting for rental/multifamily/flip/commercial + operating
 dashboard + sell-vs-keep — all calculator-driven from user inputs, no market API), Net Worth,
 Taxes (CPA-style minimization plan — figures-only, no PII/documents), Financials
-(analyze/statements/compare/projections/filings), Brief (agentic morning Market Brief).
+(analyze/statements/compare/projections/filings), YouTube (personal channel list +
+AI validity review), Brief (agentic morning Market Brief).
 Recommendations are research input, not financial advice.
 
 Tests: `pytest tests/ -q` (no network — valuation layers stubbed) + `npm run build` in `app/`;
@@ -78,6 +79,15 @@ prod deploy, CI on main is only a post-hoc signal.
   detail) so the AI reads each analyst's EVOLVING view. `/yt-insights` also attaches a
   trust-weighted panel `summary` (haiku via `_pulse_summary`, cached per fetch: mood /
   bottom_line / themes / divergence / standout) rendered atop the Market Pulse panel.
+- **Custom YouTube tab** (separate from the curated Market Pulse panel): the user's own channel
+  list lives in their portfolios blob as `youtubeChannels` [{id, channel_id, name}] (RLS + localStorage).
+  INSTANT layer — `/yt-resolve` (URL/@handle → channel_id via page scrape) and `/yt-channel-analysis`
+  (auth, per-channel SWR) pull recent video titles+descriptions via RSS from Render (`_yt_rss_videos`;
+  only captions are IP-blocked, not RSS) and run a forced-tool-use validity review (`_YT_ANALYSIS_SCHEMA`:
+  recent_take / content_overview / stance / credibility / claims_check / consensus / contradictions /
+  red+green flags) grounded in the trusted panel summary + sector rotation. DEEP layer — full transcripts
+  fetched LOCALLY by `fetch_transcripts.py` (`fetch_custom_channels`, reads the latest portfolios blob's
+  `youtubeChannels`) into public-read `yt_custom_archive` (see its .sql), folded in when present.
 - yfinance quirks: no `show_errors` kwarg; quarterly statements ≈ 5-6 quarters only; RSI must be
   Wilder's (ewm alpha=1/14) to match TradingView — frontend `calcRSI` mirrors it.
 - AI prompts MUST include `datetime.date.today()` (model assumes training-era year otherwise).

@@ -137,6 +137,11 @@ const saveNetWorth = (l) => { try { localStorage.setItem(NW_KEY, JSON.stringify(
 const TAX_KEY = "alphadesk:taxprofile";
 const loadTaxProfile = () => { try { return JSON.parse(localStorage.getItem(TAX_KEY)) || {}; } catch { return {}; } };
 const saveTaxProfile = (o) => { try { localStorage.setItem(TAX_KEY, JSON.stringify(o)); } catch {} };
+// Custom YouTube channel list — [{id, channel_id, name}]. The blob key is
+// `youtubeChannels` so the local fetcher can read it for the deep transcript layer.
+const YTCH_KEY = "alphadesk:ytchannels";
+const loadYtChannels = () => { try { return JSON.parse(localStorage.getItem(YTCH_KEY)) || []; } catch { return []; } };
+const saveYtChannels = (l) => { try { localStorage.setItem(YTCH_KEY, JSON.stringify(l)); } catch {} };
 const UNASSIGNED = "__unassigned__";
 
 // ── CRYPTO SUPPORT ────────────────────────────────────────────────────
@@ -376,6 +381,23 @@ async function fetchTaxAnalysis(profile, investments) {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ profile, investments }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+// Custom YouTube tab: resolve a channel URL/@handle to an id, and analyze a channel.
+async function fetchYtResolve(q) {
+  const r = await fetch(`${API}/yt-resolve`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ q }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchYtChannelAnalysis(channel_id, name) {
+  const r = await fetch(`${API}/yt-channel-analysis`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ channel_id, name }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -6713,6 +6735,198 @@ function TaxPlan({ result: r }) {
   );
 }
 
+// ── YouTube tab: personal channel list + AI validity review ──────────────────
+const YT_STANCE_COL = (s) => ({bullish:C.up, bearish:C.down, neutral:C.faint, mixed:C.amber}[String(s||"").toLowerCase()] || C.faint);
+const YT_CRED_COL = (c) => { const s=String(c||"").toLowerCase(); return s.includes("high")?C.up : s.includes("low")?C.down : s.includes("mix")?C.amber : C.cold; };
+const YT_VERDICT_COL = (v) => { const s=String(v||"").toLowerCase(); return s.includes("unsupported")?C.down : s.includes("support")?C.up : s.includes("mix")?C.amber : C.faint; };
+
+function YouTubePage({ channels=[], onSaveChannels, aiEnabled }) {
+  const [q, setQ]         = useState("");
+  const [adding, setAdding] = useState(false);
+  const [addErr, setAddErr] = useState(null);
+
+  const add = () => {
+    const query = q.trim(); if (!query) return;
+    setAdding(true); setAddErr(null);
+    fetchYtResolve(query).then(x=>{
+      if (x.error || !x.channel_id) { setAddErr(x.error || "Couldn't find that channel."); return; }
+      if (channels.some(c=>c.channel_id===x.channel_id)) { setAddErr("That channel is already in your list."); return; }
+      onSaveChannels([...channels, { id:newId(), channel_id:x.channel_id, name:x.name || x.channel_id }]);
+      setQ("");
+    }).catch(e=>setAddErr(e.message)).finally(()=>setAdding(false));
+  };
+  const remove = (id) => onSaveChannels(channels.filter(c=>c.id!==id));
+
+  return (
+    <div>
+      <div style={{ marginBottom:14 }}>
+        <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>YouTube</div>
+        <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>Your favorite market YouTubers — their latest take, a content overview, and an AI review of whether it holds up.</div>
+      </div>
+
+      {/* Add a channel */}
+      <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px", marginBottom:14 }}>
+        <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:8 }}>Add a channel <span style={{ fontSize:10, color:C.faint, fontWeight:400 }}>· paste a channel URL or @handle</span></div>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+          <input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }}
+            placeholder="e.g. https://youtube.com/@MeetKevin  or  @GameofTrades_"
+            style={{ flex:"1 1 320px", minWidth:0, background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"9px 12px", color:C.ink, fontSize:12.5, outline:"none" }}/>
+          <button onClick={add} disabled={adding || !q.trim()}
+            style={{ background:(adding||!q.trim())?C.line:C.cold, border:"none", borderRadius:8, padding:"9px 18px", color:(adding||!q.trim())?C.faint:"#06080d", fontSize:12.5, fontWeight:700, cursor:(adding||!q.trim())?"default":"pointer", display:"flex", gap:7, alignItems:"center" }}>
+            {adding ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Finding…</> : <><Plus size={14}/> Add</>}
+          </button>
+        </div>
+        {addErr && <div style={{ fontSize:11.5, color:C.down, marginTop:8 }}>{addErr}</div>}
+      </div>
+
+      {!aiEnabled && (
+        <div style={{ background:`${C.amber}12`, border:`1px solid ${C.amber}44`, borderRadius:10, padding:"11px 14px", color:C.amber, fontSize:12, marginBottom:14 }}>
+          Turn on AI features (top bar) to generate the take & validity review for each channel.
+        </div>
+      )}
+
+      {channels.length===0 ? (
+        <div style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"28px 18px", textAlign:"center", color:C.faint, fontSize:12.5 }}>
+          No channels yet. Add your favorite market YouTubers above to see their latest thoughts and an AI credibility review.
+        </div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {channels.map(ch=><YtChannelCard key={ch.id} ch={ch} onRemove={()=>remove(ch.id)} aiEnabled={aiEnabled}/>)}
+        </div>
+      )}
+
+      <div style={{ fontSize:9.5, color:C.faint, marginTop:12, lineHeight:1.5 }}>
+        The instant take reads each channel's recent video titles & descriptions. Deep insights from full transcripts are layered in automatically after your local Market Pulse fetch runs. AI review is research input, not financial advice.
+      </div>
+    </div>
+  );
+}
+
+function YtChannelCard({ ch, onRemove, aiEnabled }) {
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr]         = useState(null);
+  const [open, setOpen]       = useState(true);
+
+  const load = useCallback(()=>{
+    if (!aiEnabled) return;
+    setLoading(true); setErr(null);
+    fetchYtChannelAnalysis(ch.channel_id, ch.name)
+      .then(x=>{ x.error && !x.analysis ? setErr(x.error) : setData(x); })
+      .catch(e=>setErr(e.message)).finally(()=>setLoading(false));
+  },[ch.channel_id, ch.name, aiEnabled]);
+  useEffect(()=>{ load(); },[load]);
+
+  const a = data?.analysis;
+  const card = { background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"14px 18px" };
+  const chip = (txt, col) => <span style={{ fontSize:9, fontWeight:800, letterSpacing:"0.05em", textTransform:"uppercase", color:col, background:`${col}18`, borderRadius:20, padding:"2px 9px" }}>{txt}</span>;
+
+  return (
+    <div style={card}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+        <span style={{ fontSize:14, fontWeight:700, color:C.ink }}>{ch.name}</span>
+        {a?.stance && chip(a.stance, YT_STANCE_COL(a.stance))}
+        {a?.credibility && chip(`${a.credibility} credibility`, YT_CRED_COL(a.credibility))}
+        {data?.has_transcripts && <span title="Full-transcript insights included" style={{ fontSize:9, color:C.up }}>◆ deep</span>}
+        <div style={{ marginLeft:"auto", display:"flex", gap:8, alignItems:"center" }}>
+          <button onClick={load} disabled={loading||!aiEnabled} title="Refresh" style={{ background:"none", border:"none", color:C.faint, cursor:(loading||!aiEnabled)?"default":"pointer", padding:2, display:"flex" }}><RefreshCw size={13} style={loading?{ animation:"spin 1s linear infinite" }:undefined}/></button>
+          <button onClick={()=>setOpen(o=>!o)} style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}><ChevronDown size={16} style={{ transform:open?"rotate(180deg)":"none", transition:"transform .15s" }}/></button>
+          <button onClick={onRemove} title="Remove channel" style={{ background:"none", border:"none", color:C.faint, cursor:"pointer", padding:2, display:"flex" }}><Trash2 size={13}/></button>
+        </div>
+      </div>
+
+      {loading && !data && <div style={{ display:"flex", alignItems:"center", gap:8, color:C.faint, fontSize:12, padding:"12px 0" }}><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Reading recent videos & analyzing…</div>}
+      {err && !data && <div style={{ fontSize:12, color:C.down, padding:"10px 0" }}>{err} <span onClick={load} style={{ color:C.cold, cursor:"pointer", textDecoration:"underline" }}>Retry</span></div>}
+
+      {open && data && (
+        <div style={{ marginTop:12, display:"flex", flexDirection:"column", gap:12 }}>
+          {a?.recent_take && (
+            <div>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:3 }}>Recent take</div>
+              <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.55 }}>{a.recent_take}</div>
+            </div>
+          )}
+          {a?.content_overview && (
+            <div>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:3 }}>Content overview</div>
+              <div style={{ fontSize:12, color:C.sub, lineHeight:1.5 }}>{a.content_overview}</div>
+            </div>
+          )}
+
+          {/* Validity: claims vs reality */}
+          {Array.isArray(a?.claims_check) && a.claims_check.length>0 && (
+            <div>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:5 }}>Claims vs. reality</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {a.claims_check.map((c,i)=>(
+                  <div key={i} style={{ background:C.panel2, borderRadius:9, padding:"9px 11px", borderLeft:`3px solid ${YT_VERDICT_COL(c.verdict)}` }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", gap:8, alignItems:"flex-start" }}>
+                      <span style={{ fontSize:12, color:C.ink, fontWeight:600, lineHeight:1.45 }}>{c.claim}</span>
+                      {c.verdict && <span style={{ fontSize:8.5, fontWeight:800, textTransform:"uppercase", color:YT_VERDICT_COL(c.verdict), whiteSpace:"nowrap", flexShrink:0 }}>{c.verdict}</span>}
+                    </div>
+                    {c.assessment && <div style={{ fontSize:11, color:C.sub, lineHeight:1.5, marginTop:3 }}>{c.assessment}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {a?.consensus && (
+            <div style={{ background:`${C.cold}0c`, border:`1px solid ${C.cold}30`, borderRadius:9, padding:"9px 12px" }}>
+              <div style={{ fontSize:9, color:C.cold, letterSpacing:"0.06em", textTransform:"uppercase", marginBottom:3 }}>vs. your trusted panel</div>
+              <div style={{ fontSize:11.5, color:C.ink, lineHeight:1.5 }}>{a.consensus}</div>
+            </div>
+          )}
+
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px,1fr))", gap:10 }}>
+            {Array.isArray(a?.red_flags) && a.red_flags.length>0 && (
+              <div style={{ background:`${C.down}0a`, border:`1px solid ${C.down}30`, borderRadius:9, padding:"9px 12px" }}>
+                <div style={{ fontSize:9, color:C.down, letterSpacing:"0.06em", textTransform:"uppercase", marginBottom:4 }}>Red flags</div>
+                <ul style={{ margin:0, paddingLeft:15, display:"flex", flexDirection:"column", gap:3 }}>{a.red_flags.map((f,i)=><li key={i} style={{ fontSize:11, color:C.sub, lineHeight:1.4 }}>{f}</li>)}</ul>
+              </div>
+            )}
+            {Array.isArray(a?.green_flags) && a.green_flags.length>0 && (
+              <div style={{ background:`${C.up}0a`, border:`1px solid ${C.up}30`, borderRadius:9, padding:"9px 12px" }}>
+                <div style={{ fontSize:9, color:C.up, letterSpacing:"0.06em", textTransform:"uppercase", marginBottom:4 }}>Green flags</div>
+                <ul style={{ margin:0, paddingLeft:15, display:"flex", flexDirection:"column", gap:3 }}>{a.green_flags.map((f,i)=><li key={i} style={{ fontSize:11, color:C.sub, lineHeight:1.4 }}>{f}</li>)}</ul>
+              </div>
+            )}
+            {Array.isArray(a?.contradictions) && a.contradictions.length>0 && (
+              <div style={{ background:`${C.amber}0a`, border:`1px solid ${C.amber}30`, borderRadius:9, padding:"9px 12px" }}>
+                <div style={{ fontSize:9, color:C.amber, letterSpacing:"0.06em", textTransform:"uppercase", marginBottom:4 }}>Contradictions</div>
+                <ul style={{ margin:0, paddingLeft:15, display:"flex", flexDirection:"column", gap:3 }}>{a.contradictions.map((f,i)=><li key={i} style={{ fontSize:11, color:C.sub, lineHeight:1.4 }}>{f}</li>)}</ul>
+              </div>
+            )}
+          </div>
+
+          {a?.bottom_line && (
+            <div style={{ fontSize:12, color:C.ink, background:`${C.line}50`, borderRadius:8, padding:"9px 12px", lineHeight:1.5 }}>
+              <b>Bottom line:</b> {a.bottom_line}
+            </div>
+          )}
+
+          {/* Recent videos */}
+          {Array.isArray(data?.videos) && data.videos.length>0 && (
+            <div>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:5 }}>Recent videos</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                {data.videos.slice(0,6).map((v,i)=>(
+                  <div key={i} style={{ display:"flex", gap:8, alignItems:"baseline" }}>
+                    <span style={{ fontSize:9.5, color:C.faint, fontFamily:C.mono, whiteSpace:"nowrap" }}>{v.published}</span>
+                    <a href={v.link} target="_blank" rel="noopener noreferrer" style={{ fontSize:11.5, color:C.cold, textDecoration:"none", lineHeight:1.4 }}>{v.title}</a>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {data?.generated_at && <div style={{ fontSize:9, color:C.faint }}>Updated {new Date(data.generated_at).toLocaleString()}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, properties=[], positionsCount=0, items=[], onSaveItems, onGoto }) {
   const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"", ratePct:"", growthPct:"", startYear:"", endYear:"" });
   const reValue = properties.reduce((s,p)=>s+n_(p.value),0);
@@ -7391,6 +7605,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [reDeals, setREDeals]           = useState(loadREDeals);
   const [nwItems, setNwItems]           = useState(loadNetWorth);
   const [taxProfile, setTaxProfile]     = useState(loadTaxProfile);
+  const [ytChannels, setYtChannels]     = useState(loadYtChannels);
   const [financialsTicker, setFinancialsTicker] = useState(null);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
@@ -7412,6 +7627,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveREDeals(reDeals); },[reDeals]);
   useEffect(()=>{ saveNetWorth(nwItems); },[nwItems]);
   useEffect(()=>{ saveTaxProfile(taxProfile); },[taxProfile]);
+  useEffect(()=>{ saveYtChannels(ytChannels); },[ytChannels]);
 
   // Keep-alive: ping the backend every 8 min so Render never cold-starts mid-session
   useEffect(()=>{
@@ -7452,6 +7668,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.reDeals?.length)      setREDeals(data.reDeals);
         if (data.nwItems?.length)      setNwItems(data.nwItems);
         if (data.taxProfile && Object.keys(data.taxProfile).length) setTaxProfile(data.taxProfile);
+        if (data.youtubeChannels?.length) setYtChannels(data.youtubeChannels);
       }).catch(()=>{});
     } else {
       // Anonymous path: fall back to server positions.json + settings.json
@@ -7464,13 +7681,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, taxProfile };
+  sbState.current = { positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, taxProfile, youtubeChannels: ytChannels };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, taxProfile, userId]);
+  },[positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, taxProfile, ytChannels, userId]);
 
   // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
   // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
@@ -7739,7 +7956,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"
             onPick={(t)=>{ const T=normalizeTicker(t)||t; if(T) setDetail(T); }}/>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0, flexWrap:"wrap" }}>
-            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["realestate","Real Estate"],["networth","Net Worth"],["taxes","Taxes"],["financials","Financials"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
+            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["realestate","Real Estate"],["networth","Net Worth"],["taxes","Taxes"],["financials","Financials"],["youtube","YouTube"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
                 style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500,
                   background: !detail && tab===id ? C.line : "transparent",
@@ -7902,6 +8119,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           {tab==="taxes" && <TaxesPage taxProfile={taxProfile} onSaveProfile={setTaxProfile}
             portfolio={portfolio} closedPositions={closedPositions} income={financeCtx.income}
             marginInterest={Math.round(totalMargin*(Number(blendedRate)||0)/100)} aiEnabled={aiEnabled}/>}
+          {tab==="youtube" && <YouTubePage channels={ytChannels} onSaveChannels={setYtChannels} aiEnabled={aiEnabled}/>}
           {tab==="financials" && <FinancialsPage initialTicker={financialsTicker} watchlist={watchlist} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}
             savedScreens={savedScreens} onSaveScreen={saveScreen} onDeleteScreen={deleteScreen} onOpenDetail={setDetail}

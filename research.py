@@ -3183,6 +3183,184 @@ Sector Exposure: {sector_s or "—"}
             return {"error": str(e)}
 
 
+    # ── Custom YouTube tab (user's own channel list) ────────────────────────
+    # Separate from the curated Market Pulse analyst panel. INSTANT layer: the
+    # backend pulls a channel's recent videos via RSS (titles + descriptions) —
+    # works from Render (only the CAPTION endpoint is IP-blocked). DEEP layer:
+    # full transcripts, fetched locally by fetch_transcripts.py into the public-read
+    # yt_custom_archive table, are folded in when present. The AI review checks the
+    # channel's claims against real market data AND positions it vs the trusted panel.
+    _YT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+    def _yt_rss_videos(channel_id, limit=6):
+        import urllib.request as _ur, xml.etree.ElementTree as _ET
+        ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
+              "media": "http://search.yahoo.com/mrss/"}
+        url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        req = _ur.Request(url, headers={"User-Agent": _YT_UA})
+        with _ur.urlopen(req, timeout=10) as r:
+            root = _ET.fromstring(r.read())
+        out = []
+        for e in root.findall("atom:entry", ns)[:limit]:
+            vid = e.findtext("yt:videoId", namespaces=ns) or ""
+            grp = e.find("media:group", ns)
+            desc = (grp.findtext("media:description", namespaces=ns) if grp is not None else "") or ""
+            out.append({"vid": vid, "title": e.findtext("atom:title", namespaces=ns) or "",
+                        "published": (e.findtext("atom:published", namespaces=ns) or "")[:10],
+                        "link": f"https://youtube.com/watch?v={vid}", "description": desc[:1500]})
+        return out
+
+    def _yt_resolve_channel(q):
+        """Resolve a channel URL / @handle / UC-id to {channel_id, name}. Scrapes the
+        channel page for the id + og:title (page fetch works from Render; captions don't)."""
+        import urllib.request as _ur, re as _re
+        q = (q or "").strip()
+        m = _re.search(r"(UC[0-9A-Za-z_-]{22})", q)
+        if m:
+            url = f"https://www.youtube.com/channel/{m.group(1)}"
+        elif q.startswith("http"):
+            url = q
+        else:
+            url = f"https://www.youtube.com/@{q.lstrip('@')}"
+        req = _ur.Request(url, headers={"User-Agent": _YT_UA, "Accept-Language": "en-US,en;q=0.9"})
+        with _ur.urlopen(req, timeout=12) as r:
+            html = r.read().decode("utf-8", "replace")
+        cid = None
+        for pat in (r'"externalId":"(UC[0-9A-Za-z_-]{22})"', r'"channelId":"(UC[0-9A-Za-z_-]{22})"',
+                    r'"browseId":"(UC[0-9A-Za-z_-]{22})"', r'channel/(UC[0-9A-Za-z_-]{22})'):
+            mm = _re.search(pat, html)
+            if mm:
+                cid = mm.group(1); break
+        name = None
+        mm = _re.search(r'<meta property="og:title" content="([^"]+)"', html)
+        if mm:
+            name = mm.group(1).replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"')
+        return {"channel_id": cid, "name": name}
+
+    def _yt_custom_transcripts(channel_id, limit=4):
+        """Deep-layer transcript insights for a channel from the public-read
+        yt_custom_archive table (written by the local fetcher). [] if none / no table."""
+        SB_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+        SB_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
+        if not SB_URL or not SB_KEY or not channel_id:
+            return []
+        import urllib.request as _ur
+        url = (f"{SB_URL}/rest/v1/yt_custom_archive?channel_id=eq.{channel_id}"
+               "&select=video_title,published_date,key_takeaway,insight_summary,sentiment"
+               f"&order=published_date.desc&limit={limit}")
+        req = _ur.Request(url, headers={"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
+                                        "Accept": "application/json"})
+        try:
+            with _ur.urlopen(req, timeout=10) as r:
+                return json.loads(r.read()) or []
+        except Exception:
+            return []
+
+    @app.post("/yt-resolve")
+    def yt_resolve_endpoint(payload: dict = Body(default={}), authorization: str = Header(None)):
+        require_user(authorization)
+        try:
+            info = _yt_resolve_channel(payload.get("q") or payload.get("url") or "")
+            if not info.get("channel_id"):
+                return {"error": "Couldn't find that channel — paste the channel URL or @handle."}
+            return info
+        except Exception as e:
+            return {"error": f"Lookup failed: {e}"}
+
+    _YT_ANALYSIS_SCHEMA = _s(
+        channel="str",
+        recent_take="str",
+        content_overview="str",
+        stance="str",
+        credibility="str",
+        claims_check=_arr(_s(claim="str", assessment="str", verdict="str")),
+        consensus="str",
+        contradictions="strs",
+        red_flags="strs",
+        green_flags="strs",
+        bottom_line="str",
+    )
+
+    @app.post("/yt-channel-analysis")
+    def yt_channel_analysis_endpoint(payload: dict = Body(default={}), authorization: str = Header(None)):
+        require_user(authorization)
+        channel_id = (payload.get("channel_id") or "").strip()
+        name = (payload.get("name") or "").strip() or channel_id
+        if not channel_id:
+            return {"error": "channel_id required"}
+
+        def produce():
+            videos = []
+            try:
+                videos = _yt_rss_videos(channel_id)
+            except Exception:
+                pass
+            transcripts = _yt_custom_transcripts(channel_id)
+            if not videos and not transcripts:
+                return {"channel_id": channel_id, "name": name, "videos": [],
+                        "has_transcripts": False,
+                        "error": "Couldn't reach this channel's recent videos right now — try again shortly."}
+            # Consensus context: the trusted Market Pulse panel + sector rotation.
+            ctx = []
+            try:
+                pulse = yt_insights_endpoint()
+                s = pulse.get("summary") or {}
+                if s.get("bottom_line"):
+                    ctx.append(f"TRUSTED PANEL CONSENSUS ({s.get('mood','')}): {s['bottom_line']}")
+                tops = []
+                for a in (pulse.get("analysts") or [])[:4]:
+                    ins = (a.get("insights") or [])
+                    if ins:
+                        tops.append(f"  [{a.get('weight')}] {a.get('name')}: {(ins[0].get('takeaway') or '')[:160]}")
+                if tops:
+                    ctx.append("PANEL VOICES:\n" + "\n".join(tops))
+            except Exception:
+                pass
+            try:
+                rot = sector_rotation_endpoint()
+                secs = rot.get("sectors") or []
+                if secs:
+                    lead = ", ".join(f"{x['name']} {x.get('month',0):+.0f}%" for x in secs[:3])
+                    lag = ", ".join(f"{x['name']} {x.get('month',0):+.0f}%" for x in secs[-3:])
+                    ctx.append(f"SECTOR ROTATION (1mo) — leaders: {lead} · laggards: {lag}")
+            except Exception:
+                pass
+
+            vid_block = "\n".join(f"- ({v['published']}) {v['title']}\n    {(v.get('description') or '')[:400]}"
+                                  for v in videos) or "(recent titles unavailable)"
+            tr_block = ""
+            if transcripts:
+                tr_block = "\n\nDEEP TRANSCRIPT INSIGHTS (from full spoken content):\n" + "\n".join(
+                    f"- ({t.get('published_date','')}) {t.get('video_title','')} [{t.get('sentiment','')}]: "
+                    f"{(t.get('key_takeaway') or '')[:200]}" for t in transcripts)
+
+            prompt = (
+                f"Date: {datetime.date.today()}. Assess the YouTube channel \"{name}\" for a serious investor.\n\n"
+                f"RECENT VIDEOS (titles + descriptions):\n{vid_block}{tr_block}\n\n"
+                + ("MARKET CONTEXT (for cross-checking their claims and consensus):\n" + "\n".join(ctx) + "\n\n" if ctx else "")
+                + "Produce: recent_take (their current market view), content_overview (what they cover + style + "
+                "cadence), stance (bullish/bearish/neutral/mixed). Then a rigorous VALIDITY review: claims_check "
+                "(each notable claim → assessment vs real market data/known facts → verdict of supported / "
+                "unsupported / unverifiable / mixed); consensus (how they line up with the trusted panel + macro "
+                "above); contradictions (where they conflict with more-credible sources); red_flags (clickbait, "
+                "hype, fear/greed manipulation, vague/unfalsifiable calls, undisclosed conflicts); green_flags "
+                "(signs of quality). Finish with a blunt bottom_line on whether to trust this channel and how to "
+                "use it. Base transcripts (if present) over titles. Be specific and skeptical; don't invent facts."
+            )
+            try:
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                data = _ai_json(client, prompt, max_tokens=2600, schema=_YT_ANALYSIS_SCHEMA)
+            except Exception as e:
+                return {"channel_id": channel_id, "name": name, "videos": videos,
+                        "has_transcripts": bool(transcripts), "error": f"Analysis failed: {e}"}
+            return _json_safe({"channel_id": channel_id, "name": name, "videos": videos,
+                               "has_transcripts": bool(transcripts),
+                               "analysis": data, "generated_at": datetime.datetime.now().isoformat()})
+
+        # Per-channel SWR cache so repeated views are cheap; refreshes ~2h.
+        return _cached_swr(f"ytchan:{channel_id}", produce, ttl=7200, stale_ttl=86400)
+
     @app.get("/sector")
     def sector_endpoint(name: str, authorization: str = Header(None)):
         # Drill-down: AI explanation of what's driving a sector + 30-90 day forecast.

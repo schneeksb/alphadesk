@@ -132,6 +132,11 @@ const saveREDeals = (l) => { try { localStorage.setItem(REDEALS_KEY, JSON.string
 const NW_KEY = "alphadesk:networth";
 const loadNetWorth = () => { try { return JSON.parse(localStorage.getItem(NW_KEY)) || []; } catch { return []; } };
 const saveNetWorth = (l) => { try { localStorage.setItem(NW_KEY, JSON.stringify(l)); } catch {} };
+// Tax profile — FIGURES ONLY (no SSN/name/address, ever). Persisted like the rest
+// of the user's state (localStorage + private Supabase row under RLS).
+const TAX_KEY = "alphadesk:taxprofile";
+const loadTaxProfile = () => { try { return JSON.parse(localStorage.getItem(TAX_KEY)) || {}; } catch { return {}; } };
+const saveTaxProfile = (o) => { try { localStorage.setItem(TAX_KEY, JSON.stringify(o)); } catch {} };
 const UNASSIGNED = "__unassigned__";
 
 // ── CRYPTO SUPPORT ────────────────────────────────────────────────────
@@ -360,6 +365,17 @@ async function fetchValue(positions, margin = 0, margin_rate = 0, profile = "", 
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ positions, margin, margin_rate, profile, accounts }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+// Auth-gated CPA-style tax plan. Sends figures-only profile + in-app investment
+// summary; never any identifying info or documents.
+async function fetchTaxAnalysis(profile, investments) {
+  const r = await fetch(`${API}/tax-analysis`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ profile, investments }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -6394,6 +6410,309 @@ const nwAmountIn = (i, yr) => {
 };
 const nwIncomeIn = (items, yr) => items.filter(i => i.kind === "income").reduce((s, i) => s + nwAmountIn(i, yr), 0);
 
+// ── Taxes tab ────────────────────────────────────────────────────────────────
+// Security-first CPA-style planner. Collects FIGURES ONLY (no SSN/name/address,
+// no documents) and pairs them with the investment activity the app already
+// tracks. Profile persists in the user's private (RLS) Supabase row.
+const TAX_FILING = [["single","Single"],["mfj","Married filing jointly"],["mfs","Married filing separately"],["hoh","Head of household"]];
+const TAX_ENTITY = [["none","None / W-2 only"],["sole_prop","Sole proprietor"],["smllc","Single-member LLC"],["scorp","S-corp"],["partnership","Partnership / multi-member LLC"],["ccorp","C-corp"]];
+
+function TaxesPage({ taxProfile={}, onSaveProfile, portfolio, closedPositions=[], income={}, marginInterest=0, aiEnabled }) {
+  const [result, setResult]   = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr]         = useState(null);
+  const P = taxProfile || {};
+  const set = (k,v)=>onSaveProfile({ ...P, [k]:v });
+  const curYear = new Date().getFullYear();
+  const taxYear = Number(P.tax_year) || curYear;
+
+  // Investment activity pulled straight from the app — nothing to re-enter.
+  const invest = useMemo(()=>{
+    let realizedST=0, realizedLT=0;
+    (closedPositions||[]).forEach(c=>{
+      if (!String(c.closed_at||"").startsWith(String(taxYear))) return;
+      const pnl = Number(c.realized_pnl)||0;
+      const days = (c.opened_at && c.closed_at) ? (new Date(c.closed_at)-new Date(c.opened_at))/86400000 : null;
+      if (days!=null && days>365) realizedLT += pnl; else realizedST += pnl;
+    });
+    let unrealGain=0, unrealLoss=0; const harvest=[];
+    (portfolio?.positions||[]).forEach(p=>{
+      const pnl = Number(p.pnl)||0;
+      if (pnl>0) unrealGain += pnl;
+      else if (pnl<0) {
+        unrealLoss += pnl;
+        const days = p.opened_at ? (Date.now()-new Date(p.opened_at))/86400000 : null;
+        harvest.push({ ticker:p.ticker, type:p.type, loss:Math.round(pnl),
+          held_days: days!=null?Math.round(days):null,
+          term: days!=null?(days>365?"long":"short"):"unknown", value:Math.round(p.current_val||0) });
+      }
+    });
+    harvest.sort((a,b)=>a.loss-b.loss);
+    return {
+      tax_year: taxYear,
+      realized_short_term: Math.round(realizedST), realized_long_term: Math.round(realizedLT),
+      net_realized: Math.round(realizedST+realizedLT),
+      unrealized_gains: Math.round(unrealGain), unrealized_losses: Math.round(unrealLoss),
+      harvest_candidates: harvest.slice(0,15),
+      margin_interest_annual: Math.round(marginInterest),
+      annual_income_tracked: income?.annual_active||0,
+      income_streams: income?.streams||[],
+    };
+  },[portfolio, closedPositions, income, marginInterest, taxYear]);
+
+  const analyze = () => {
+    setErr(null); setResult(null); setLoading(true);
+    fetchTaxAnalysis({ ...P, tax_year: taxYear }, invest)
+      .then(x=> x.error ? setErr(x.error) : setResult(x))
+      .catch(e=>setErr(e.message)).finally(()=>setLoading(false));
+  };
+
+  // ── field renderers (figures only) ──
+  const box = { display:"flex", alignItems:"center", background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"0 8px" };
+  const lbl = { fontSize:9, color:C.faint, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:3 };
+  const money = (k,label) => (
+    <label style={{ display:"flex", flexDirection:"column", flex:"1 1 150px", minWidth:120 }}>
+      <span style={lbl}>{label}</span>
+      <div style={box}><span style={{ fontSize:12, color:C.faint }}>$</span>
+        <input type="number" step="any" value={P[k] ?? ""} onChange={e=>set(k,e.target.value)}
+          style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+      </div>
+    </label>
+  );
+  const numF = (k,label,suffix) => (
+    <label style={{ display:"flex", flexDirection:"column", flex:"0 1 120px", minWidth:100 }}>
+      <span style={lbl}>{label}</span>
+      <div style={box}>
+        <input type="number" step="any" value={P[k] ?? ""} onChange={e=>set(k,e.target.value)}
+          style={{ width:"100%", minWidth:0, background:"none", border:"none", padding:"8px 4px", color:C.ink, fontSize:12.5, fontFamily:C.mono, outline:"none" }}/>
+        {suffix && <span style={{ fontSize:11, color:C.faint }}>{suffix}</span>}
+      </div>
+    </label>
+  );
+  const selF = (k,label,opts,def) => (
+    <label style={{ display:"flex", flexDirection:"column", flex:"1 1 180px", minWidth:150 }}>
+      <span style={lbl}>{label}</span>
+      <select value={P[k] ?? def ?? ""} onChange={e=>set(k,e.target.value)}
+        style={{ background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 10px", color:C.ink, fontSize:12.5, outline:"none" }}>
+        {opts.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+      </select>
+    </label>
+  );
+  const chkF = (k,label) => (
+    <label style={{ display:"flex", alignItems:"center", gap:7, fontSize:12, color:C.sub, cursor:"pointer", flex:"1 1 200px", padding:"6px 0" }}>
+      <input type="checkbox" checked={!!P[k]} onChange={e=>set(k,e.target.checked)}/> {label}
+    </label>
+  );
+  const Section = ({ title, hint, children }) => (
+    <div style={{ marginBottom:16 }}>
+      <div style={{ fontSize:12, fontWeight:700, color:C.ink, marginBottom:2 }}>{title}</div>
+      {hint && <div style={{ fontSize:10, color:C.faint, marginBottom:8 }}>{hint}</div>}
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>{children}</div>
+    </div>
+  );
+  const card = { background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px", marginBottom:14 };
+  const isMarried = P.filing_status==="mfj";
+  const isBiz = P.business_entity && P.business_entity!=="none";
+
+  return (
+    <div>
+      <div style={{ marginBottom:14 }}>
+        <div style={{ fontSize:16, fontWeight:700, color:C.ink }}>Taxes</div>
+        <div style={{ fontSize:12, color:C.faint, marginTop:2 }}>A CPA-style read on how to legally minimize your taxes — across W-2, 1099, business & investments.</div>
+      </div>
+
+      {/* Security banner */}
+      <div style={{ background:`${C.up}0c`, border:`1px solid ${C.up}33`, borderRadius:12, padding:"11px 14px", marginBottom:14, display:"flex", gap:9, alignItems:"flex-start" }}>
+        <span style={{ fontSize:15 }}>🔒</span>
+        <div style={{ fontSize:11, color:C.sub, lineHeight:1.5 }}>
+          <b style={{ color:C.ink }}>Figures only — never enter your SSN, name, or address.</b> Nothing is uploaded; there are no documents. What you type is stored privately under your login (row-level-secured) and sent only to the analysis engine to generate recommendations. Educational only — confirm anything before you file.
+        </div>
+      </div>
+
+      {/* Profile form */}
+      <div style={card}>
+        <Section title="Filing">
+          {selF("filing_status","Filing status",TAX_FILING,"single")}
+          <label style={{ display:"flex", flexDirection:"column", flex:"1 1 110px", minWidth:90 }}>
+            <span style={lbl}>State</span>
+            <input value={P.state ?? ""} onChange={e=>set("state",e.target.value)} placeholder="e.g. CA"
+              style={{ background:C.panel2, border:`1px solid ${C.line}`, borderRadius:8, padding:"8px 10px", color:C.ink, fontSize:12.5, outline:"none" }}/>
+          </label>
+          {numF("tax_year","Tax year")}
+          {numF("dependents","Dependents")}
+          {chkF("age_50_plus","I'm 50 or older (catch-up contributions)")}
+        </Section>
+      </div>
+
+      <div style={card}>
+        <Section title="W-2 employment" hint="Wages and tax already withheld from your paychecks.">
+          {money("w2_wages","W-2 wages (box 1)")}
+          {money("w2_fed_withheld","Federal tax withheld")}
+          {money("w2_state_withheld","State tax withheld")}
+          {money("contrib_401k","401(k)/403(b) contributed")}
+          {isMarried && money("spouse_w2_wages","Spouse W-2 wages")}
+          {isMarried && money("spouse_contrib_401k","Spouse 401(k) contributed")}
+        </Section>
+      </div>
+
+      <div style={card}>
+        <Section title="Self-employment / business" hint="1099 or business income and its deductible expenses.">
+          {selF("business_entity","Business structure",TAX_ENTITY,"none")}
+          {money("se_income","1099 / business revenue")}
+          {money("se_expenses","Business expenses")}
+          {P.business_entity==="scorp" && money("s_corp_salary","S-corp salary you pay yourself")}
+          {money("k1_income","K-1 income")}
+          {money("est_payments_fed","Federal estimated tax paid (YTD)")}
+          {isBiz && chkF("home_office","I have a qualifying home office")}
+        </Section>
+      </div>
+
+      <div style={card}>
+        <Section title="Retirement & HSA (already contributed this year)" hint="Used to spot remaining room before the deadline.">
+          {money("contrib_trad_ira","Traditional IRA")}
+          {money("contrib_roth_ira","Roth IRA")}
+          {money("contrib_hsa","HSA")}
+          {money("contrib_sep_solo","SEP / Solo-401(k)")}
+          {chkF("has_hdhp","Covered by an HSA-eligible high-deductible health plan")}
+        </Section>
+      </div>
+
+      <div style={card}>
+        <Section title="Deductions" hint="If your itemizable expenses beat the standard deduction, the plan will say so.">
+          {money("mortgage_interest","Mortgage interest")}
+          {money("property_tax","Property + state/local tax (SALT)")}
+          {money("charitable","Charitable giving")}
+          {money("student_loan_interest","Student-loan interest")}
+          {money("other_income","Other income (interest, dividends, etc.)")}
+        </Section>
+      </div>
+
+      {/* Investment activity (auto) */}
+      <div style={card}>
+        <div style={{ fontSize:12, fontWeight:700, color:C.ink, marginBottom:2 }}>Investment activity <span style={{ fontSize:10, color:C.faint, fontWeight:400 }}>· pulled from your portfolio — nothing to enter</span></div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px,1fr))", gap:10, marginTop:10 }}>
+          {[
+            ["Realized — short-term", invest.realized_short_term, invest.realized_short_term>=0?C.up:C.down],
+            ["Realized — long-term", invest.realized_long_term, invest.realized_long_term>=0?C.up:C.down],
+            ["Unrealized gains", invest.unrealized_gains, C.up],
+            ["Unrealized losses", invest.unrealized_losses, C.down],
+            ["Harvestable losses", invest.harvest_candidates.length, C.cold],
+            ["Margin interest / yr", invest.margin_interest_annual, C.amber],
+          ].map(([l,v,col],i)=>(
+            <div key={i} style={{ background:C.panel2, borderRadius:9, padding:"9px 11px" }}>
+              <div style={{ fontSize:9.5, color:C.faint, letterSpacing:"0.04em", textTransform:"uppercase" }}>{l}</div>
+              <div style={{ fontFamily:C.mono, fontSize:14, fontWeight:800, color:col, marginTop:2 }}>{l==="Harvestable losses"?v:fmt$(v)}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize:9.5, color:C.faint, marginTop:8 }}>Realized figures are for {taxYear}, classified short vs long by holding period from your Closed ledger. Harvest candidates come from current unrealized losses.</div>
+      </div>
+
+      {/* Analyze */}
+      <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16, flexWrap:"wrap" }}>
+        <button onClick={analyze} disabled={loading || !aiEnabled}
+          style={{ background: (loading||!aiEnabled)?C.line:C.cold, border:"none", borderRadius:10, padding:"11px 20px", color:(loading||!aiEnabled)?C.faint:"#06080d", fontSize:13.5, fontWeight:700, cursor:(loading||!aiEnabled)?"default":"pointer", display:"flex", gap:8, alignItems:"center" }}>
+          {loading ? <><Loader2 size={15} style={{ animation:"spin 1s linear infinite" }}/> Analyzing…</> : <><Zap size={15}/> Get Tax Plan</>}
+        </button>
+        {!aiEnabled && <span style={{ fontSize:11, color:C.faint }}>Turn on AI features (top bar) to generate a plan.</span>}
+        {result?.generated_at && <span style={{ fontSize:10.5, color:C.faint }}>Updated {new Date(result.generated_at).toLocaleString()}</span>}
+      </div>
+
+      {err && <div style={{ background:`${C.down}0c`, border:`1px solid ${C.down}33`, borderRadius:10, padding:"12px 14px", color:C.down, fontSize:12.5, marginBottom:16 }}>Couldn't generate the tax plan: {err} <span onClick={analyze} style={{ color:C.cold, cursor:"pointer", textDecoration:"underline" }}>Retry</span></div>}
+
+      {result && <TaxPlan result={result}/>}
+    </div>
+  );
+}
+
+// Renders the CPA-style plan returned by /tax-analysis.
+function TaxPlan({ result: r }) {
+  const chip = { fontSize:9, fontWeight:800, letterSpacing:"0.05em", textTransform:"uppercase", borderRadius:20, padding:"2px 9px" };
+  const card = { background:C.panel, border:`1px solid ${C.line}`, borderRadius:14, padding:"16px 18px", marginBottom:14 };
+  const List = ({ title, items, color=C.cold }) => (Array.isArray(items) && items.length>0) ? (
+    <div style={card}>
+      <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:8 }}>{title}</div>
+      <ul style={{ margin:0, paddingLeft:18, display:"flex", flexDirection:"column", gap:6 }}>
+        {items.map((t,i)=><li key={i} style={{ fontSize:12, color:C.sub, lineHeight:1.5 }}>{t}</li>)}
+      </ul>
+    </div>
+  ) : null;
+  const strategies = (r.strategies||[]).slice().sort((a,b)=>(a.priority||99)-(b.priority||99));
+  const tlh = r.tax_loss_harvesting||[];
+  return (
+    <div>
+      {/* Headline */}
+      <div style={{ ...card, borderLeft:`4px solid ${C.cold}` }}>
+        <div style={{ fontSize:10.5, color:C.faint, letterSpacing:"0.08em" }}>ESTIMATED {r.tax_year||""} TAX</div>
+        <div style={{ fontFamily:C.mono, fontSize:30, fontWeight:800, color:C.ink, lineHeight:1.15, marginTop:2 }}>{r.est_total_tax || "—"}</div>
+        <div style={{ display:"flex", gap:16, flexWrap:"wrap", fontSize:11.5, color:C.sub, marginTop:6 }}>
+          {r.est_effective_rate && <span>Effective rate <b style={{ color:C.ink }}>{r.est_effective_rate}</b></span>}
+          {r.est_marginal_bracket && <span>Marginal bracket <b style={{ color:C.ink }}>{r.est_marginal_bracket}</b></span>}
+        </div>
+        {r.summary && <div style={{ fontSize:12.5, color:C.ink, lineHeight:1.6, marginTop:10 }}>{r.summary}</div>}
+      </div>
+
+      {/* Strategies */}
+      {strategies.length>0 && (
+        <div style={card}>
+          <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:10 }}>Prioritized strategies</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {strategies.map((s,i)=>(
+              <div key={i} style={{ borderTop: i?`1px solid ${C.panel2}`:"none", paddingTop: i?10:0 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:12.5, fontWeight:700, color:C.ink }}>{s.title}</span>
+                  <div style={{ display:"flex", gap:6, alignItems:"center", flexShrink:0 }}>
+                    {s.est_savings && <span style={{ ...chip, color:C.up, background:`${C.up}18` }}>~{s.est_savings}</span>}
+                    {s.effort && <span style={{ ...chip, color:C.faint, background:C.panel2 }}>{s.effort}</span>}
+                  </div>
+                </div>
+                {s.category && <div style={{ fontSize:9.5, color:C.cold, marginTop:2 }}>{s.category}</div>}
+                {s.detail && <div style={{ fontSize:12, color:C.sub, lineHeight:1.55, marginTop:4 }}>{s.detail}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Tax-loss harvesting */}
+      {tlh.length>0 && (
+        <div style={card}>
+          <div style={{ fontSize:12.5, fontWeight:700, color:C.ink, marginBottom:8 }}>Tax-loss harvesting</div>
+          <div style={{ overflowX:"auto" }}>
+            <div style={{ minWidth:520 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"80px 70px 90px 90px 1fr", borderBottom:`1px solid ${C.line}` }}>
+                {["Ticker","Term","Loss","Est. benefit","Wash-sale / note"].map((c,i)=><div key={i} style={{ padding:"6px 8px", fontSize:9, color:C.faint, textTransform:"uppercase", letterSpacing:"0.04em" }}>{c}</div>)}
+              </div>
+              {tlh.map((t,i)=>(
+                <div key={i} style={{ display:"grid", gridTemplateColumns:"80px 70px 90px 90px 1fr", borderTop:i?`1px solid ${C.panel2}`:"none", alignItems:"center" }}>
+                  <div style={{ padding:"8px", fontFamily:C.mono, fontSize:12, fontWeight:700, color:C.ink }}>{displaySym(t.ticker)}</div>
+                  <div style={{ padding:"8px", fontSize:11, color:C.sub }}>{t.term}</div>
+                  <div style={{ padding:"8px", fontFamily:C.mono, fontSize:12, color:C.down }}>{t.loss}</div>
+                  <div style={{ padding:"8px", fontFamily:C.mono, fontSize:12, color:C.up }}>{t.est_benefit}</div>
+                  <div style={{ padding:"8px", fontSize:11, color:C.sub, lineHeight:1.4 }}>
+                    {t.wash_sale_risk && <span style={{ color:C.amber, fontWeight:600 }}>{t.wash_sale_risk}. </span>}{t.note}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{ fontSize:9.5, color:C.faint, marginTop:8 }}>Selling for a loss then rebuying the same (or substantially identical) security within 30 days disallows the loss (wash sale). Confirm holding periods and lots before acting.</div>
+        </div>
+      )}
+
+      <List title="Retirement & HSA moves" items={r.retirement_moves}/>
+      <List title="Business & QBI" items={r.business_qbi}/>
+      <List title="Estimated taxes" items={r.estimated_tax}/>
+      <List title="Deductions" items={r.deductions}/>
+      <List title="Watch-outs & what to gather" items={r.watch_outs} color={C.amber}/>
+
+      <div style={{ fontSize:10, color:C.faint, lineHeight:1.5, padding:"4px 2px 8px" }}>
+        {r.disclaimer || "Educational analysis only, generated from the figures you entered — not tax advice. Confirm with a licensed CPA or Enrolled Agent before filing or acting."}
+      </div>
+    </div>
+  );
+}
+
 function NetWorthPage({ holdingsValue=0, cash=0, margin=0, marginRate=0, properties=[], positionsCount=0, items=[], onSaveItems, onGoto }) {
   const [draft, setDraft] = useState({ kind:"asset", name:"", category:"Cash & savings", amount:"", ratePct:"", growthPct:"", startYear:"", endYear:"" });
   const reValue = properties.reduce((s,p)=>s+n_(p.value),0);
@@ -7071,6 +7390,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   const [reProperties, setREProperties] = useState(loadREProps);
   const [reDeals, setREDeals]           = useState(loadREDeals);
   const [nwItems, setNwItems]           = useState(loadNetWorth);
+  const [taxProfile, setTaxProfile]     = useState(loadTaxProfile);
   const [financialsTicker, setFinancialsTicker] = useState(null);
   applyTheme(theme);   // sync palette into C during render so children read the new colors immediately
 
@@ -7091,6 +7411,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   useEffect(()=>{ saveREProps(reProperties); },[reProperties]);
   useEffect(()=>{ saveREDeals(reDeals); },[reDeals]);
   useEffect(()=>{ saveNetWorth(nwItems); },[nwItems]);
+  useEffect(()=>{ saveTaxProfile(taxProfile); },[taxProfile]);
 
   // Keep-alive: ping the backend every 8 min so Render never cold-starts mid-session
   useEffect(()=>{
@@ -7130,6 +7451,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
         if (data.reProperties?.length) setREProperties(data.reProperties);
         if (data.reDeals?.length)      setREDeals(data.reDeals);
         if (data.nwItems?.length)      setNwItems(data.nwItems);
+        if (data.taxProfile && Object.keys(data.taxProfile).length) setTaxProfile(data.taxProfile);
       }).catch(()=>{});
     } else {
       // Anonymous path: fall back to server positions.json + settings.json
@@ -7142,13 +7464,13 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
   // Save full state to Supabase whenever anything changes (debounced 1s)
   const sbTimer = useRef(null);
   const sbState = useRef({});
-  sbState.current = { positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems };
+  sbState.current = { positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, taxProfile };
   useEffect(()=>{
     if (!userId) return;
     clearTimeout(sbTimer.current);
     sbTimer.current = setTimeout(()=>{ sbSave(userId, sbState.current); }, 1000);
     return ()=>clearTimeout(sbTimer.current);
-  },[positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, userId]);
+  },[positions, closedPositions, watchlist, radar, baselines, margin, marginRate, cash, profile, theme, aiEnabled, alertHistory, accounts, accountCollapsed, savedScreens, projections, reProperties, reDeals, nwItems, taxProfile, userId]);
 
   // SECURITY: the server's positions.json / settings.json are a SHARED, unauthenticated
   // single-tenant store. Logged-in users must NEVER write sensitive holdings there — their
@@ -7417,7 +7739,7 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
             placeholder="Research any ticker or crypto — e.g. NVDA, TSLA, BTC, ETH"
             onPick={(t)=>{ const T=normalizeTicker(t)||t; if(T) setDetail(T); }}/>
           <div style={{ display:"flex", gap:2, background:C.panel, borderRadius:9, padding:3, border:`1px solid ${C.line}`, flexShrink:0, flexWrap:"wrap" }}>
-            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["realestate","Real Estate"],["networth","Net Worth"],["financials","Financials"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
+            {[["watchlist","Watchlist"],["portfolio","Portfolio"],["realestate","Real Estate"],["networth","Net Worth"],["taxes","Taxes"],["financials","Financials"],["brief","Brief"],["map","Map"]].map(([id,label])=>(
               <button key={id} onClick={()=>{ setDetail(null); setTab(id); }}
                 style={{ padding:"6px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12.5, fontWeight:500,
                   background: !detail && tab===id ? C.line : "transparent",
@@ -7577,6 +7899,9 @@ export default function AlphaDesk({ userId = null, userEmail = null }) {
           {tab==="networth" && <NetWorthPage holdingsValue={portfolio?.analytics?.total_value || 0}
             cash={totalCash} margin={totalMargin} marginRate={blendedRate} properties={reProperties} positionsCount={positions.length}
             items={nwItems} onSaveItems={setNwItems} onGoto={setTab}/>}
+          {tab==="taxes" && <TaxesPage taxProfile={taxProfile} onSaveProfile={setTaxProfile}
+            portfolio={portfolio} closedPositions={closedPositions} income={financeCtx.income}
+            marginInterest={Math.round(totalMargin*(Number(blendedRate)||0)/100)} aiEnabled={aiEnabled}/>}
           {tab==="financials" && <FinancialsPage initialTicker={financialsTicker} watchlist={watchlist} aiEnabled={aiEnabled}
             profile={profile ? `${profile.riskTolerance}|${profile.goal}|${profile.style}|${profile.level}` : ""}
             savedScreens={savedScreens} onSaveScreen={saveScreen} onDeleteScreen={deleteScreen} onOpenDetail={setDetail}

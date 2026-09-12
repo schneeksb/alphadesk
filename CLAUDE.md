@@ -2,7 +2,8 @@
 
 One user (Google login required in prod). Core pages: Watchlist (Conviction/Radar tiers),
 Portfolio, Real Estate (buy underwriting for rental/multifamily/flip/commercial + operating
-dashboard + sell-vs-keep — all calculator-driven from user inputs, no market API), Financials
+dashboard + sell-vs-keep — all calculator-driven from user inputs, no market API), Net Worth,
+Taxes (CPA-style minimization plan — figures-only, no PII/documents), Financials
 (analyze/statements/compare/projections/filings), Brief (agentic morning Market Brief).
 Recommendations are research input, not financial advice.
 
@@ -34,6 +35,14 @@ prod deploy, CI on main is only a post-hoc signal.
   `closedPositions` (in the portfolios blob); "Remove" erases without recording.
 - `/value` requires auth in prod (same `require_user` as AI endpoints) — it does real yfinance
   work per call; frontend sends `authHeaders()`.
+- **Taxes tab is FIGURES-ONLY by design (security-first).** The `taxProfile` collects no SSN/name/
+  address and NO documents are uploaded or stored — only numbers + enums, persisted in the user's
+  RLS Supabase row + localStorage. `POST /tax-analysis` (auth-gated, forced tool-use via `_TAX_SCHEMA`)
+  pairs the profile with an in-app investment summary (realized ST/LT from the Closed ledger, unrealized
+  gains/losses + harvest candidates from positions, margin interest) and returns a CPA-style plan
+  (est. liability, prioritized strategies, tax-loss-harvesting table w/ wash-sale flags, retirement/QBI/
+  estimated-tax/deductions). Do NOT add SSN fields, document upload, or IRS-transcript pulling without an
+  explicit new security review — those were deliberately deferred.
 - `SUPABASE_SERVICE_ROLE_KEY`: local `.env` + GitHub Actions secrets ONLY. NEVER frontend, NEVER
   the Render web service. Render gets SUPABASE_URL + SUPABASE_ANON_KEY only.
 - AI endpoints require a verified Supabase login (`require_user`), enforced when `RENDER` or

@@ -3115,6 +3115,74 @@ Sector Exposure: {sector_s or "—"}
         except Exception as e:
             return {"error": str(e)}
 
+    # ── Taxes: CPA-style minimization plan ──────────────────────────────────
+    # SECURITY: this endpoint only ever receives FIGURES the user typed plus an
+    # investment summary derived in-app. It must never be sent (and the frontend
+    # never collects) SSNs, names, addresses, or uploaded documents. Auth-gated
+    # like every other AI endpoint. Educational output — not tax advice.
+    _TAX_SYSTEM = (
+        "You are a meticulous, conservative US tax strategist writing for one taxpayer. "
+        "You produce a prioritized, plain-English plan to legally MINIMIZE their taxes across "
+        "W-2 employment, 1099 / self-employment, business ownership, and investments, using ONLY "
+        "the figures provided. You never see and never ask for SSNs, names, or documents.\n\n"
+        "PRINCIPLES:\n"
+        "- Security & honesty first: if a figure is missing, say what to gather rather than inventing it. "
+        "Give ranges, not false precision — you don't have their full return.\n"
+        "- Rank every strategy by estimated dollar impact and note the effort/complexity.\n"
+        "- Cover, where relevant: pre-tax retirement (401k/403b, Traditional IRA, HSA, SEP/solo-401k), "
+        "Roth vs traditional, backdoor/mega-backdoor Roth; QBI (§199A) and entity choice (Schedule C vs "
+        "S-corp reasonable-comp tradeoff) for business/1099 income; the home-office and self-employment "
+        "deductions and the 1/2-SE-tax deduction; estimated-tax / safe-harbor to avoid underpayment "
+        "penalties; itemized vs standard deduction and bunching/DAF for charity; and investment moves.\n"
+        "- INVESTMENTS: identify tax-loss-harvesting candidates from unrealized losses, separate SHORT- vs "
+        "LONG-term, estimate the benefit at the user's likely marginal rate, and ALWAYS flag wash-sale risk "
+        "(repurchasing the same or substantially identical security within 30 days before/after). Note "
+        "long-term vs short-term rate arbitrage, gain/loss matching, and §1211 $3,000 net-loss limit.\n"
+        "- Use the current tax year's real, well-known federal parameters where you are confident; hedge "
+        "state specifics to the named state. Keep numbers clearly labeled as estimates.\n"
+        "- End with a clear disclaimer: this is educational analysis, not tax advice; confirm with a licensed CPA/EA.\n"
+        "Respond via the emit_analysis tool only."
+    )
+    _TAX_SCHEMA = _s(
+        tax_year="int",
+        summary="str",
+        est_total_tax="str",
+        est_effective_rate="str",
+        est_marginal_bracket="str",
+        strategies=_arr(_s(title="str", category="str", detail="str", est_savings="str", effort="str", priority="int")),
+        tax_loss_harvesting=_arr(_s(ticker="str", term="str", loss="str", est_benefit="str", wash_sale_risk="str", note="str")),
+        retirement_moves="strs",
+        business_qbi="strs",
+        estimated_tax="strs",
+        deductions="strs",
+        watch_outs="strs",
+        disclaimer="str",
+    )
+
+    @app.post("/tax-analysis")
+    def tax_analysis_endpoint(payload: dict = Body(default={}), authorization: str = Header(None)):
+        require_user(authorization)
+        try:
+            prof = payload.get("profile") or {}
+            inv  = payload.get("investments") or {}
+            client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            prompt = (
+                f"Date: {datetime.date.today()}.\n\n"
+                "TAX PROFILE (figures the taxpayer entered — no identifying info):\n"
+                f"{json.dumps(prof, default=str, indent=2)}\n\n"
+                "INVESTMENT ACTIVITY (derived from their in-app portfolio & ledgers):\n"
+                f"{json.dumps(inv, default=str, indent=2)}\n\n"
+                "Produce the prioritized minimization plan. Ground the tax-loss-harvesting section in the "
+                "harvest_candidates above (short vs long term, benefit at their marginal rate, wash-sale "
+                "caution). If key inputs are missing, put what to gather in watch_outs rather than guessing."
+            )
+            data = _ai_json(client, prompt, max_tokens=3200, schema=_TAX_SCHEMA,
+                system=[{"type": "text", "text": _TAX_SYSTEM, "cache_control": {"type": "ephemeral"}}])
+            return _json_safe({"generated_at": datetime.datetime.now().isoformat(), **data})
+        except Exception as e:
+            return {"error": str(e)}
+
+
     @app.get("/sector")
     def sector_endpoint(name: str, authorization: str = Header(None)):
         # Drill-down: AI explanation of what's driving a sector + 30-90 day forecast.
